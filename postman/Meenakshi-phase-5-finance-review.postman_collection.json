@@ -1,0 +1,49 @@
+{
+  "info": {
+    "name": "Meenakshi - Phase 5 Finance review and Credit Notes",
+    "description": "Import only after the Phase 5 migration is applied. Set collection variables locally; do not commit access tokens, bridge credentials, or real passwords.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "api_base", "value": "http://localhost:3001" },
+    { "key": "access_token", "value": "" },
+    { "key": "company_id", "value": "" },
+    { "key": "proposal_id", "value": "" },
+    { "key": "proposal_evaluation_id", "value": "" },
+    { "key": "evaluation_run_id", "value": "" },
+    { "key": "credit_note_posting_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. List proposal review queue",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('queue returns successfully', () => pm.response.to.have.status(200));", "const eligible = pm.response.json().proposals?.find((proposal) => proposal.status === 'eligible' && proposal.latestEvaluation);", "if (eligible) { pm.collectionVariables.set('proposal_id', eligible.id); pm.collectionVariables.set('proposal_evaluation_id', eligible.latestEvaluation.id); }"] } }],
+      "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }], "url": "{{api_base}}/api/companies/{{company_id}}/evaluations/proposals" }
+    },
+    {
+      "name": "2. Queue fresh evidence for selected proposal",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('review refresh is accepted', () => pm.response.to.have.status(202));", "const run = pm.response.json().evaluationRun; if (run?.id) pm.collectionVariables.set('evaluation_run_id', run.id);"] } }],
+      "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{}" }, "url": "{{api_base}}/api/companies/{{company_id}}/evaluations/proposals/{{proposal_id}}/refresh" },
+      "description": "Keep the evaluator, outbox worker, and bridge running. Poll the returned run using the Phase 4 collection until it is completed, then re-run request 1 before approval. The completed review refresh expires after 15 minutes."
+    },
+    {
+      "name": "3. Approve selected proposal and queue Credit Note",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('approval queues Credit Note', () => pm.expect(pm.response.code).to.be.oneOf([200, 202]));", "const body = pm.response.json(); if (body.creditNotePostingId) pm.collectionVariables.set('credit_note_posting_id', body.creditNotePostingId);"] } }],
+      "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"decision\": \"approve\"\n}" }, "url": "{{api_base}}/api/companies/{{company_id}}/evaluations/proposals/{{proposal_id}}/review" },
+      "description": "Finance Approver only. The server, not Postman, derives all financial/Tally fields. The database rejects approval if the targeted review refresh is stale or does not match."
+    },
+    {
+      "name": "4. Reject selected proposal (test-only alternate flow)",
+      "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"decision\": \"reject\",\n  \"proposalEvaluationId\": \"{{proposal_evaluation_id}}\",\n  \"reason\": \"Local test rejection - verify audit and review queue behavior\"\n}" }, "url": "{{api_base}}/api/companies/{{company_id}}/evaluations/proposals/{{proposal_id}}/review" },
+      "description": "Run only with a disposable test proposal. Re-evaluate before trying an approval flow."
+    },
+    {
+      "name": "5. List Credit Note lifecycle",
+      "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }], "url": "{{api_base}}/api/companies/{{company_id}}/credit-notes" }
+    },
+    {
+      "name": "6. Retry failed or correction-required posting",
+      "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"reason\": \"Local test retry after resolving the reported Tally mismatch\"\n}" }, "url": "{{api_base}}/api/companies/{{company_id}}/credit-notes/{{credit_note_posting_id}}/retry" },
+      "description": "Use only after status is failed or correction_required. The endpoint rejects unsafe duplicate posting retries."
+    }
+  ]
+}

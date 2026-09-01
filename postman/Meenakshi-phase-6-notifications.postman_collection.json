@@ -1,0 +1,120 @@
+{
+  "info": {
+    "name": "Meenakshi - Phase 6 MSG91 notifications",
+    "description": "Use after the earlier `phase 6-old` migration plus the Phase 6 safety-upgrade and contact-order repair migrations are applied. This collection contains no MSG91 key and cannot send arbitrary WhatsApp text or choose a phone number.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "api_base", "value": "http://localhost:3001" },
+    { "key": "access_token", "value": "" },
+    { "key": "company_id", "value": "" },
+    { "key": "contact_id", "value": "" },
+    { "key": "proposal_id", "value": "" },
+    { "key": "template_id", "value": "" },
+    { "key": "credit_note_posting_id", "value": "" },
+    { "key": "notification_message_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. List controlled contacts",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('contacts are readable', () => pm.response.to.have.status(200));", "const contact = pm.response.json().contacts?.find((item) => item.is_active);", "if (contact) pm.collectionVariables.set('contact_id', contact.id);"] } }],
+      "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }], "url": "{{api_base}}/api/companies/{{company_id}}/contacts" }
+    },
+    {
+      "name": "2. Record WhatsApp opt-in",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"isOptedIn\": true,\n  \"source\": \"phase_6_local_test_consent\",\n  \"evidence\": { \"record\": \"local test\" }\n}" },
+        "url": "{{api_base}}/api/companies/{{company_id}}/contacts/{{contact_id}}/opt-ins"
+      },
+      "description": "Administrator only. This does not create a message by itself; it authorizes a controlled event for this contact."
+    },
+    {
+      "name": "3. List approved message templates",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('templates are readable', () => pm.response.to.have.status(200));", "const template = pm.response.json().templates?.find((item) => item.is_active);", "if (template) pm.collectionVariables.set('template_id', template.id);"] } }],
+      "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }], "url": "{{api_base}}/api/companies/{{company_id}}/message-templates" }
+    },
+    {
+      "name": "4. Create approved CD shortfall template",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('template is created', () => pm.response.to.have.status(201));", "const template = pm.response.json().template; if (template?.id) pm.collectionVariables.set('template_id', template.id);"] } }],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"eventType\": \"cd_shortfall\",\n  \"name\": \"CD shortfall reminder - local test\",\n  \"providerTemplateId\": \"replace_with_msg91_approved_template\",\n  \"languageCode\": \"en\",\n  \"componentSchema\": {\n    \"components\": [\n      { \"component\": \"body_var_1\", \"value\": \"customerName\" },\n      { \"component\": \"body_var_2\", \"value\": \"paidAmountDisplay\" },\n      { \"component\": \"body_var_3\", \"value\": \"shortfallAmountDisplay\" },\n      { \"component\": \"body_var_4\", \"value\": \"eligibilityDeadline\" }\n    ]\n  },\n  \"isActive\": true\n}" },
+        "url": "{{api_base}}/api/companies/{{company_id}}/message-templates"
+      },
+      "description": "Administrator only. Replace the provider template ID and component names with the MSG91-approved template before any real delivery."
+    },
+    {
+      "name": "5. Update approved template metadata",
+      "request": {
+        "method": "PATCH",
+        "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"name\": \"CD shortfall reminder - local test v2\"\n}" },
+        "url": "{{api_base}}/api/companies/{{company_id}}/message-templates/{{template_id}}"
+      },
+      "description": "Template changes are rejected while the template has queued, retrying, or sending messages."
+    },
+    {
+      "name": "6. Queue a current CD shortfall event",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('a safe result is returned', () => pm.expect(pm.response.code).to.be.oneOf([201, 409]));", "const body = pm.response.json(); if (body.messageId) pm.collectionVariables.set('notification_message_id', body.messageId);"] } }],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"proposalId\": \"{{proposal_id}}\"\n}" },
+        "url": "{{api_base}}/api/companies/{{company_id}}/notifications/shortfall"
+      },
+      "description": "Requires a current CD proposal whose status is near_eligibility with positive shortfall, plus the opt-in and active template. A 409 with blockedReason is the expected safe response otherwise."
+    },
+    {
+      "name": "7. List notification queue",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('queue is readable', () => pm.response.to.have.status(200));", "const message = pm.response.json().messages?.[0];", "if (message) pm.collectionVariables.set('notification_message_id', message.id);"] } }],
+      "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }], "url": "{{api_base}}/api/companies/{{company_id}}/notifications" }
+    },
+    {
+      "name": "7a. Recover verified Credit Note notification",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('a safe recovery result is returned', () => pm.expect(pm.response.code).to.be.oneOf([201, 409]));", "const body = pm.response.json(); if (body.messageId) pm.collectionVariables.set('notification_message_id', body.messageId);"] } }],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"creditNotePostingId\": \"{{credit_note_posting_id}}\"\n}" },
+        "url": "{{api_base}}/api/companies/{{company_id}}/notifications/credit-note-recovery"
+      },
+      "description": "Administrator only. Use only to recover the one idempotent event for a Credit Note already verified in Tally before notification setup. It accepts no phone number, template, or message content."
+    },
+    {
+      "name": "8. Read notification queue health",
+      "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }], "url": "{{api_base}}/api/companies/{{company_id}}/notifications/health" }
+    },
+    {
+      "name": "9. Preview frozen notification variables",
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"notificationMessageId\": \"{{notification_message_id}}\"\n}" },
+        "url": "{{api_base}}/api/companies/{{company_id}}/notifications/previews"
+      }
+    },
+    {
+      "name": "10. Read notification delivery attempts",
+      "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }], "url": "{{api_base}}/api/companies/{{company_id}}/notifications/{{notification_message_id}}" }
+    },
+    {
+      "name": "11. Queue audited resend",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('resend is queued only when eligible', () => pm.expect(pm.response.code).to.be.oneOf([201, 400, 409]));"] } }],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" }, { "key": "Idempotency-Key", "value": "phase6-resend-local-test-001" }],
+        "body": { "mode": "raw", "raw": "{\n  \"reason\": \"Local Phase 6 resend audit test\"\n}" },
+        "url": "{{api_base}}/api/companies/{{company_id}}/notifications/{{notification_message_id}}/resend"
+      },
+      "description": "Administrator only. Use after mock delivery makes the original message sent or failed. Repeating the same Idempotency-Key returns the same resend event."
+    },
+    {
+      "name": "12. Read MSG91 provider catalog (live credentials only)",
+      "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }], "url": "{{api_base}}/api/companies/{{company_id}}/message-templates?providerCatalog=true" },
+      "description": "Optional. Skip in mock mode. This is server-side and never returns the MSG91 auth key."
+    }
+  ]
+}

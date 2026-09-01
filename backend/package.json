@@ -1,0 +1,41 @@
+{
+  "name": "meenakshi-backend",
+  "private": true,
+  "version": "0.1.0",
+  "engines": {
+    "node": "24.x",
+    "npm": "11.x"
+  },
+  "scripts": {
+    "dev": "node ./scripts/dev.mjs",
+    "build": "next build --turbopack",
+    "start": "node --use-system-ca node_modules/next/dist/bin/next start",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --import tsx --test src/lib/security.test.mjs src/lib/tally/contracts.test.mjs src/lib/evaluation/evaluation.test.mjs src/lib/evaluation/run-batches.test.mjs src/lib/notifications/notifications.test.mjs src/lib/operations.test.mjs",
+    "provision:test-access": "node --env-file=.env.local ./scripts/provision-test-access.mjs",
+    "worker:tally-outbox": "node --use-system-ca ./worker/process-tally-outbox.mjs",
+    "worker:tally-outbox:local": "node --use-system-ca --env-file=.env.local ./worker/process-tally-outbox.mjs",
+    "worker:evaluations": "node --use-system-ca --import tsx ./worker/process-evaluation-runs.mjs",
+    "worker:evaluations:local": "node --use-system-ca --env-file=.env.local --import tsx ./worker/process-evaluation-runs.mjs",
+    "worker:notifications": "node --use-system-ca --import tsx ./worker/process-notification-outbox.mjs",
+    "worker:notifications:local": "node --use-system-ca --env-file=.env.local --import tsx ./worker/process-notification-outbox.mjs"
+  },
+  "dependencies": {
+    "@supabase/ssr": "^0.10.2",
+    "@supabase/supabase-js": "^2.103.0",
+    "decimal.js": "^10.6.0",
+    "next": "^15.5.10",
+    "react": "^19.1.5",
+    "react-dom": "^19.1.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.6",
+    "@types/react": "^19.1.5",
+    "@types/react-dom": "^19.1.5",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "^15.5.10",
+    "tsx": "^4.23.5",
+    "typescript": "^5.8.2"
+  }
+}

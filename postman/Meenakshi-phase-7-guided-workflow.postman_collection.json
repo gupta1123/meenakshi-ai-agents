@@ -1,0 +1,64 @@
+{
+  "info": {
+    "name": "Meenakshi - Phase 7 guided workflow extension",
+    "description": "Supplement to the existing Phase 7 operations collection. Verifies connector recovery role boundaries, sanitized message/document reads, and review-only guards. Do not run the credential-rotation request on a bridge that is currently in use unless you intend to re-pair it.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "api_base", "value": "http://localhost:3001" },
+    { "key": "access_token", "value": "" },
+    { "key": "finance_access_token", "value": "" },
+    { "key": "company_id", "value": "" },
+    { "key": "connector_id", "value": "" },
+    { "key": "binding_id", "value": "" },
+    { "key": "notification_message_id", "value": "" },
+    { "key": "credit_note_posting_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. Read safe operations health",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('health is readable', () => pm.response.to.have.status(200));",
+        "const body = pm.response.json();",
+        "pm.test('alerts carry a safe detail target when one is available', () => pm.expect(body.alerts || []).to.be.an('array'));",
+        "pm.test('health omits raw Tally XML and provider secrets', () => { const text = pm.response.text(); pm.expect(text).to.not.include('<ENVELOPE'); pm.expect(text.toLowerCase()).to.not.include('msg91_authkey'); });"
+      ] } }],
+      "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }], "url": "{{api_base}}/api/companies/{{company_id}}/operations/health" }
+    },
+    {
+      "name": "2. Finance Approver cannot rotate a bridge credential",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Finance Approver is forbidden', () => pm.response.to.have.status(403));"] } }],
+      "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{finance_access_token}}" }], "url": "{{api_base}}/api/connectors/{{connector_id}}/rotate-credential" }
+    },
+    {
+      "name": "3. Administrator rotates bridge credential (intentional recovery test)",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('credential rotation is Administrator-only and returns a one-time token', () => pm.response.to.have.status(200));",
+        "pm.test('only the immediate response contains the one-time control token', () => pm.expect(pm.response.json().controlToken).to.be.a('string').and.not.empty);"
+      ] } }],
+      "request": { "method": "POST", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }], "url": "{{api_base}}/api/connectors/{{connector_id}}/rotate-credential" },
+      "description": "Run only with a disposable/local connector. Immediately use the returned value in the Tally-host configure command and pair again."
+    },
+    {
+      "name": "4. Finance Approver reads sanitized message detail",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('authorized message detail is readable', () => pm.response.to.have.status(200));",
+        "pm.test('detail has no raw payload or provider response', () => { const text = pm.response.text(); pm.expect(text).to.not.include('template_snapshot'); pm.expect(text).to.not.include('provider_response'); pm.expect(text).to.not.include('provider_metadata'); pm.expect(text).to.not.include('payload'); });"
+      ] } }],
+      "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{finance_access_token}}" }], "url": "{{api_base}}/api/companies/{{company_id}}/notifications/{{notification_message_id}}" }
+    },
+    {
+      "name": "5. Finance Approver reads safe verified-document state",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('verified document state is readable', () => pm.response.to.have.status(200));",
+        "pm.test('response has no raw storage path', () => pm.expect(pm.response.text()).to.not.include('document_storage_path'));"
+      ] } }],
+      "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{finance_access_token}}" }], "url": "{{api_base}}/api/companies/{{company_id}}/credit-notes/{{credit_note_posting_id}}/document" }
+    },
+    {
+      "name": "6. Finance Approver cannot deactivate a company binding",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Finance Approver is forbidden from binding changes', () => pm.response.to.have.status(403));"] } }],
+      "request": { "method": "PATCH", "header": [{ "key": "Authorization", "value": "Bearer {{finance_access_token}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"isActive\": false\n}" }, "url": "{{api_base}}/api/connectors/{{connector_id}}/bindings/{{binding_id}}" }
+    }
+  ]
+}

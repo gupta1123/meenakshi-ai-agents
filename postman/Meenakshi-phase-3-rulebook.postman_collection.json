@@ -1,0 +1,146 @@
+{
+  "info": {
+    "_postman_id": "3bc72320-8397-42f0-9db0-9419a4531e8f",
+    "name": "Meenakshi local API — Phase 3 Rulebook",
+    "description": "Administrator-only local Rulebook checks. Apply 20260804000000_phase_3_rulebook_activation.sql first. Set the blank variables from Bootstrap and rulebook/reference-data. No service-role key, bridge token, or password belongs in this collection.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "api_base", "value": "http://localhost:3001", "type": "string" },
+    { "key": "access_token", "value": "", "type": "string" },
+    { "key": "company_id", "value": "", "type": "string" },
+    { "key": "calendar_id", "value": "", "type": "string" },
+    { "key": "scheme_id", "value": "", "type": "string" },
+    { "key": "version_id", "value": "", "type": "string" },
+    { "key": "customer_group_id", "value": "", "type": "string" },
+    { "key": "customer_id", "value": "", "type": "string" },
+    { "key": "credit_note_voucher_type_id", "value": "", "type": "string" },
+    { "key": "discount_ledger_id", "value": "", "type": "string" },
+    { "key": "stock_item_id", "value": "", "type": "string" },
+    { "key": "source_uom_id", "value": "", "type": "string" },
+    { "key": "contact_id", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "1. Read Rulebook reference data",
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" } ],
+        "url": "{{api_base}}/api/companies/{{company_id}}/rulebook/reference-data",
+        "description": "Run after a current master sync. Copy the required UUIDs from its safe master lists into the blank collection variables."
+      }
+    },
+    {
+      "name": "2. Create working calendar",
+      "event": [ { "listen": "test", "script": { "type": "text/javascript", "exec": [ "pm.test('calendar is created', () => pm.response.to.have.status(201));", "pm.collectionVariables.set('calendar_id', pm.response.json().calendar.id);" ] } } ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{\n  \"name\": \"Meenakshi local FY26 calendar\",\n  \"nonWorkingWeekdays\": [7]\n}", "options": { "raw": { "language": "json" } } },
+        "url": "{{api_base}}/api/companies/{{company_id}}/calendars"
+      }
+    },
+    {
+      "name": "3. Add holiday to calendar",
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{\n  \"holidayDate\": \"2026-10-20\",\n  \"name\": \"Local test holiday\",\n  \"isActive\": true\n}", "options": { "raw": { "language": "json" } } },
+        "url": "{{api_base}}/api/companies/{{company_id}}/calendars/{{calendar_id}}/holidays"
+      }
+    },
+    {
+      "name": "4. Record Credit Note tax-policy evidence",
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{\n  \"gstTreatment\": \"commercial_no_gst\",\n  \"effectiveFrom\": \"2026-04-01\",\n  \"effectiveTo\": \"2027-03-31\",\n  \"approvalReference\": \"LOCAL-TEST-ONLY\",\n  \"approverName\": \"Local Test Administrator\",\n  \"approvedAt\": \"2026-04-01T09:00:00.000Z\"\n}", "options": { "raw": { "language": "json" } } },
+        "url": "{{api_base}}/api/companies/{{company_id}}/credit-note-tax-policies",
+        "description": "Local test evidence only. Use real Finance/CA evidence before any production activation."
+      }
+    },
+    {
+      "name": "5. Create CD scheme",
+      "event": [ { "listen": "test", "script": { "type": "text/javascript", "exec": [ "pm.test('scheme is created', () => pm.response.to.have.status(201));", "pm.collectionVariables.set('scheme_id', pm.response.json().scheme.id);" ] } } ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{\n  \"schemeType\": \"cd\",\n  \"code\": \"CD_LOCAL_FY26\",\n  \"name\": \"Local CD test FY26\",\n  \"description\": \"Non-production API smoke test\"\n}", "options": { "raw": { "language": "json" } } },
+        "url": "{{api_base}}/api/companies/{{company_id}}/schemes"
+      }
+    },
+    {
+      "name": "6. Create CD draft version",
+      "event": [ { "listen": "test", "script": { "type": "text/javascript", "exec": [ "pm.test('draft version is created', () => pm.response.to.have.status(201));", "pm.collectionVariables.set('version_id', pm.response.json().version.id);" ] } } ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{\n  \"effectiveFrom\": \"2026-04-01\",\n  \"effectiveTo\": \"2027-03-31\",\n  \"discountPercentage\": \"2.5000\",\n  \"requiresApproval\": true,\n  \"roundingMethod\": \"half_up\",\n  \"roundingScale\": 2,\n  \"creditNoteVoucherTypeId\": \"{{credit_note_voucher_type_id}}\",\n  \"discountLedgerId\": \"{{discount_ledger_id}}\",\n  \"workingCalendarId\": \"{{calendar_id}}\",\n  \"allowedWorkingDays\": 10\n}", "options": { "raw": { "language": "json" } } },
+        "url": "{{api_base}}/api/companies/{{company_id}}/schemes/{{scheme_id}}/versions"
+      }
+    },
+    {
+      "name": "7. Add customer-group coverage",
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{ \"customerGroupId\": \"{{customer_group_id}}\" }", "options": { "raw": { "language": "json" } } },
+        "url": "{{api_base}}/api/companies/{{company_id}}/scheme-versions/{{version_id}}/groups"
+      }
+    },
+    {
+      "name": "8. Validate draft version",
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" } ],
+        "url": "{{api_base}}/api/companies/{{company_id}}/scheme-versions/{{version_id}}/validate",
+        "description": "Do not activate until validation.valid is true. Every issue is intentionally returned to make configuration gaps clear."
+      }
+    },
+    {
+      "name": "9. Activate valid draft version",
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" } ],
+        "url": "{{api_base}}/api/companies/{{company_id}}/scheme-versions/{{version_id}}/activate",
+        "description": "For a local smoke test only after validation succeeds. This is irreversible for the version: active versions are immutable."
+      }
+    },
+    {
+      "name": "10. Create controlled customer contact",
+      "event": [ { "listen": "test", "script": { "type": "text/javascript", "exec": [ "pm.test('contact is created', () => pm.response.to.have.status(201));", "pm.collectionVariables.set('contact_id', pm.response.json().contact.id);" ] } } ],
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{\n  \"customerId\": \"{{customer_id}}\",\n  \"phoneE164\": \"+919876543210\",\n  \"contactName\": \"Local test contact\",\n  \"isPrimary\": true\n}", "options": { "raw": { "language": "json" } } },
+        "url": "{{api_base}}/api/companies/{{company_id}}/contacts"
+      }
+    },
+    {
+      "name": "11. Record explicit WhatsApp opt-in",
+      "request": {
+        "method": "POST",
+        "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" } ],
+        "body": { "mode": "raw", "raw": "{\n  \"isOptedIn\": true,\n  \"source\": \"local test consent\",\n  \"recordedAt\": \"2026-04-01T09:00:00.000Z\",\n  \"evidence\": { \"reference\": \"LOCAL-TEST-ONLY\" }\n}", "options": { "raw": { "language": "json" } } },
+        "url": "{{api_base}}/api/companies/{{company_id}}/contacts/{{contact_id}}/opt-ins"
+      }
+    },
+    {
+      "name": "12. TOD examples — add stock, conversion, tier",
+      "item": [
+        {
+          "name": "Add stock item",
+          "request": { "method": "POST", "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" } ], "body": { "mode": "raw", "raw": "{ \"kind\": \"stockItem\", \"id\": \"{{stock_item_id}}\" }", "options": { "raw": { "language": "json" } } }, "url": "{{api_base}}/api/companies/{{company_id}}/scheme-versions/{{version_id}}/stocks" }
+        },
+        {
+          "name": "Add UOM conversion",
+          "request": { "method": "POST", "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" } ], "body": { "mode": "raw", "raw": "{ \"sourceUomId\": \"{{source_uom_id}}\", \"isBuiltin\": false, \"tonnesPerSourceUnit\": \"0.001000000\" }", "options": { "raw": { "language": "json" } } }, "url": "{{api_base}}/api/companies/{{company_id}}/scheme-versions/{{version_id}}/conversions" }
+        },
+        {
+          "name": "Add TOD tier",
+          "request": { "method": "POST", "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" } ], "body": { "mode": "raw", "raw": "{ \"minimumTonnes\": \"100.000000\", \"discountPercentage\": \"1.2500\" }", "options": { "raw": { "language": "json" } } }, "url": "{{api_base}}/api/companies/{{company_id}}/scheme-versions/{{version_id}}/tiers" }
+        }
+      ]
+    }
+  ]
+}
