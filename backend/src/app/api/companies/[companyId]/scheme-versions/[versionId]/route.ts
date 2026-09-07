@@ -1,5 +1,5 @@
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
-import { readBoolean, readCashDiscountSlabs, readDate, readInteger, readPositiveDecimal, readRequiredUuid, requireAvailableReference, requireDraftVersion, requireGlobalWorkingCalendar, requireRulebookVersionForCompany, RulebookRequestError, rulebookErrorResponse, toVersionResponse, validateTodPeriod } from "@/lib/rulebook/shared";
+import { readBoolean, readCashDiscountSlabs, readDate, readInteger, readPositiveDecimal, readRequiredUuid, readTodBenefitBasis, requireAvailableReference, requireDraftVersion, requireGlobalWorkingCalendar, requireRulebookVersionForCompany, RulebookRequestError, rulebookErrorResponse, toVersionResponse, validateTodPeriod } from "@/lib/rulebook/shared";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 type RouteContext = { params: Promise<{ companyId: string; versionId: string }> };
@@ -33,7 +33,7 @@ export async function GET(request: Request, context: RouteContext) {
       supabase.from("scheme_version_stock_groups").select("stock_group_id").eq("scheme_version_id", version.id),
       supabase.from("scheme_version_stock_group_coverage").select("stock_group_id, created_at").eq("scheme_version_id", version.id),
       supabase.from("scheme_version_unit_conversions").select("source_uom_id, tonnes_per_source_unit, is_builtin, approved_by, approved_at, created_at").eq("scheme_version_id", version.id).order("created_at"),
-      supabase.from("scheme_version_tiers").select("id, minimum_tonnes, discount_percentage, created_at").eq("scheme_version_id", version.id).order("minimum_tonnes"),
+      supabase.from("scheme_version_tiers").select("id, minimum_tonnes, discount_percentage, discount_amount_per_tonne, created_at").eq("scheme_version_id", version.id).order("minimum_tonnes"),
       supabase.from("scheme_version_cd_slabs").select("id, allowed_working_days, discount_percentage").eq("scheme_version_id", version.id).order("allowed_working_days"),
     ]);
     const errors = [groups.error, coverage.error, stockItems.error, stockGroups.error, stockCoverage.error, conversions.error, tiers.error, cdSlabs.error].filter(Boolean);
@@ -92,6 +92,12 @@ export async function PATCH(request: Request, context: RouteContext) {
       if (body.checkNarration !== undefined) update.cd_check_narration = readBoolean(body.checkNarration, "checkNarration");
       if (body.nearEligibilityPercent !== undefined) update.near_eligibility_percent = readPositiveDecimal(body.nearEligibilityPercent, "nearEligibilityPercent", { maxScale: 2 });
     } else {
+      if (body.todBenefitBasis !== undefined && body.todBenefitBasis !== version.tod_benefit_basis) {
+        const { count, error } = await createSupabaseAdminClient().from("scheme_version_tiers").select("id", { count: "exact", head: true }).eq("scheme_version_id", version.id);
+        if (error) throw error;
+        if (count) throw new RulebookRequestError("Remove the existing TOD tiers before changing how its benefit is calculated.", 409);
+        update.tod_benefit_basis = readTodBenefitBasis(body.todBenefitBasis);
+      }
       if (body.periodMonths !== undefined) update.period_months = readInteger(body.periodMonths, "periodMonths", 1, 36);
       if (body.periodAnchorDate !== undefined) update.period_anchor_date = readDate(body.periodAnchorDate, "periodAnchorDate");
       update.tod_review_calendar_id = calendar.id;
@@ -123,7 +129,7 @@ export async function PATCH(request: Request, context: RouteContext) {
     if (!savedResult?.versionId) throw new Error("The saved working copy was not returned.");
     const { data, error } = await supabase
       .from("scheme_versions")
-      .select("id, company_id, scheme_id, scheme_type, version_number, status, effective_from, effective_to, discount_percentage, calculation_base, rounding_method, rounding_scale, gst_treatment, credit_note_voucher_type_id, discount_ledger_id, requires_approval, working_calendar_id, allowed_working_days, near_eligibility_percent, cd_invoice_treatment, cd_narration_mode, cd_check_narration, period_months, period_anchor_date, tod_review_calendar_id, created_at, updated_at")
+      .select("id, company_id, scheme_id, scheme_type, version_number, status, effective_from, effective_to, discount_percentage, calculation_base, rounding_method, rounding_scale, gst_treatment, credit_note_voucher_type_id, discount_ledger_id, requires_approval, working_calendar_id, allowed_working_days, near_eligibility_percent, cd_invoice_treatment, cd_narration_mode, cd_check_narration, period_months, period_anchor_date, tod_review_calendar_id, tod_benefit_basis, created_at, updated_at")
       .eq("id", savedResult.versionId)
       .single();
     if (error) throw error;

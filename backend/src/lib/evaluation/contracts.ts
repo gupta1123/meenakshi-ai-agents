@@ -118,8 +118,11 @@ export type BillAllocationEvidence = {
 export type Tier = {
   id: string;
   minimumTonnes: DecimalString;
-  percentage: DecimalString;
+  percentage: DecimalString | null;
+  amountPerTonne: DecimalString | null;
 };
+
+export type TodBenefitBasis = "percentage_of_eligible_value" | "amount_per_eligible_tonne";
 
 export type UnitConversion = {
   id: string;
@@ -152,6 +155,7 @@ export type FrozenCdRule = FrozenRuleBase & {
 
 export type FrozenTodRule = FrozenRuleBase & {
   schemeType: "tod";
+  todBenefitBasis: TodBenefitBasis;
   periodAnchorDate: IsoDate;
   periodMonths: number;
   selectedStockItemIds: string[];

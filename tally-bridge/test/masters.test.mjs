@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { filterCustomersInGroupTree, parseCustomerGroups, parseCustomers, parseStockItems } from "../src/tally/masters.mjs";
+import { filterCustomersInGroupTree, parseCustomerGroups, parseCustomers, parseLedgers, parseStockItems } from "../src/tally/masters.mjs";
 
 test("master parsers preserve Tally source identities and hierarchy references", () => {
   const groups = parseCustomerGroups("<ENVELOPE><GROUP NAME=\"Retail\"><GUID>grp-retail</GUID><MASTERID>12</MASTERID><ALTERID>4</ALTERID><PARENTGUID>grp-debtors</PARENTGUID></GROUP></ENVELOPE>");
@@ -18,6 +18,17 @@ test("stock and customer parsers retain the references needed for later CD/TOD e
   const customers = parseCustomers("<ENVELOPE><LEDGER NAME=\"ACME\"><GUID>cust-1</GUID><PARENTGUID>grp-retail</PARENTGUID><PARTYGSTIN>29ABCDE1234F1Z5</PARTYGSTIN><MOBILE>9999999999</MOBILE></LEDGER></ENVELOPE>");
   assert.equal(customers[0].customerGroupGuid, "grp-retail");
   assert.equal(customers[0].sourcePayload.phone, "9999999999");
+});
+
+test("ledger parser prefers Tally's GST applicability and normalizes the legacy No flag", () => {
+  const ledgers = parseLedgers(`
+    <ENVELOPE>
+      <LEDGER NAME="Turnover Discount Allowed"><GUID>ledger-1</GUID><PARENT>Indirect Expenses</PARENT><GSTAPPLICABLE>No</GSTAPPLICABLE><GSTAPPLICABILITY>Not Applicable</GSTAPPLICABILITY></LEDGER>
+      <LEDGER NAME="Cash Discount Allowed"><GUID>ledger-2</GUID><PARENT>Indirect Expenses</PARENT><GSTAPPLICABLE>No</GSTAPPLICABLE></LEDGER>
+    </ENVELOPE>
+  `);
+  assert.equal(ledgers[0].gstApplicability, "Not Applicable");
+  assert.equal(ledgers[1].gstApplicability, "Not Applicable");
 });
 
 test("customer filtering includes nested Sundry Debtors groups and excludes unrelated ledgers", () => {

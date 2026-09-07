@@ -33,6 +33,7 @@ export type RulebookVersionRow = {
   period_months: number | null;
   period_anchor_date: string | null;
   tod_review_calendar_id: string | null;
+  tod_benefit_basis: "percentage_of_eligible_value" | "amount_per_eligible_tonne" | null;
   created_at: string;
   updated_at: string;
 };
@@ -120,6 +121,11 @@ export function readPositiveDecimal(value: unknown, field: string, options?: { a
     throw new RulebookRequestError(`${field} must be greater than zero.`);
   }
   return normalized;
+}
+
+export function readTodBenefitBasis(value: unknown, field = "todBenefitBasis") {
+  if (value === "percentage_of_eligible_value" || value === "amount_per_eligible_tonne") return value;
+  throw new RulebookRequestError(`${field} must be percentage_of_eligible_value or amount_per_eligible_tonne.`);
 }
 
 export function readBoolean(value: unknown, field: string) {
@@ -231,7 +237,7 @@ export async function findRulebookVersion(versionId: string) {
   if (!isUuid(versionId)) throw new RulebookRequestError("Invalid scheme version id.");
   const { data, error } = await createSupabaseAdminClient()
     .from("scheme_versions")
-    .select("id, company_id, scheme_id, scheme_type, version_number, status, effective_from, effective_to, discount_percentage, calculation_base, rounding_method, rounding_scale, gst_treatment, credit_note_voucher_type_id, discount_ledger_id, requires_approval, working_calendar_id, allowed_working_days, near_eligibility_percent, cd_invoice_treatment, cd_narration_mode, cd_check_narration, period_months, period_anchor_date, tod_review_calendar_id, created_at, updated_at")
+    .select("id, company_id, scheme_id, scheme_type, version_number, status, effective_from, effective_to, discount_percentage, calculation_base, rounding_method, rounding_scale, gst_treatment, credit_note_voucher_type_id, discount_ledger_id, requires_approval, working_calendar_id, allowed_working_days, near_eligibility_percent, cd_invoice_treatment, cd_narration_mode, cd_check_narration, period_months, period_anchor_date, tod_review_calendar_id, tod_benefit_basis, created_at, updated_at")
     .eq("id", versionId)
     .maybeSingle();
   if (error) throw error;
@@ -375,6 +381,7 @@ export function toVersionResponse(version: RulebookVersionRow) {
     periodMonths: version.period_months,
     periodAnchorDate: version.period_anchor_date,
     todReviewCalendarId: version.tod_review_calendar_id,
+    todBenefitBasis: version.tod_benefit_basis,
     createdAt: version.created_at,
     updatedAt: version.updated_at,
   };

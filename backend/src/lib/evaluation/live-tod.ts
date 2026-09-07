@@ -121,7 +121,12 @@ export async function evaluateLiveTodAggregate(run: EvaluationRunRecord, aggrega
   else { status = "tracking"; reasonCodes.push("tier_not_achieved"); }
 
   const sourceFingerprint = fingerprintEvidence({ rule: rule.sourceSnapshot, customer: customer.id, connector: aggregate.sourceFingerprint });
-  const calculatedDiscount = achievedTier ? percentOf(eligibleTaxableValue, achievedTier.percentage) : decimal(0);
+  const usesAmountPerTonne = rule.todBenefitBasis === "amount_per_eligible_tonne";
+  const calculatedDiscount = !achievedTier
+    ? decimal(0)
+    : usesAmountPerTonne
+      ? eligibleTonnes.mul(decimal(achievedTier.amountPerTonne ?? "0"))
+      : percentOf(eligibleTaxableValue, achievedTier.percentage ?? "0");
   const result: EvaluationResult = {
     proposal: {
       companyId: rule.companyId, customerId: customer.id, schemeVersionId: rule.id, schemeType: "tod", sourceSalesVoucherId: null,
@@ -131,7 +136,7 @@ export async function evaluateLiveTodAggregate(run: EvaluationRunRecord, aggrega
       achievedTierId: achievedTier?.id ?? null, nextTierTonnes: nextTier ? quantity(nextTier.minimumTonnes) : null,
       additionalTonnesRequired: nextTier ? quantity(nonNegative(decimal(nextTier.minimumTonnes).minus(eligibleTonnes))) : null,
       invoiceAmountDue: "0.0000", amountPaidByDeadline: "0.0000", discountedSettlementTarget: "0.0000", shortfallAmount: "0.0000",
-      discountPercentage: achievedTier?.percentage ?? null,
+      discountPercentage: usesAmountPerTonne ? null : achievedTier?.percentage ?? null,
       calculatedDiscountAmount: money(calculatedDiscount, rule.roundingScale, rule.roundingMethod), postedDiscountAmount: null,
       reasonCodes: [...new Set(reasonCodes)].sort(),
     },
@@ -140,7 +145,9 @@ export async function evaluateLiveTodAggregate(run: EvaluationRunRecord, aggrega
       customerGroupSnapshot: { customerId: customer.id, customerGroupId: customer.currentCustomerGroupId, coverageState: coverage.state, groupPath: customer.groupPath },
       calendarSnapshot: rule.reviewCalendar,
       formulaSnapshot: {
-        basis: "live_tally_eligible_product_value_and_tonnes",
+        basis: usesAmountPerTonne ? "live_tally_eligible_tonnes" : "live_tally_eligible_product_value_and_tonnes",
+        todBenefitBasis: rule.todBenefitBasis,
+        achievedTierRatePerMt: usesAmountPerTonne ? achievedTier?.amountPerTonne ?? null : null,
         sourceFingerprint: aggregate.sourceFingerprint,
         chunks: aggregate.chunks,
         vouchersScanned: aggregate.vouchersScanned,

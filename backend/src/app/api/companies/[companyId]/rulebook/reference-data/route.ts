@@ -29,7 +29,10 @@ export async function GET(request: Request, context: RouteContext) {
     const stockItemsQuery = supabase.from("stock_items").select("id, tally_stock_item_guid, tally_master_id, tally_alter_id, name, current_stock_group_id, default_uom_id, is_available, last_seen_at").eq("company_id", companyId).order("name").limit(limit);
     const unitsQuery = supabase.from("tally_units").select("id, code, name, tally_guid, tally_master_id, tally_alter_id, is_available, last_seen_at").eq("company_id", companyId).order("code").limit(limit);
     const voucherTypesQuery = supabase.from("tally_voucher_types").select("id, tally_voucher_type_guid, tally_master_id, tally_alter_id, name, is_credit_note_type, is_available, last_seen_at").eq("company_id", companyId).order("name").limit(limit);
-    const ledgersQuery = supabase.from("tally_ledgers").select("id, tally_ledger_guid, tally_master_id, tally_alter_id, name, parent_group_name, gst_applicability, is_available, last_seen_at").eq("company_id", companyId).order("name").limit(limit);
+    // The rule editor only allows available, GST-not-applicable discount
+    // ledgers. Applying that filter before the bounded list prevents valid
+    // ledgers near the end of a large Tally chart from being silently cut off.
+    const ledgersQuery = supabase.from("tally_ledgers").select("id, tally_ledger_guid, tally_master_id, tally_alter_id, name, parent_group_name, gst_applicability, is_available, last_seen_at").eq("company_id", companyId).eq("is_available", true).ilike("gst_applicability", "not applicable").order("name").limit(limit);
     if (like) {
       customerGroupsQuery.ilike("name", like);
       customersQuery.ilike("ledger_name", like);

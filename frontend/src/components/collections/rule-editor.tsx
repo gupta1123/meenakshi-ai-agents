@@ -75,6 +75,7 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
   const [checkNarration, setCheckNarration] = useState(true);
   const [periodMonths, setPeriodMonths] = useState("1");
   const [periodAnchorDate, setPeriodAnchorDate] = useState(today());
+  const [todBenefitBasis, setTodBenefitBasis] = useState<"percentage_of_eligible_value" | "amount_per_eligible_tonne">("percentage_of_eligible_value");
   const [busy, setBusy] = useState(false);
 
   const sourceVersionId = source?.version.id ?? null;
@@ -95,6 +96,7 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
     setCheckNarration(source?.version.checkNarration ?? true);
     setPeriodMonths(String(months));
     setPeriodAnchorDate(nextStart ?? source?.version.periodAnchorDate ?? today());
+    setTodBenefitBasis(source?.version.todBenefitBasis ?? "percentage_of_eligible_value");
   }, [open, sourceVersionId, scheme?.id, editingDraft, preparingUpdate]);
 
   function updateSlab(index: number, patch: Partial<CashDiscountSlab>) {
@@ -129,7 +131,7 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
               .map((slab) => ({ allowedWorkingDays: slab.days, percentage: slab.percentage })),
             checkNarration,
           }
-        : { periodMonths: Number(periodMonths), periodAnchorDate };
+        : { periodMonths: Number(periodMonths), periodAnchorDate, todBenefitBasis };
 
       if (!scheme) {
         const result = await apiRequest<{ scheme: Scheme; version: { id: string } }>(token, `/api/companies/${company.id}/schemes`, {
@@ -140,7 +142,13 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
             code: fields.get("code"),
             name: fields.get("name"),
             description: fields.get("description") || null,
-            initialRule: { ...common, copyFromVersionId: undefined, ...businessTerms },
+            initialRule: {
+              ...common,
+              copyFromVersionId: undefined,
+              ...businessTerms,
+              creditNoteVoucherTypeId: ruleType === "tod" ? fields.get("voucherType") : null,
+              discountLedgerId: ruleType === "tod" ? fields.get("ledger") : null,
+            },
           }),
         });
         await onSaved({ schemeId: result.scheme.id, versionId: result.version.id });
@@ -213,7 +221,12 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
           <label>Rule name<input name="name" required placeholder={selectedType === "cd" ? "Standard Cash Discount" : "Annual Turnover Discount"} /></label>
           <label>Rule reference<input name="code" required pattern="[A-Za-z][A-Za-z0-9_-]*" placeholder={selectedType === "cd" ? "CD_STANDARD" : "TOD_ANNUAL"} title="Start with a letter. Use letters, numbers, underscores, or hyphens only." /></label>
           <label>Team note <small>(optional)</small><input name="description" placeholder="Short internal note" /></label>
+          {selectedType === "tod" && <>
+            <label>Credit Note voucher type<select name="voucherType" required disabled={!reference}><option value="">{reference ? "Select current master" : "Sync Tally masters first"}</option>{reference?.masters.voucherTypes.filter((item) => item.is_available && item.is_credit_note_type).map((item) => <option key={item.id} value={item.id}>{item.name ?? item.ledger_name ?? item.code ?? "Credit Note"}</option>)}</select></label>
+            <label>Discount ledger<select name="ledger" required disabled={!reference}><option value="">{reference ? "Select current master" : "Sync Tally masters first"}</option>{reference?.masters.ledgers.filter((item) => item.is_available && String(item.gst_applicability).toLowerCase() === "not applicable").map((item) => <option key={item.id} value={item.id}>{item.name ?? item.ledger_name ?? item.code ?? "Discount ledger"}</option>)}</select></label>
+          </>}
         </div>
+        {!reference && <p className="muted-copy">Update company information from Tally before creating a rule. TOD rules require a live Credit Note type and GST-exempt discount ledger; CD recovery uses Tally Debit Notes from the source invoice.</p>}
       </>}
 
       <section className="rule-editor-section rule-editor-period">
@@ -259,6 +272,7 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
           <label>Review every<div className="input-with-suffix"><input type="number" min="1" max="36" required value={periodMonths} onChange={(event) => setPeriodMonths(event.target.value)} /><span>months</span></div></label>
           <label>First period starts<input type="date" required value={periodAnchorDate} onChange={(event) => setPeriodAnchorDate(event.target.value)} /></label>
         </div>
+        <fieldset className={studio.benefitChoice}><legend>Benefit calculation</legend><label className={todBenefitBasis === "amount_per_eligible_tonne" ? studio.benefitOptionSelected : studio.benefitOption}><input type="radio" name="todBenefitBasis" checked={todBenefitBasis === "amount_per_eligible_tonne"} disabled={editingDraft && source.configuration.tiers.length > 0} onChange={() => setTodBenefitBasis("amount_per_eligible_tonne")} /><span><strong>Fixed amount per MT</strong><small>Apply the reached slab rate to the full eligible quantity.</small></span></label><label className={todBenefitBasis === "percentage_of_eligible_value" ? studio.benefitOptionSelected : studio.benefitOption}><input type="radio" name="todBenefitBasis" checked={todBenefitBasis === "percentage_of_eligible_value"} disabled={editingDraft && source.configuration.tiers.length > 0} onChange={() => setTodBenefitBasis("percentage_of_eligible_value")} /><span><strong>Percentage of eligible sales value</strong><small>Apply the reached percentage to eligible sales value before GST.</small></span></label>{editingDraft && source.configuration.tiers.length > 0 && <small className={studio.benefitHint}>Remove the saved levels before changing this calculation method.</small>}</fieldset>
       </section>}
 
       <div className={studio.editorFooter}>

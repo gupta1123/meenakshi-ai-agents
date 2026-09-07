@@ -32,7 +32,7 @@ export function GuidedVersionSummary({ detail, validation, onEditTerms, onDraftS
   const period = `${version.effectiveFrom}${version.effectiveTo ? ` — ${version.effectiveTo}` : " onwards"}`;
   const facts = version.schemeType === "cd"
     ? `${detail.configuration.cdSlabs.length} payment windows · ${detail.configuration.customerGroups.length} customer groups`
-    : `${detail.configuration.tiers.map((tier) => `${tier.minimum_tonnes}t → ${tier.discount_percentage}%`).join(" · ") || "No discount tiers"} · ${detail.configuration.customerGroups.length} groups · ${productCount} products · ${detail.configuration.conversions.length} conversions`;
+    : `${detail.configuration.tiers.map((tier) => `${tier.minimum_tonnes}t → ${version.todBenefitBasis === "amount_per_eligible_tonne" ? `₹${tier.discount_amount_per_tonne}/MT` : `${tier.discount_percentage}%`}`).join(" · ") || "No discount tiers"} · ${detail.configuration.customerGroups.length} groups · ${productCount} products · ${detail.configuration.conversions.length} conversions`;
 
   return <section className={studio.snapshot}>
     <div className={studio.snapshotHeader}>

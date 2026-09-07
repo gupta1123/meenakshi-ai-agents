@@ -40,9 +40,9 @@ export async function POST(request: Request, context: RouteContext) {
     const code = unitRow.code.trim().toUpperCase();
     let tonnesPerSourceUnit: string;
     if (isBuiltin) {
-      if (code === "MT" || code === "MTS") tonnesPerSourceUnit = "1";
-      else if (code === "KG") tonnesPerSourceUnit = "0.001";
-      else return jsonWithCors(request, { error: "Only live MT, MTS, or KG units can use a built-in conversion." }, { status: 400 });
+      if (code === "MT" || code === "MTS" || code === "TON" || code === "TONNE" || code === "TONNES") tonnesPerSourceUnit = "1";
+      else if (code === "KG" || code === "KGS") tonnesPerSourceUnit = "0.001";
+      else return jsonWithCors(request, { error: "Only live tonne or kilogram units can use a built-in conversion." }, { status: 400 });
     } else {
       tonnesPerSourceUnit = readPositiveDecimal(body.tonnesPerSourceUnit, "tonnesPerSourceUnit", { maxScale: 9 });
     }

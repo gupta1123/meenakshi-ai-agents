@@ -24,6 +24,7 @@ type SyncRun = {
   started_at: string | null;
 };
 type DetectedTallyCompany = { name: string; guid: string; isActive: boolean };
+type RegisteredCompany = { id: string; code: string; tallyCompanyGuid: string; tallyCompanyName: string };
 type ConnectorCompanySnapshot = {
   connector: {
     id: string;
@@ -47,6 +48,11 @@ type TallyTargetMode = "same_machine" | "lan_server";
 const sameMachineTallyUrl = "http://localhost:9000";
 const requestKey = () => globalThis.crypto?.randomUUID?.() ?? `meenakshi-${Date.now()}`;
 const inProgress = (status: string) => status === "queued" || status === "running";
+
+function suggestedCompanyCode(name: string) {
+  const value = name.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+  return (value || "TALLY_COMPANY").slice(0, 80);
+}
 
 function bridgeLaunchUrl(credential: SetupCredential) {
   const query = new URLSearchParams({
@@ -188,7 +194,7 @@ function ConnectionStatusCard({ icon, label, value, detail, ready, attention = f
 }
 
 export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: TallyHealth | null; onRefresh?: () => Promise<void> }) {
-  const { company, organization, companyKey, isAdministrator } = useCompany();
+  const { company, organization, companyKey, isAdministrator, availableCompanies } = useCompany();
   const health = initialHealth ?? null;
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [connectorSnapshot, setConnectorSnapshot] = useState<ConnectorCompanySnapshot | null>(null);
@@ -201,6 +207,8 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
   const [targetMode, setTargetMode] = useState<TallyTargetMode>("same_machine");
   const [tallyUrlInput, setTallyUrlInput] = useState(sameMachineTallyUrl);
   const [selectedCompanyGuid, setSelectedCompanyGuid] = useState<string | null>(null);
+  const [companyCodeInput, setCompanyCodeInput] = useState("");
+  const [registeringCompany, setRegisteringCompany] = useState(false);
   const refreshInFlight = useRef(false);
 
   const selectedConnector = useMemo(
@@ -212,6 +220,7 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
   const tallyCompanies = connectorSnapshot?.companies ?? [];
   const activeTallyCompany = connectorSnapshot?.activeCompany ?? tallyCompanies.find((item) => item.isActive) ?? null;
   const selectedTallyCompany = tallyCompanies.find((item) => item.guid === selectedCompanyGuid) ?? activeTallyCompany;
+  const selectedCompanyAlreadyRegistered = Boolean(selectedTallyCompany && availableCompanies.some((item) => item.company.tally_company_guid.toLowerCase() === selectedTallyCompany.guid.toLowerCase()));
   const bridgeConnected = Boolean(snapshotConnector?.bridgeConnected);
   const tallyReachable = Boolean(snapshotConnector?.tallyReachable);
   const companyLoaded = Boolean(snapshotConnector?.companyLoaded && activeTallyCompany);
@@ -303,6 +312,9 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
     setSelectedCompanyGuid((current) => tallyCompanies.some((item) => item.guid === current) ? current : activeTallyCompany.guid);
   }, [activeTallyCompany, tallyCompanies]);
   useEffect(() => {
+    setCompanyCodeInput(selectedTallyCompany ? suggestedCompanyCode(selectedTallyCompany.name) : "");
+  }, [selectedTallyCompany?.guid, selectedTallyCompany?.name]);
+  useEffect(() => {
     if (!syncRun || !inProgress(syncRun.status)) return;
     let cancelled = false;
     const check = async () => {
@@ -373,10 +385,10 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
     }
   }
 
-  async function syncTallyData() {
+  async function syncTallyData(requestedKind?: "masters" | "vouchers") {
     const accessToken = await token();
     if (!accessToken) return;
-    const kind = health?.sync?.masters.status === "current" ? "vouchers" : "masters";
+    const kind = requestedKind ?? (health?.sync?.masters.status === "current" ? "vouchers" : "masters");
     const body = kind === "vouchers" ? jsonBody({ dateFrom: new Date(Date.now() - 90 * 86_400_000).toISOString().slice(0, 10), dateTo: new Date().toISOString().slice(0, 10) }) : undefined;
     setActionError(null);
     setNotice(null);
@@ -390,6 +402,53 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
       setNotice(kind === "masters" ? "Updating company lists and settings from Tally." : "Updating recent sales records from Tally.");
     } catch (cause) {
       setActionError(userFacingError(cause, "Could not start the Tally data update."));
+    }
+  }
+
+  async function registerSelectedTallyCompany() {
+    if (!connectorId || !selectedTallyCompany) {
+      setActionError("Select an active Tally company first.");
+      return;
+    }
+    if (!selectedTallyCompany.isActive) {
+      setActionError(`Open ${selectedTallyCompany.name} in Tally Prime before registering it.`);
+      return;
+    }
+    if (selectedCompanyAlreadyRegistered) {
+      setNotice("This Tally company is already registered. Refresh the workspace to select it.");
+      return;
+    }
+    const code = companyCodeInput.trim().toUpperCase();
+    if (!/^[A-Z][A-Z0-9_-]{1,79}$/.test(code)) {
+      setActionError("Enter a company code of at least two letters or numbers, starting with a letter.");
+      return;
+    }
+    const accessToken = await token();
+    if (!accessToken) return;
+    setRegisteringCompany(true);
+    setActionError(null);
+    setNotice(null);
+    try {
+      const result = await apiRequest<{ company: RegisteredCompany }>(accessToken, "/api/companies", {
+        method: "POST",
+        body: jsonBody({
+          organizationId: organization.id,
+          code,
+          tallyCompanyGuid: selectedTallyCompany.guid,
+          tallyCompanyName: selectedTallyCompany.name,
+        }),
+      });
+      await apiRequest(accessToken, `/api/connectors/${connectorId}/bindings`, {
+        method: "POST",
+        body: jsonBody({ companyId: result.company.id }),
+      });
+      window.sessionStorage.setItem("meenakshi.activeCompanyId", result.company.id);
+      setNotice(`${selectedTallyCompany.name} is registered separately and ready for a read-only master sync. Opening it now.`);
+      window.setTimeout(() => window.location.reload(), 750);
+    } catch (cause) {
+      setActionError(userFacingError(cause, "Could not register and bind this Tally company."));
+    } finally {
+      setRegisteringCompany(false);
     }
   }
 
@@ -574,6 +633,11 @@ function TallyReadinessSkeleton() {
                 {syncRun && inProgress(syncRun.status) ? "Updating..." : "Update Tally data"}
               </Button>
             )}
+            {isAdministrator && connectorVerified && (
+              <Button type="button" className="button-secondary" disabled={Boolean(syncRun && inProgress(syncRun.status))} onClick={() => void syncTallyData("masters")}>
+                {syncRun?.sync_kind === "masters" && inProgress(syncRun.status) ? "Updating masters..." : "Refresh Tally masters"}
+              </Button>
+            )}
             <Button type="button" className="button-secondary" disabled={disconnecting} onClick={() => void refresh()}>
               <RefreshCw size={14} />
               {bridgeConnected ? "Recheck connection" : "Refresh"}
@@ -624,6 +688,21 @@ function TallyReadinessSkeleton() {
                     <CircleAlert size={14} />
                     {selectedTallyCompany.name} is available, but Tally Prime currently has {activeTallyCompany?.name ?? "another company"} open. Switch the active company inside Tally Prime to use it.
                   </p>
+                )}
+                {isAdministrator && selectedTallyCompany?.isActive && !selectedCompanyAlreadyRegistered && (
+                  <div className="tally-connection-actions">
+                    <label className="tally-company-code-field">
+                      <span>Separate company code</span>
+                      <input value={companyCodeInput} onChange={(event) => setCompanyCodeInput(event.target.value)} maxLength={80} aria-label="Separate company code" />
+                    </label>
+                    <Button type="button" disabled={registeringCompany} onClick={() => void registerSelectedTallyCompany()}>
+                      <Building2 size={15} />
+                      {registeringCompany ? "Registering..." : "Register as a separate company"}
+                    </Button>
+                  </div>
+                )}
+                {selectedTallyCompany && selectedCompanyAlreadyRegistered && selectedTallyCompany.guid.toLowerCase() !== company.tally_company_guid.toLowerCase() && (
+                  <p className="tally-company-selection-note"><CheckCircle2 size={14} />{selectedTallyCompany.name} is already registered separately. Refresh the workspace to select it.</p>
                 )}
               </>
             ) : (

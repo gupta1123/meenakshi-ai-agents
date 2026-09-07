@@ -22,6 +22,7 @@ type RuleRow = {
   cd_check_narration: boolean | null;
   cd_narration_mode: "informational" | "required" | "disabled" | null;
   period_months: number | null; period_anchor_date: string | null; tod_review_calendar_id: string | null;
+  tod_benefit_basis: "percentage_of_eligible_value" | "amount_per_eligible_tonne" | null;
 };
 
 type RunContext = { schemeType?: unknown; salesVoucherId?: unknown; customerId?: unknown; batch?: unknown; asOfDate?: unknown; evaluatedOn?: unknown };
@@ -214,7 +215,7 @@ async function loadRule(companyId: string, versionId: string): Promise<FrozenCdR
   const supabase = createSupabaseAdminClient();
   const { data, error } = await supabase
     .from("scheme_versions")
-    .select("id, company_id, scheme_id, scheme_type, version_number, status, effective_from, effective_to, discount_percentage, rounding_method, rounding_scale, working_calendar_id, allowed_working_days, near_eligibility_percent, period_months, period_anchor_date, tod_review_calendar_id")
+    .select("id, company_id, scheme_id, scheme_type, version_number, status, effective_from, effective_to, discount_percentage, rounding_method, rounding_scale, working_calendar_id, allowed_working_days, near_eligibility_percent, period_months, period_anchor_date, tod_review_calendar_id, tod_benefit_basis")
     .eq("id", versionId).eq("company_id", companyId).maybeSingle();
   if (error) throw error;
   if (!data) throw new Error("The selected rule version is unavailable.");
@@ -224,13 +225,14 @@ async function loadRule(companyId: string, versionId: string): Promise<FrozenCdR
     supabase.from("scheme_version_stock_items").select("stock_item_id").eq("scheme_version_id", row.id),
     supabase.from("scheme_version_stock_groups").select("stock_group_id").eq("scheme_version_id", row.id),
     supabase.from("scheme_version_unit_conversions").select("source_uom_id, tonnes_per_source_unit").eq("scheme_version_id", row.id),
-    supabase.from("scheme_version_tiers").select("id, minimum_tonnes, discount_percentage").eq("scheme_version_id", row.id).order("minimum_tonnes"),
+    supabase.from("scheme_version_tiers").select("id, minimum_tonnes, discount_percentage, discount_amount_per_tonne").eq("scheme_version_id", row.id).order("minimum_tonnes"),
     supabase.from("scheme_version_cd_slabs").select("id, allowed_working_days, discount_percentage").eq("scheme_version_id", row.id).order("allowed_working_days"),
   ]);
   for (const result of [customerGroups, stockItems, stockGroups, conversions, tiers, cdSlabs]) if (result.error) throw result.error;
   const sourceSnapshot = {
     schemeVersionId: row.id, schemeId: row.scheme_id, schemeType: row.scheme_type, versionNumber: row.version_number,
     effectiveFrom: row.effective_from, effectiveTo: row.effective_to, roundingMethod: row.rounding_method, roundingScale: row.rounding_scale,
+    ...(row.scheme_type === "tod" ? { todBenefitBasis: row.tod_benefit_basis ?? "percentage_of_eligible_value" } : {}),
   };
   const base = {
     id: row.id, schemeId: row.scheme_id, companyId: row.company_id, schemeType: row.scheme_type,
@@ -268,10 +270,11 @@ async function loadRule(companyId: string, versionId: string): Promise<FrozenCdR
   if (!row.period_anchor_date || !row.period_months) throw new Error("The active Turnover Discount rule is incomplete.");
   return {
     ...base, schemeType: "tod", periodAnchorDate: row.period_anchor_date, periodMonths: Number(row.period_months),
+    todBenefitBasis: row.tod_benefit_basis ?? "percentage_of_eligible_value",
     selectedStockItemIds: (stockItems.data ?? []).map((item) => item.stock_item_id),
     selectedStockGroupIds: (stockGroups.data ?? []).map((item) => item.stock_group_id),
     unitConversions: (conversions.data ?? []).map((item) => ({ id: `${row.id}:${item.source_uom_id}`, sourceUomId: item.source_uom_id, tonnesPerUnit: String(item.tonnes_per_source_unit) })),
-    tiers: (tiers.data ?? []).map((item) => ({ id: item.id, minimumTonnes: String(item.minimum_tonnes), percentage: String(item.discount_percentage) })),
+    tiers: (tiers.data ?? []).map((item) => ({ id: item.id, minimumTonnes: String(item.minimum_tonnes), percentage: item.discount_percentage == null ? null : String(item.discount_percentage), amountPerTonne: item.discount_amount_per_tonne == null ? null : String(item.discount_amount_per_tonne) })),
     reviewCalendar: row.tod_review_calendar_id ? await loadCalendar(row.tod_review_calendar_id) : null,
   };
 }

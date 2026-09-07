@@ -273,9 +273,9 @@ export type Voucher = { id: string; voucher_number: string; voucher_date: string
 export type Calendar = { id: string; name: string; isActive: boolean; revision: number; nonWorkingWeekdays: number[]; holidays: Array<{ id: string; holiday_date: string; name: string; is_active: boolean }> };
 
 export type Scheme = { id: string; schemeType: "cd" | "tod"; code: string; name: string; status: string; description: string | null };
-export type Version = { id: string; versionNumber: number; schemeType: "cd" | "tod"; status: string; effectiveFrom: string; effectiveTo: string | null; discountPercentage: string | null; roundingMethod: "half_up" | "half_even" | "truncate"; roundingScale: number; creditNoteVoucherTypeId: string | null; discountLedgerId: string | null; workingCalendarId: string | null; allowedWorkingDays: number | null; nearEligibilityPercent: string | null; checkNarration: boolean; invoiceTreatment: "after_qualification" | "deducted_upfront" | null; narrationMode: "informational" | "required" | "disabled" | null; periodMonths: number | null; periodAnchorDate: string | null; todReviewCalendarId: string | null };
+export type Version = { id: string; versionNumber: number; schemeType: "cd" | "tod"; status: string; effectiveFrom: string; effectiveTo: string | null; discountPercentage: string | null; roundingMethod: "half_up" | "half_even" | "truncate"; roundingScale: number; creditNoteVoucherTypeId: string | null; discountLedgerId: string | null; workingCalendarId: string | null; allowedWorkingDays: number | null; nearEligibilityPercent: string | null; checkNarration: boolean; invoiceTreatment: "after_qualification" | "deducted_upfront" | null; narrationMode: "informational" | "required" | "disabled" | null; periodMonths: number | null; periodAnchorDate: string | null; todReviewCalendarId: string | null; todBenefitBasis: "percentage_of_eligible_value" | "amount_per_eligible_tonne" | null };
 export type SchemeDetail = { scheme: Scheme; versions: Version[] };
-export type VersionDetail = { version: Version; configuration: { customerGroups: Array<{ customer_group_id: string }>; stockItems: Array<{ stock_item_id: string }>; stockGroups: Array<{ stock_group_id: string }>; conversions: Array<{ source_uom_id: string; tonnes_per_source_unit: string; is_builtin: boolean }>; tiers: Array<{ id: string; minimum_tonnes: string; discount_percentage: string }>; cdSlabs: Array<{ id?: string; allowedWorkingDays: number; percentage: string }> } };
+export type VersionDetail = { version: Version; configuration: { customerGroups: Array<{ customer_group_id: string }>; stockItems: Array<{ stock_item_id: string }>; stockGroups: Array<{ stock_group_id: string }>; conversions: Array<{ source_uom_id: string; tonnes_per_source_unit: string; is_builtin: boolean }>; tiers: Array<{ id: string; minimum_tonnes: string; discount_percentage: string | null; discount_amount_per_tonne: string | null }>; cdSlabs: Array<{ id?: string; allowedWorkingDays: number; percentage: string }> } };
 export type TaxPolicy = { id: string; effective_from: string; effective_to: string | null; approval_reference: string; approver_name_snapshot: string; approved_at: string };
 export type CreditNoteAccountingSettings = {
   gstTreatment: "commercial_no_gst";
@@ -327,7 +327,7 @@ export type ProposalDetail = {
   creditNotePosting: (CreditNotePosting & { verified_tally_guid?: string | null; verified_amount?: string | null; document: SafeCreditNoteDocument | null }) | null;
   notification: NotificationSummary;
   tallyEvidence: {
-    tiers: Array<{ id: string; minimum_tonnes: string | number; discount_percentage: string | number }>;
+    tiers: Array<{ id: string; minimum_tonnes: string | number; discount_percentage: string | number | null; discount_amount_per_tonne?: string | number | null }>;
     vouchers: Array<{
       tallyVoucherId: string;
       voucherNumber: string | null;

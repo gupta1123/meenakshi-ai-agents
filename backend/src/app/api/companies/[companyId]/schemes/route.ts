@@ -4,8 +4,12 @@ import {
   readCashDiscountSlabs,
   readDate,
   readInteger,
+  readTodBenefitBasis,
   readOptionalText,
   readRequiredText,
+  readRequiredUuid,
+  requireAvailableReference,
+  requireCurrentMasterSync,
   requireGlobalWorkingCalendar,
   requireRulebookCompanyAdmin,
   RulebookRequestError,
@@ -16,6 +20,7 @@ import {
 } from "@/lib/rulebook/shared";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { readIdempotencyKey } from "@/lib/tally/contracts";
+import { appendMeenakshiAuditEvent } from "@/lib/audit";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 type InitialRule = Record<string, unknown>;
@@ -53,13 +58,14 @@ function parseInitialRule(schemeType: "cd" | "tod", input: InitialRule) {
       checkNarration: input.checkNarration === undefined ? true : readBoolean(input.checkNarration, "initialRule.checkNarration"),
       periodMonths: null,
       periodAnchorDate: null,
+      todBenefitBasis: null,
     };
   }
 
   const periodMonths = readInteger(input.periodMonths, "initialRule.periodMonths", 1, 36);
   const periodAnchorDate = readDate(input.periodAnchorDate, "initialRule.periodAnchorDate") as string;
   validateTodPeriod({ effectiveFrom, effectiveTo, periodAnchorDate, periodMonths });
-  return { effectiveFrom, effectiveTo, slabs: [], checkNarration: true, periodMonths, periodAnchorDate };
+  return { effectiveFrom, effectiveTo, slabs: [], checkNarration: true, periodMonths, periodAnchorDate, todBenefitBasis: readTodBenefitBasis(input.todBenefitBasis, "initialRule.todBenefitBasis") };
 }
 
 export async function POST(request: Request, context: RouteContext) {
@@ -80,52 +86,74 @@ export async function POST(request: Request, context: RouteContext) {
     const code = readRequiredText(body.code, "code", 64);
     if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(code)) return jsonWithCors(request, { error: "Reference code must start with a letter and contain only A-Z 0-9 _ -." }, { status: 400 });
     const description = readOptionalText(body.description, 1_000);
-    const initial = parseInitialRule(schemeType, body.initialRule as InitialRule);
+    const initialRule = body.initialRule as InitialRule;
+    const initial = parseInitialRule(schemeType, initialRule);
     const calendar = await requireGlobalWorkingCalendar(scope.organization.id);
-    const requestPayload = {
-      schemeType,
+    await requireCurrentMasterSync(scope.company.id);
+    const creditNoteVoucherTypeId = schemeType === "tod" ? readRequiredUuid(initialRule.creditNoteVoucherTypeId, "initialRule.creditNoteVoucherTypeId") : null;
+    const discountLedgerId = schemeType === "tod" ? readRequiredUuid(initialRule.discountLedgerId, "initialRule.discountLedgerId") : null;
+    if (schemeType === "tod") {
+      await requireAvailableReference({ table: "tally_voucher_types", id: creditNoteVoucherTypeId!, companyId: scope.company.id, label: "Credit Note voucher type" });
+      await requireAvailableReference({ table: "tally_ledgers", id: discountLedgerId!, companyId: scope.company.id, label: "Discount ledger" });
+    }
+    const supabase = createSupabaseAdminClient();
+    const { data: schemeData, error: schemeError } = await supabase.from("schemes").insert({
+      company_id: scope.company.id,
+      scheme_type: schemeType,
       code,
       name,
       description,
-      effectiveFrom: initial.effectiveFrom,
-      effectiveTo: initial.effectiveTo,
-      slabs: initial.slabs,
-      checkNarration: initial.checkNarration,
-      periodMonths: initial.periodMonths,
-      periodAnchorDate: initial.periodAnchorDate,
-    };
-
-    const supabase = createSupabaseAdminClient();
-    const { data: created, error: createError } = await supabase.rpc("create_meenakshi_rule", {
-      p_company_id: scope.company.id,
-      p_actor_id: scope.userId,
-      p_idempotency_key: idempotencyKey,
-      p_request: requestPayload,
-      p_working_calendar_id: calendar.id,
-    });
-    if (createError) {
-      if (createError.code === "23505") {
-        const msg = String(createError.message ?? "");
-        const isCode = msg.includes("code") || msg.includes("schemes_company_id_code_key");
-        return jsonWithCors(request, { error: isCode ? "A rule with this reference code already exists." : "A rule with this name already exists." }, { status: 409 });
+      status: "draft",
+      created_by: scope.userId,
+    }).select("id, company_id, scheme_type, code, name, description, status, created_at, updated_at").single();
+    if (schemeError) {
+      if (schemeError.code === "23505") {
+        const msg = String(schemeError.message ?? "");
+        return jsonWithCors(request, { error: msg.includes("code") ? "A rule with this reference code already exists." : "A rule with this name already exists." }, { status: 409 });
       }
-      throw createError;
+      throw schemeError;
     }
-
-    const result = created as { schemeId?: string; versionId?: string; replayed?: boolean } | null;
-    if (!result?.schemeId || !result.versionId) throw new Error("Rule creation did not return its saved records.");
-    const [schemeResult, versionResult] = await Promise.all([
-      supabase.from("schemes").select("id, company_id, scheme_type, code, name, description, status, created_at, updated_at").eq("id", result.schemeId).single(),
-      supabase.from("scheme_versions").select("id, company_id, scheme_id, scheme_type, version_number, status, effective_from, effective_to, discount_percentage, calculation_base, rounding_method, rounding_scale, gst_treatment, credit_note_voucher_type_id, discount_ledger_id, requires_approval, working_calendar_id, allowed_working_days, near_eligibility_percent, cd_invoice_treatment, cd_narration_mode, cd_check_narration, period_months, period_anchor_date, tod_review_calendar_id, created_at, updated_at").eq("id", result.versionId).single(),
-    ]);
-    if (schemeResult.error) throw schemeResult.error;
-    if (versionResult.error) throw versionResult.error;
+    const compatibility = schemeType === "cd" ? initial.slabs.at(-1)! : null;
+    const { data: versionData, error: versionError } = await supabase.from("scheme_versions").insert({
+      company_id: scope.company.id,
+      scheme_id: schemeData.id,
+      scheme_type: schemeType,
+      version_number: 1,
+      status: "draft",
+      effective_from: initial.effectiveFrom,
+      effective_to: initial.effectiveTo,
+      discount_percentage: compatibility?.discount_percentage ?? null,
+      calculation_base: "eligible_product_taxable_value",
+      rounding_method: "half_up",
+      rounding_scale: 2,
+      gst_treatment: "commercial_no_gst",
+      credit_note_voucher_type_id: creditNoteVoucherTypeId,
+      discount_ledger_id: discountLedgerId,
+      requires_approval: true,
+      working_calendar_id: schemeType === "cd" ? calendar.id : null,
+      allowed_working_days: compatibility?.allowed_working_days ?? null,
+      near_eligibility_percent: schemeType === "cd" ? 80 : null,
+      cd_invoice_treatment: schemeType === "cd" ? "deducted_upfront" : null,
+      cd_narration_mode: schemeType === "cd" ? "informational" : null,
+      cd_check_narration: schemeType === "cd" ? initial.checkNarration : true,
+      period_months: schemeType === "tod" ? initial.periodMonths : null,
+      period_anchor_date: schemeType === "tod" ? initial.periodAnchorDate : null,
+      tod_review_calendar_id: schemeType === "tod" ? calendar.id : null,
+      tod_benefit_basis: schemeType === "tod" ? initial.todBenefitBasis : null,
+      created_by: scope.userId,
+    }).select("id, company_id, scheme_id, scheme_type, version_number, status, effective_from, effective_to, discount_percentage, calculation_base, rounding_method, rounding_scale, gst_treatment, credit_note_voucher_type_id, discount_ledger_id, requires_approval, working_calendar_id, allowed_working_days, near_eligibility_percent, cd_invoice_treatment, cd_narration_mode, cd_check_narration, period_months, period_anchor_date, tod_review_calendar_id, tod_benefit_basis, created_at, updated_at").single();
+    if (versionError) throw versionError;
+    if (schemeType === "cd") {
+      const { error: slabError } = await supabase.from("scheme_version_cd_slabs").insert(initial.slabs.map((slab) => ({ scheme_version_id: versionData.id, allowed_working_days: slab.allowed_working_days, discount_percentage: slab.discount_percentage })));
+      if (slabError) throw slabError;
+    }
+    await appendMeenakshiAuditEvent({ organizationId: scope.organization.id, companyId: scope.company.id, actorType: "user", actorId: scope.userId, action: "meenakshi_rule_created", entityType: "scheme", entityId: schemeData.id, newValue: { code, name, schemeType, versionId: versionData.id }, metadata: { idempotencyKey } });
 
     return jsonWithCors(request, {
-      scheme: toSchemeResponse(schemeResult.data as Parameters<typeof toSchemeResponse>[0]),
-      version: toVersionResponse(versionResult.data as Parameters<typeof toVersionResponse>[0]),
-      replayed: result.replayed === true,
-    }, { status: result.replayed ? 200 : 201 });
+      scheme: toSchemeResponse(schemeData as Parameters<typeof toSchemeResponse>[0]),
+      version: toVersionResponse(versionData as Parameters<typeof toVersionResponse>[0]),
+      replayed: false,
+    }, { status: 201 });
   } catch (error) {
     return rulebookErrorResponse(request, error, "create rule");
   }

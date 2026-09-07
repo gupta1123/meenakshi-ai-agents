@@ -15,7 +15,7 @@ export async function GET(request: Request, context: RouteContext) {
     const { companyId, versionId } = await context.params;
     const { version } = await requireRulebookVersionForCompany(request, companyId, versionId);
     requireTod(version.scheme_type);
-    const { data, error } = await createSupabaseAdminClient().from("scheme_version_tiers").select("id, minimum_tonnes, discount_percentage, created_at").eq("scheme_version_id", version.id).order("minimum_tonnes");
+    const { data, error } = await createSupabaseAdminClient().from("scheme_version_tiers").select("id, minimum_tonnes, discount_percentage, discount_amount_per_tonne, created_at").eq("scheme_version_id", version.id).order("minimum_tonnes");
     if (error) throw error;
     return jsonWithCors(request, { tiers: data ?? [] });
   } catch (error) {
@@ -31,13 +31,18 @@ export async function POST(request: Request, context: RouteContext) {
     requireDraftVersion(version);
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     const minimumTonnes = readPositiveDecimal(body.minimumTonnes, "minimumTonnes", { allowZero: true, maxScale: 6 });
-    const discountPercentage = readPositiveDecimal(body.discountPercentage, "discountPercentage", { maxScale: 4 });
+    const amountPerTonne = version.tod_benefit_basis === "amount_per_eligible_tonne"
+      ? readPositiveDecimal(body.amountPerTonne, "amountPerTonne", { maxScale: 4 })
+      : null;
+    const discountPercentage = version.tod_benefit_basis === "amount_per_eligible_tonne"
+      ? null
+      : readPositiveDecimal(body.discountPercentage, "discountPercentage", { maxScale: 4 });
     const { data, error } = await createSupabaseAdminClient().from("scheme_version_tiers")
-      .upsert({ scheme_version_id: version.id, minimum_tonnes: minimumTonnes, discount_percentage: discountPercentage }, { onConflict: "scheme_version_id,minimum_tonnes" })
-      .select("id, minimum_tonnes, discount_percentage, created_at")
+      .upsert({ scheme_version_id: version.id, minimum_tonnes: minimumTonnes, discount_percentage: discountPercentage, discount_amount_per_tonne: amountPerTonne }, { onConflict: "scheme_version_id,minimum_tonnes" })
+      .select("id, minimum_tonnes, discount_percentage, discount_amount_per_tonne, created_at")
       .single();
     if (error) throw error;
-    await appendRulebookAudit({ scope, action: "scheme_version_tier_saved", entityType: "scheme_version", entityId: version.id, newValue: { minimumTonnes, discountPercentage } });
+    await appendRulebookAudit({ scope, action: "scheme_version_tier_saved", entityType: "scheme_version", entityId: version.id, newValue: { minimumTonnes, discountPercentage, amountPerTonne, benefitBasis: version.tod_benefit_basis } });
     return jsonWithCors(request, { tier: data });
   } catch (error) {
     return rulebookErrorResponse(request, error, "save TOD tier");

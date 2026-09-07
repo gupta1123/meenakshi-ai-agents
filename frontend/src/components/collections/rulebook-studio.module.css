@@ -217,6 +217,16 @@
 :global(.rule-editor-form label small),
 :global(.rule-editor-form .inline-message) { font-size: 12px; line-height: 1.55; }
 
+.benefitChoice { display: grid; gap: 8px; min-inline-size: 0; margin: 2px 0 0; padding: 10px; border: 1px solid #ddd9d1; border-radius: 9px; }
+.benefitChoice legend { padding: 0 4px; color: #4f5952; font-size: 12px; font-weight: 750; }
+.benefitOption, .benefitOptionSelected { display: flex !important; align-items: flex-start; gap: 10px; padding: 10px; border: 1px solid transparent; border-radius: 7px; cursor: pointer; }
+.benefitOption { background: #faf9f6; }
+.benefitOptionSelected { border-color: #a8d8b8; background: var(--green-soft); }
+.benefitOption input[type="radio"], .benefitOptionSelected input[type="radio"] { flex: 0 0 auto; width: 16px; min-width: 16px; height: 16px; min-height: 16px !important; margin: 2px 0 0; accent-color: var(--green); }
+.benefitOption span, .benefitOptionSelected span { display: grid; gap: 2px; min-width: 0; }
+.benefitOption strong, .benefitOptionSelected strong { color: #27342d; font-size: 13px; }
+.benefitOption small, .benefitOptionSelected small, .benefitHint { color: var(--muted); font-size: 12px; line-height: 1.45; }
+
 @media (max-width: 980px) {
   .layout { grid-template-columns: 1fr; }
   .rail { position: static; }

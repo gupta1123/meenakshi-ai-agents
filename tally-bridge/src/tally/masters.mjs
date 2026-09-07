@@ -78,7 +78,11 @@ export function parseLedgers(xml) {
   return parseMasterList(xml, "LEDGER", (block) => {
     const item = masterIdentity(block);
     const parentGroupName = value(block, "PARENT");
-    const gstApplicability = value(block, "GSTAPPLICABLE") || value(block, "GSTAPPLICABILITY");
+    // Tally's GSTAPPLICABLE is frequently just Yes/No, whereas
+    // GSTAPPLICABILITY contains the accounting value the Rulebook needs.
+    // Prefer the latter and normalize a legacy No response for older exports.
+    const reportedGstApplicability = value(block, "GSTAPPLICABILITY") || value(block, "GSTAPPLICABLE");
+    const gstApplicability = /^(no|false)$/i.test(reportedGstApplicability) ? "Not Applicable" : reportedGstApplicability;
     return {
       ...item,
       parentGroupName,

@@ -259,6 +259,25 @@ test("TOD nets returns, uses approved UOM conversion, and applies the highest ti
   assert.equal(result.proposal?.status, "eligible");
 });
 
+test("TOD applies the highest per-MT rate to the full eligible quantity", () => {
+  const result = evaluateTod({
+    rule: {
+      id: "tod-per-mt", schemeId: "tod-scheme", companyId: "company-1", schemeType: "tod", versionNumber: 1, effectiveFrom: "2026-01-01", effectiveTo: null,
+      roundingMethod: "half_up", roundingScale: 2, selectedCustomerGroupIds: ["group-1"], sourceSnapshot: {}, periodAnchorDate: "2026-08-01", periodMonths: 1,
+      todBenefitBasis: "amount_per_eligible_tonne", selectedStockItemIds: [], selectedStockGroupIds: ["stock-group-1"], unitConversions: [{ id: "conversion-1", sourceUomId: "uom-1", tonnesPerUnit: "1" }],
+      tiers: [{ id: "tier-30", minimumTonnes: "30", percentage: null, amountPerTonne: "250" }, { id: "tier-50", minimumTonnes: "50", percentage: null, amountPerTonne: "350" }], reviewCalendar: calendar,
+    },
+    customer, periodStart: "2026-08-01", periodEnd: "2026-08-31", evaluatedOn: "2026-09-01",
+    vouchers: [{ ...sale, voucherDate: "2026-08-10", taxableProductValue: "5800", grossAmount: "5800" }],
+    inventoryLines: [{ id: "tod-per-mt-line", voucherId: "sale-1", lineNumber: 1, stockItemId: "item-1", stockGroupId: "stock-group-1", sourceUomId: "uom-1", sourceUomCode: "MT", quantity: "58", taxableProductValue: "5800", freightValue: "0", nonProductValue: "0", lineCategory: "inventory", quantityIsReliable: true, sourceSnapshot: {} }],
+    existingCreditNotes: [], priorPeriodAdjustments: [],
+  });
+  assert.equal(result.proposal?.achievedTierId, "tier-50");
+  assert.equal(result.proposal?.discountPercentage, null);
+  assert.equal(result.proposal?.calculatedDiscountAmount, "20300.00");
+  assert.equal(result.evaluation.formulaSnapshot.achievedTierRatePerMt, "350");
+});
+
 test("TOD preserves an already locked customer period after a later group change", () => {
   const result = evaluateTod({
     rule: {

@@ -4,6 +4,7 @@ import {
   readCashDiscountSlabs,
   readDate,
   readInteger,
+  readTodBenefitBasis,
   readRequiredUuid,
   requireGlobalWorkingCalendar,
   requireRulebookSchemeForCompany,
@@ -39,7 +40,7 @@ export async function POST(request: Request, context: RouteContext) {
       const sourceId = readRequiredUuid(body.copyFromVersionId, "copyFromVersionId");
       const { data, error } = await supabase
         .from("scheme_versions")
-        .select("id, company_id, scheme_id, scheme_type, version_number, status, effective_from, effective_to, discount_percentage, calculation_base, rounding_method, rounding_scale, gst_treatment, credit_note_voucher_type_id, discount_ledger_id, requires_approval, working_calendar_id, allowed_working_days, near_eligibility_percent, cd_invoice_treatment, cd_narration_mode, cd_check_narration, period_months, period_anchor_date, tod_review_calendar_id, created_at, updated_at")
+        .select("id, company_id, scheme_id, scheme_type, version_number, status, effective_from, effective_to, discount_percentage, calculation_base, rounding_method, rounding_scale, gst_treatment, credit_note_voucher_type_id, discount_ledger_id, requires_approval, working_calendar_id, allowed_working_days, near_eligibility_percent, cd_invoice_treatment, cd_narration_mode, cd_check_narration, period_months, period_anchor_date, tod_review_calendar_id, tod_benefit_basis, created_at, updated_at")
         .eq("id", sourceId)
         .eq("scheme_id", scheme.id)
         .eq("company_id", scope.company.id)
@@ -77,6 +78,7 @@ export async function POST(request: Request, context: RouteContext) {
             period_months: null,
             period_anchor_date: null,
             tod_review_calendar_id: null,
+            tod_benefit_basis: null,
           };
         })()
       : (() => {
@@ -92,6 +94,7 @@ export async function POST(request: Request, context: RouteContext) {
             period_months: periodMonths,
             period_anchor_date: periodAnchorDate,
             tod_review_calendar_id: calendar.id,
+            tod_benefit_basis: readTodBenefitBasis(body.todBenefitBasis ?? source?.tod_benefit_basis ?? "percentage_of_eligible_value"),
           };
         })();
 
@@ -114,7 +117,7 @@ export async function POST(request: Request, context: RouteContext) {
 
     const { data, error } = await supabase
       .from("scheme_versions")
-      .select("id, company_id, scheme_id, scheme_type, version_number, status, effective_from, effective_to, discount_percentage, calculation_base, rounding_method, rounding_scale, gst_treatment, credit_note_voucher_type_id, discount_ledger_id, requires_approval, working_calendar_id, allowed_working_days, near_eligibility_percent, cd_invoice_treatment, cd_narration_mode, cd_check_narration, period_months, period_anchor_date, tod_review_calendar_id, created_at, updated_at")
+      .select("id, company_id, scheme_id, scheme_type, version_number, status, effective_from, effective_to, discount_percentage, calculation_base, rounding_method, rounding_scale, gst_treatment, credit_note_voucher_type_id, discount_ledger_id, requires_approval, working_calendar_id, allowed_working_days, near_eligibility_percent, cd_invoice_treatment, cd_narration_mode, cd_check_narration, period_months, period_anchor_date, tod_review_calendar_id, tod_benefit_basis, created_at, updated_at")
       .eq("id", result.versionId)
       .single();
     if (error) throw error;

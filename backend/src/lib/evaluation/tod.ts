@@ -184,8 +184,13 @@ export function evaluateTurnoverDiscount(input: TodEvaluationInput): EvaluationR
 
   const reviewOpenDate = rule.reviewCalendar ? firstWorkingDayAfter(rule.reviewCalendar, input.periodEnd) : null;
   const existingCreditNote = input.existingCreditNotes.find((creditNote) => creditNote.verifiedForProposal && creditNote.status === "posted");
-  const discountPercentage = achievedTier?.percentage ?? null;
-  const calculatedDiscount = achievedTier ? percentOf(eligibleTaxableValue, achievedTier.percentage) : decimal(0);
+  const usesAmountPerTonne = rule.todBenefitBasis === "amount_per_eligible_tonne";
+  const discountPercentage = usesAmountPerTonne ? null : achievedTier?.percentage ?? null;
+  const calculatedDiscount = !achievedTier
+    ? decimal(0)
+    : usesAmountPerTonne
+      ? eligibleTonnes.mul(decimal(achievedTier.amountPerTonne ?? "0"))
+      : percentOf(eligibleTaxableValue, achievedTier.percentage ?? "0");
 
   let status: ProposalResult["status"];
   if (existingCreditNote) {
@@ -286,13 +291,15 @@ export function evaluateTurnoverDiscount(input: TodEvaluationInput): EvaluationR
       customerGroupSnapshot: { customerId: customer.id, customerGroupId: customer.currentCustomerGroupId, coverageState: coverage.state, groupPath: customer.groupPath },
       calendarSnapshot: rule.reviewCalendar ? { calendarId: rule.reviewCalendar.id, revision: rule.reviewCalendar.revision, nonWorkingIsoWeekdays: rule.reviewCalendar.nonWorkingIsoWeekdays, activeHolidayDates: rule.reviewCalendar.activeHolidayDates } : null,
       formulaSnapshot: {
-        basis: "eligible_product_taxable_value_before_gst",
+        basis: usesAmountPerTonne ? "eligible_tonnes" : "eligible_product_taxable_value_before_gst",
+        todBenefitBasis: rule.todBenefitBasis,
+        achievedTierRatePerMt: usesAmountPerTonne ? achievedTier?.amountPerTonne ?? null : null,
         roundingMethod: rule.roundingMethod,
         roundingScale: rule.roundingScale,
         periodStart: input.periodStart,
         periodEnd: input.periodEnd,
         reviewOpenDate,
-        tierRule: "highest_achieved_rate_applies_to_full_net_eligible_value",
+        tierRule: usesAmountPerTonne ? "highest_achieved_rate_applies_to_full_net_eligible_tonnes" : "highest_achieved_rate_applies_to_full_net_eligible_value",
       },
       groupMemberships: coverage.memberships.map((membership) => ({
         customerId: customer.id,

@@ -24,10 +24,10 @@ type Props = {
 
 type SaveOperation = { path: string; body: Record<string, unknown>; label: string };
 type SavedChoice = { key: string; label: string; path: string; body: Record<string, unknown>; removedMessage: string };
-type PendingTier = { id: string; minimumTonnes: string; discountPercentage: string };
+type PendingTier = { id: string; minimumTonnes: string; benefitValue: string };
 
 function newTier(): PendingTier {
-  return { id: globalThis.crypto?.randomUUID?.() ?? `tier-${Date.now()}-${Math.random()}`, minimumTonnes: "", discountPercentage: "" };
+  return { id: globalThis.crypto?.randomUUID?.() ?? `tier-${Date.now()}-${Math.random()}`, minimumTonnes: "", benefitValue: "" };
 }
 
 function standardTonnesFactor(code: string | undefined) {
@@ -140,7 +140,8 @@ export function GuidedDraftSetupDrawer({ open, onClose, detail, reference, refre
     ...configuration.stockGroups.map((item) => ({ key: `stocks:group:${item.stock_group_id}`, label: `Product group · ${stockGroupNames.get(item.stock_group_id) ?? "Stock group"}`, path: "stocks", body: { kind: "stockGroup", id: item.stock_group_id }, removedMessage: "Product group removed from this pending update." })),
   ];
   const savedConversions: SavedChoice[] = configuration.conversions.map((item) => ({ key: `conversions:${item.source_uom_id}`, label: `${unitNames.get(item.source_uom_id) ?? "Tally unit"} · ${item.tonnes_per_source_unit} tonnes`, path: "conversions", body: { sourceUomId: item.source_uom_id }, removedMessage: "Weight conversion removed from this pending update." }));
-  const savedTiers: SavedChoice[] = configuration.tiers.map((item) => ({ key: `tiers:${item.id}`, label: `${item.minimum_tonnes} tonnes or more · ${item.discount_percentage}% discount`, path: "tiers", body: { tierId: item.id }, removedMessage: "Discount slab removed from this pending update." }));
+  const usesAmountPerMt = version.todBenefitBasis === "amount_per_eligible_tonne";
+  const savedTiers: SavedChoice[] = configuration.tiers.map((item) => ({ key: `tiers:${item.id}`, label: `${item.minimum_tonnes} tonnes or more · ${usesAmountPerMt ? `₹${item.discount_amount_per_tonne}/MT` : `${item.discount_percentage}% discount`}`, path: "tiers", body: { tierId: item.id }, removedMessage: "Discount slab removed from this pending update." }));
 
   function selectStock(value: string) {
     setStockTarget(value);
@@ -159,7 +160,7 @@ export function GuidedDraftSetupDrawer({ open, onClose, detail, reference, refre
     setIsBuiltinConversion(Boolean(factor));
   }
 
-  function updateTier(id: string, field: "minimumTonnes" | "discountPercentage", value: string) {
+  function updateTier(id: string, field: "minimumTonnes" | "benefitValue", value: string) {
     setPendingTiers((current) => current.map((tier) => tier.id === id ? { ...tier, [field]: value } : tier));
   }
 
@@ -171,7 +172,7 @@ export function GuidedDraftSetupDrawer({ open, onClose, detail, reference, refre
     const selectedSourceUomId = textField(fields.get("uom"));
     const selectedTonnesFactor = textField(fields.get("factor"));
     const isBuiltin = fields.get("builtin") === "true";
-    const enteredTiers = pendingTiers.filter((tier) => tier.minimumTonnes || tier.discountPercentage);
+    const enteredTiers = pendingTiers.filter((tier) => tier.minimumTonnes || tier.benefitValue);
 
     const savingGroups = setupStep === "groups";
     const savingTodDetails = setupStep === "tod";
@@ -189,8 +190,8 @@ export function GuidedDraftSetupDrawer({ open, onClose, detail, reference, refre
       onError("Confirm how the selected product quantity should be converted to tonnes.");
       return;
     }
-    if (isTurnoverDiscount && savingTodDetails && enteredTiers.some((tier) => !tier.minimumTonnes || !tier.discountPercentage)) {
-      onError("Enter both the purchase quantity and discount for each level.");
+    if (isTurnoverDiscount && savingTodDetails && enteredTiers.some((tier) => !tier.minimumTonnes || !tier.benefitValue)) {
+      onError("Enter both the purchase quantity and benefit for each level.");
       return;
     }
     if (isTurnoverDiscount && savingTodDetails && configuration.tiers.length === 0 && enteredTiers.length === 0) {
@@ -216,7 +217,8 @@ export function GuidedDraftSetupDrawer({ open, onClose, detail, reference, refre
     if (isTurnoverDiscount && savingTodDetails) {
       for (const tier of enteredTiers) {
         const existing = configuration.tiers.find((item) => item.minimum_tonnes === tier.minimumTonnes);
-        if (!existing || existing.discount_percentage !== tier.discountPercentage) operations.push({ path: "tiers", body: { minimumTonnes: tier.minimumTonnes, discountPercentage: tier.discountPercentage }, label: "discount level" });
+        const existingBenefit = usesAmountPerMt ? existing?.discount_amount_per_tonne : existing?.discount_percentage;
+        if (!existing || existingBenefit !== tier.benefitValue) operations.push({ path: "tiers", body: usesAmountPerMt ? { minimumTonnes: tier.minimumTonnes, amountPerTonne: tier.benefitValue } : { minimumTonnes: tier.minimumTonnes, discountPercentage: tier.benefitValue }, label: "discount level" });
       }
     }
 
@@ -311,8 +313,8 @@ export function GuidedDraftSetupDrawer({ open, onClose, detail, reference, refre
               {selectedStockItem && selectedUnit && automaticFactor ? <div className="quantity-conversion-card is-automatic"><CheckCircle2 size={18} /><div><strong>Automatic conversion</strong><p>Tally records {labelFor(selectedStockItem)} in {labelFor(selectedUnit)}. Meenakshi will convert it to tonnes automatically.</p></div><input type="hidden" name="uom" value={sourceUomId} /><input type="hidden" name="factor" value={tonnesPerSourceUnit} /><input type="hidden" name="builtin" value="true" /></div> : stockTarget ? <div className="quantity-conversion-card"><div><strong>Tell us how this quantity converts to tonnes</strong><p>{stockTarget.startsWith("stockGroup:") ? "Products in this group may use different units. Choose the unit used for this rule." : "This Tally unit does not have a standard tonnes conversion."}</p></div><div className="form-grid"><label>Unit used in Tally<select name="uom" value={sourceUomId} onChange={(event) => { const unitId = event.target.value; const unit = unitsById.get(unitId); const factor = standardTonnesFactor(unit?.code ?? unit?.name); setSourceUomId(unitId); setTonnesPerSourceUnit(factor ?? ""); setIsBuiltinConversion(Boolean(factor)); }}><option value="">Choose a unit</option>{reference?.masters.units.filter((item) => item.is_available).map((item) => <option key={item.id} value={item.id}>{labelFor(item)}</option>)}</select></label><label>One {selectedUnit ? labelFor(selectedUnit) : "unit"} equals<input name="factor" value={tonnesPerSourceUnit} onChange={(event) => { setTonnesPerSourceUnit(event.target.value); setIsBuiltinConversion(false); }} inputMode="decimal" placeholder="Tonnes, e.g. 0.001" /></label><input type="hidden" name="builtin" value={String(isBuiltinConversion)} /></div></div> : <div className="quantity-conversion-card is-muted"><div><strong>{configuration.conversions.length ? "Quantity conversion already saved" : "Choose a product first"}</strong><p>{configuration.conversions.length ? "Choose another product only if you want to add more eligible products." : "The product's Tally unit will be detected automatically."}</p></div></div>}
             </section>
             <section>
-              <div className="guided-draft-step"><span>4</span><div><h3>Set discount levels</h3><p>Add the discount customers earn when their eligible purchases reach each quantity.</p></div></div>
-              <div className="discount-level-list">{pendingTiers.map((tier, index) => <div className="discount-level-row" key={tier.id}><span className="discount-level-number">{index + 1}</span><label>Purchase at least<input value={tier.minimumTonnes} onChange={(event) => updateTier(tier.id, "minimumTonnes", event.target.value)} inputMode="decimal" placeholder="e.g. 100 tonnes" /></label><label>Customer receives<div className="input-with-suffix"><input value={tier.discountPercentage} onChange={(event) => updateTier(tier.id, "discountPercentage", event.target.value)} inputMode="decimal" placeholder="e.g. 2.5" /><span>% off</span></div></label>{pendingTiers.length > 1 && <IconButton label={`Remove discount level ${index + 1}`} onClick={() => setPendingTiers((current) => current.filter((item) => item.id !== tier.id))}><Trash2 size={15} /></IconButton>}</div>)}</div>
+              <div className="guided-draft-step"><span>4</span><div><h3>Set discount levels</h3><p>{usesAmountPerMt ? "The reached slab rate is applied to the customer’s full eligible quantity." : "Add the discount customers earn when their eligible purchases reach each quantity."}</p></div></div>
+              <div className="discount-level-list">{pendingTiers.map((tier, index) => <div className="discount-level-row" key={tier.id}><span className="discount-level-number">{index + 1}</span><label>Purchase at least<input value={tier.minimumTonnes} onChange={(event) => updateTier(tier.id, "minimumTonnes", event.target.value)} inputMode="decimal" placeholder="e.g. 100 tonnes" /></label><label>Customer receives<div className="input-with-suffix"><input value={tier.benefitValue} onChange={(event) => updateTier(tier.id, "benefitValue", event.target.value)} inputMode="decimal" placeholder={usesAmountPerMt ? "e.g. 400" : "e.g. 2.5"} /><span>{usesAmountPerMt ? "₹ / MT" : "% off"}</span></div></label>{pendingTiers.length > 1 && <IconButton label={`Remove discount level ${index + 1}`} onClick={() => setPendingTiers((current) => current.filter((item) => item.id !== tier.id))}><Trash2 size={15} /></IconButton>}</div>)}</div>
               <Button type="button" className="button-secondary discount-level-add" onClick={() => setPendingTiers((current) => [...current, newTier()])}><Plus size={15} />Add another discount level</Button>
             </section>
           </>}
