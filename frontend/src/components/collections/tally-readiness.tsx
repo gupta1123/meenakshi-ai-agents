@@ -206,7 +206,6 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
   const [disconnecting, setDisconnecting] = useState(false);
   const [targetMode, setTargetMode] = useState<TallyTargetMode>("same_machine");
   const [tallyUrlInput, setTallyUrlInput] = useState(sameMachineTallyUrl);
-  const [selectedCompanyGuid, setSelectedCompanyGuid] = useState<string | null>(null);
   const [companyCodeInput, setCompanyCodeInput] = useState("");
   const [registeringCompany, setRegisteringCompany] = useState(false);
   const refreshInFlight = useRef(false);
@@ -219,7 +218,10 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
   const snapshotConnector = connectorSnapshot?.connector ?? null;
   const tallyCompanies = connectorSnapshot?.companies ?? [];
   const activeTallyCompany = connectorSnapshot?.activeCompany ?? tallyCompanies.find((item) => item.isActive) ?? null;
-  const selectedTallyCompany = tallyCompanies.find((item) => item.guid === selectedCompanyGuid) ?? activeTallyCompany;
+  // Tally Prime is the only place where the active company can change.
+  // The browser only reflects its live selection; it never picks another
+  // detected company on the user's behalf.
+  const selectedTallyCompany = activeTallyCompany;
   const selectedCompanyAlreadyRegistered = Boolean(selectedTallyCompany && availableCompanies.some((item) => item.company.tally_company_guid.toLowerCase() === selectedTallyCompany.guid.toLowerCase()));
   const bridgeConnected = Boolean(snapshotConnector?.bridgeConnected);
   const tallyReachable = Boolean(snapshotConnector?.tallyReachable);
@@ -281,7 +283,6 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
     setSyncRun(null);
     setNotice(null);
     setActionError(null);
-    setSelectedCompanyGuid(null);
     setTargetMode("same_machine");
     setTallyUrlInput(sameMachineTallyUrl);
     void loadConnectors();
@@ -304,13 +305,6 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
     setTargetMode(targetModeFor(snapshotConnector.tallyUrl));
     setTallyUrlInput(snapshotConnector.tallyUrl);
   }, [bridgeConnected, snapshotConnector?.tallyUrl]);
-  useEffect(() => {
-    if (!activeTallyCompany) {
-      setSelectedCompanyGuid(null);
-      return;
-    }
-    setSelectedCompanyGuid((current) => tallyCompanies.some((item) => item.guid === current) ? current : activeTallyCompany.guid);
-  }, [activeTallyCompany, tallyCompanies]);
   useEffect(() => {
     setCompanyCodeInput(selectedTallyCompany ? suggestedCompanyCode(selectedTallyCompany.name) : "");
   }, [selectedTallyCompany?.guid, selectedTallyCompany?.name]);
@@ -442,8 +436,7 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
         method: "POST",
         body: jsonBody({ companyId: result.company.id }),
       });
-      window.sessionStorage.setItem("meenakshi.activeCompanyId", result.company.id);
-      setNotice(`${selectedTallyCompany.name} is registered separately and ready for a read-only master sync. Opening it now.`);
+      setNotice(`${selectedTallyCompany.name} is registered and will open automatically because it is active in Tally Prime.`);
       window.setTimeout(() => window.location.reload(), 750);
     } catch (cause) {
       setActionError(userFacingError(cause, "Could not register and bind this Tally company."));
@@ -667,12 +660,9 @@ function TallyReadinessSkeleton() {
               <>
                 <div className="tally-company-grid">
                   {tallyCompanies.map((tallyCompany) => (
-                    <button
+                    <article
                       key={tallyCompany.guid}
-                      type="button"
-                      className={`tally-company-option ${tallyCompany.guid === selectedTallyCompany?.guid ? "is-selected" : ""} ${tallyCompany.isActive ? "is-active" : ""}`}
-                      onClick={() => setSelectedCompanyGuid(tallyCompany.guid)}
-                      aria-pressed={tallyCompany.guid === selectedTallyCompany?.guid}
+                      className={`tally-company-option ${tallyCompany.isActive ? "is-active" : ""}`}
                     >
                       <Building2 size={16} />
                       <span>
@@ -680,15 +670,9 @@ function TallyReadinessSkeleton() {
                         <small>{tallyCompany.isActive ? "Active in Tally Prime" : "Available in Tally Prime"}</small>
                       </span>
                       {tallyCompany.isActive && <CheckCircle2 size={16} />}
-                    </button>
+                    </article>
                   ))}
                 </div>
-                {selectedTallyCompany && !selectedTallyCompany.isActive && (
-                  <p className="tally-company-selection-note">
-                    <CircleAlert size={14} />
-                    {selectedTallyCompany.name} is available, but Tally Prime currently has {activeTallyCompany?.name ?? "another company"} open. Switch the active company inside Tally Prime to use it.
-                  </p>
-                )}
                 {isAdministrator && selectedTallyCompany?.isActive && !selectedCompanyAlreadyRegistered && (
                   <div className="tally-connection-actions">
                     <label className="tally-company-code-field">
@@ -702,7 +686,7 @@ function TallyReadinessSkeleton() {
                   </div>
                 )}
                 {selectedTallyCompany && selectedCompanyAlreadyRegistered && selectedTallyCompany.guid.toLowerCase() !== company.tally_company_guid.toLowerCase() && (
-                  <p className="tally-company-selection-note"><CheckCircle2 size={14} />{selectedTallyCompany.name} is already registered separately. Refresh the workspace to select it.</p>
+                  <p className="tally-company-selection-note"><CheckCircle2 size={14} />{selectedTallyCompany.name} is registered. Meenakshi will open it automatically while it remains active in Tally Prime.</p>
                 )}
               </>
             ) : (

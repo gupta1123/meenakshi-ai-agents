@@ -6,7 +6,7 @@ Use this checklist after the backend, the Tally outbox worker, and the local Tal
 
 1. Start the backend, Tally outbox worker, and notification worker as usual.
 2. Start the configured local Tally bridge on the computer running Tally Prime, with the intended test company open.
-3. Sign in as the test Administrator and choose the authorized test company.
+3. Sign in as the test Administrator. Meenakshi should open the authorized company that is currently active in Tally Prime.
 4. Open **Tally Connection**. This is the only place that performs master/voucher synchronization. Do not expect a sync when changing between workspace tabs.
 5. If the page shows **Synchronize master data**, choose **Sync master data**. Run the bridge until the page reports that master data is current.
 6. Choose a small voucher date range that includes your test sales/receipt vouchers, choose **Sync voucher period**, and run the bridge until the page reports that vouchers are current.
@@ -15,11 +15,11 @@ Expected result: the top-right status is **Ready**. Moving between Overview, CD,
 
 ## Phase 1 — Access, feature gating, and company scope
 
-Where: sign-in screen and company selector in the header.
+Where: sign-in screen and the active-company indicator in the header.
 
 1. Sign in as `meenakshi.api.admin@example.test`.
-2. Confirm that only the authorized Meenakshi company is listed.
-3. Refresh the browser; confirm the selected company remains selected and the existing history remains visible.
+2. Confirm that the company open in Tally Prime is opened automatically, with no browser company picker.
+3. Change to another registered company in Tally Prime; confirm Meenakshi changes workspace automatically and does not show the previous company's data. Open an unregistered company and confirm the workspace is blocked.
 4. Sign out and sign in as the Finance Approver.
 
 Expected result: unauthorized companies and feature-disabled organizations never appear. Finance sees the operational workspace but does not see the Rulebook or launch-control management.
@@ -28,7 +28,7 @@ Expected result: unauthorized companies and feature-disabled organizations never
 
 Where: **Tally Connection**.
 
-1. Confirm the four readiness steps: company selected, paired bridge, matching Tally company, and current masters/vouchers.
+1. Confirm the four readiness steps: active Tally company detected, paired bridge, registered company match, and current masters/vouchers.
 2. As Administrator, test **Sync master data** and then **Sync voucher period**. Run the bridge as each sync is queued.
 3. Open Cash Discount after the sync completes.
 4. Optional recovery test: use **Rotate bridge credential** or **Deactivate incorrect binding** only against the test connector.

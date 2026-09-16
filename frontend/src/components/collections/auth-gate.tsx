@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
-import { ArrowRight, Building2, LockKeyhole, ShieldCheck } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent, type ReactNode } from "react";
+import { LockKeyhole, ShieldCheck } from "lucide-react";
 import type { Session } from "@supabase/supabase-js";
 
 import { ApiError, apiRequest } from "@/lib/api";
@@ -9,9 +9,16 @@ import { frontendConfigurationError, supabase } from "@/lib/supabase";
 import { userFacingError } from "@/lib/user-copy";
 
 import { CompanyProvider } from "./company-context";
-import type { Bootstrap, Company, Organization } from "./types";
+import { TallyCompanySelectionProvider } from "./tally-company-selection";
+import type { Bootstrap } from "./types";
 import { Button, Card, InlineMessage } from "./ui";
 import { WorkspaceLoadingShell } from "./workspace-loading-shell";
+
+type ActiveCompanyResponse = {
+  status: "ready" | "no_authorized_companies" | "tally_not_connected" | "company_not_open" | "active_company_not_registered" | "ambiguous_active_companies" | "company_not_authorized" | "connection_check_failed";
+  company: { id: string } | null;
+  activeTallyCompany?: { name: string; guid: string } | null;
+};
 
 export function AuthGate({ children }: { children: (props: { email: string; signOut: () => Promise<void> }) => ReactNode }) {
   const [token, setToken] = useState<string | null>(null);
@@ -20,7 +27,8 @@ export function AuthGate({ children }: { children: (props: { email: string; sign
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(frontendConfigurationError);
-  const [selectedCompanyId, setSelectedCompanyId] = useState("");
+  const [companySelection, setCompanySelection] = useState({ companyId: "", isManual: false });
+  const [activeCompanyRefresh, setActiveCompanyRefresh] = useState(0);
 
   useEffect(() => {
     if (!supabase) { setLoading(false); return; }
@@ -36,7 +44,7 @@ export function AuthGate({ children }: { children: (props: { email: string; sign
       setToken(null);
       setEmail("");
       setBootstrap(null);
-      setSelectedCompanyId("");
+      setCompanySelection({ companyId: "", isManual: false });
       setError(null);
       setLoading(false);
     }
@@ -117,17 +125,36 @@ export function AuthGate({ children }: { children: (props: { email: string; sign
   async function signOut() { await supabase?.auth.signOut(); }
 
   const availableCompanies = useMemo(() => bootstrap?.organizations.flatMap((organization) => organization.companies.map((company) => ({ company, organization }))) ?? [], [bootstrap]);
-  useEffect(() => {
-    if (!availableCompanies.length) { setSelectedCompanyId(""); return; }
-    const savedCompany = window.sessionStorage.getItem("meenakshi.activeCompanyId");
-    if (availableCompanies.some((item) => item.company.id === savedCompany)) { setSelectedCompanyId(savedCompany ?? ""); return; }
-    if (availableCompanies.length === 1) setSelectedCompanyId(availableCompanies[0].company.id);
-  }, [availableCompanies]);
+  const selectCompany = useCallback((companyId: string) => {
+    setCompanySelection({ companyId, isManual: true });
+    setActiveCompanyRefresh((value) => value + 1);
+  }, []);
 
-  function openCompany(companyId: string) {
-    window.sessionStorage.setItem("meenakshi.activeCompanyId", companyId);
-    setSelectedCompanyId(companyId);
-  }
+  useEffect(() => {
+    if (!token || !bootstrap) {
+      setCompanySelection({ companyId: "", isManual: false });
+      return;
+    }
+    let active = true;
+    window.sessionStorage.removeItem("meenakshi.activeCompanyId");
+    const resolveActiveCompany = async () => {
+      try {
+        const response = await apiRequest<ActiveCompanyResponse>(token, "/api/active-company");
+        if (!active) return;
+        const isAuthorisedCompany = response.status === "ready"
+          && Boolean(response.company && availableCompanies.some((item) => item.company.id === response.company?.id));
+        if (isAuthorisedCompany) {
+          const activeCompanyId = response.company!.id;
+          setCompanySelection((current) => current.isManual && current.companyId !== activeCompanyId ? current : { companyId: activeCompanyId, isManual: false });
+        }
+      } catch {
+        // Keep the last usable selection while the next heartbeat check retries.
+      }
+    };
+    void resolveActiveCompany();
+    const timer = window.setInterval(() => { void resolveActiveCompany(); }, 15_000);
+    return () => { active = false; window.clearInterval(timer); };
+  }, [activeCompanyRefresh, availableCompanies, bootstrap, token]);
 
   if (frontendConfigurationError) return <main className="access-page"><Card><p className="eyebrow">App setup</p><h1>Meenakshi is not ready yet</h1><p className="section-detail">Ask your administrator to complete the application setup.</p></Card></main>;
   if (loading || (token && !bootstrap && !error)) return <WorkspaceLoadingShell />;
@@ -137,11 +164,10 @@ export function AuthGate({ children }: { children: (props: { email: string; sign
   </main>;
   if (!bootstrap) return <main className="access-page"><Card><p className="eyebrow">Access</p><h1>Checking Collections access</h1><p className="section-detail">{error ?? "We could not load your authorized companies yet. Refresh access or sign in again."}</p><div className="access-actions"><Button className="button-secondary" onClick={() => window.location.reload()}>Refresh access</Button><Button onClick={() => void signOut()}>Sign out</Button></div></Card></main>;
   if (!availableCompanies.length) return <main className="access-page"><Card><p className="eyebrow">Access setup needed</p><h1>No Collections company has been assigned</h1><p className="section-detail">Your sign-in succeeded, but no enabled, authorized Tally company was returned for Collections. An Administrator must register and bind the intended Tally company before it can be selected here.</p><div className="access-actions"><Button className="button-secondary" onClick={() => window.location.reload()}>Refresh access</Button><Button onClick={() => void signOut()}>Sign out</Button></div></Card></main>;
-  if (!selectedCompanyId) return <CompanyChooser companies={availableCompanies} onOpen={openCompany} onSignOut={signOut} />;
+  // Kalika keeps the picker in the workspace chrome. The selected company is
+  // still checked against Tally before data or actions are displayed, but a
+  // mismatch must not replace the workspace with a second picker.
+  const workspaceCompanyId = companySelection.companyId || availableCompanies[0].company.id;
 
-  return <CompanyProvider bootstrap={bootstrap} initialCompanyId={selectedCompanyId}>{children({ email, signOut })}</CompanyProvider>;
-}
-
-function CompanyChooser({ companies, onOpen, onSignOut }: { companies: Array<{ company: Company; organization: Organization }>; onOpen: (companyId: string) => void; onSignOut: () => Promise<void> }) {
-  return <main className="company-chooser-page"><section className="company-chooser"><div className="chooser-heading"><span><Building2 size={21} /></span><div><p className="eyebrow">Collections workspace</p><h1>Choose a company</h1><p>Open one of the Tally companies already authorized and registered for Meenakshi Collections.</p></div></div><div className="company-choice-list">{companies.map(({ company, organization }) => <button key={company.id} onClick={() => onOpen(company.id)}><span><strong>{company.tally_company_name}</strong><small>{organization.name} · {company.code}</small></span><ArrowRight size={18} /></button>)}</div><button className="text-button" onClick={() => void onSignOut()}>Sign out</button></section></main>;
+  return <CompanyProvider key={workspaceCompanyId} bootstrap={bootstrap} initialCompanyId={workspaceCompanyId}><TallyCompanySelectionProvider selectedCompanyId={workspaceCompanyId} selectCompany={selectCompany}>{children({ email, signOut })}</TallyCompanySelectionProvider></CompanyProvider>;
 }

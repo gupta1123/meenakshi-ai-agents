@@ -4,7 +4,7 @@ import { fetchLiveCdEvidence } from "./commands/live-cd-evidence.mjs";
 import { fetchLiveTodEvidence } from "./commands/live-tod-evidence.mjs";
 import { evaluateLocalCashDiscount } from "./local-cd-evaluator.mjs";
 import { evaluateLocalTurnoverDiscount } from "./local-tod-evaluator.mjs";
-import { probeCurrentCompanyName } from "./tally/company-probe.mjs";
+import { probeActiveCompany } from "./tally/company-probe.mjs";
 
 export const LOCAL_TALLY_PORT = 3219;
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
@@ -64,8 +64,8 @@ export function startLocalApi(config) {
     }
     if (request.method === "GET" && request.url === "/health") {
       try {
-        const activeCompanyName = await probeCurrentCompanyName(config.tallyUrl);
-        respond(response, 200, { ready: true, activeCompanyName }, origin, config);
+        const activeCompany = await probeActiveCompany(config.tallyUrl);
+        respond(response, 200, { ready: true, activeCompany }, origin, config);
       } catch (error) {
         respond(response, 503, { ready: false, error: error instanceof Error ? error.message : String(error) }, origin, config);
       }
@@ -81,11 +81,14 @@ export function startLocalApi(config) {
     try {
       const body = await readJson(request);
       const expectedCompany = body.expectedCompany && typeof body.expectedCompany === "object" ? body.expectedCompany : {};
-      const activeCompanyName = await probeCurrentCompanyName(config.tallyUrl);
-      if (!expectedCompany.name || normalized(activeCompanyName) !== normalized(expectedCompany.name)) {
+      const activeCompany = await probeActiveCompany(config.tallyUrl);
+      const expectedGuid = String(expectedCompany.guid ?? "").trim();
+      const sameCompany = expectedGuid
+        ? normalized(activeCompany.guid) === normalized(expectedGuid)
+        : Boolean(expectedCompany.name) && normalized(activeCompany.name) === normalized(expectedCompany.name);
+      if (!sameCompany) {
         throw new Error(`Open ${expectedCompany.name || "the selected company"} in Tally Prime before running this calculation.`);
       }
-      const activeCompany = { name: activeCompanyName, guid: String(expectedCompany.guid ?? "") };
       const command = { payload: { evaluationRunId: null, voucherScope: body.voucherScope } };
       const evidence = isCashDiscount
         ? await fetchLiveCdEvidence(command, { config, activeCompany, isCancelled: () => false }, null)

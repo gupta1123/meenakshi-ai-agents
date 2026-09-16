@@ -161,6 +161,14 @@ GET /api/connectors/{connectorId}/bindings
 
 Use this to display the active binding and the most recently observed company identity.
 
+### Resolve the active workspace company
+
+```http
+GET /api/active-company
+```
+
+Returns the single authorised and actively bound company whose Tally GUID matches a fresh connector heartbeat. The browser must use this result as its workspace scope rather than a saved or manually selected company. If no company is open, the active company is unregistered, or more than one connector reports different active companies, the response contains no `company` and a blocking status.
+
 ### Read Tally readiness
 
 ```http

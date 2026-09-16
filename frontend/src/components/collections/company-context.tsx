@@ -11,7 +11,6 @@ type CompanyContextValue = {
   isAdministrator: boolean;
   isFinanceApprover: boolean;
   companyKey: number;
-  selectCompany: (companyId: string) => void;
 };
 
 const CompanyContext = createContext<CompanyContextValue | null>(null);
@@ -23,8 +22,12 @@ export function CompanyProvider({ bootstrap, initialCompanyId, children }: { boo
 
   useEffect(() => {
     const valid = companies.find((item) => item.company.id === initialCompanyId) ?? companies[0];
-    setCompanyId((current) => companies.some((item) => item.company.id === current) ? current : valid?.company.id ?? "");
-  }, [companies, initialCompanyId]);
+    const nextCompanyId = valid?.company.id ?? "";
+    if (nextCompanyId && nextCompanyId !== companyId) {
+      setCompanyId(nextCompanyId);
+      setCompanyKey((key) => key + 1);
+    }
+  }, [companies, companyId, initialCompanyId]);
 
   const selected = companies.find((item) => item.company.id === companyId) ?? companies[0];
   if (!selected) return null;
@@ -36,12 +39,6 @@ export function CompanyProvider({ bootstrap, initialCompanyId, children }: { boo
     isAdministrator: selected.organization.roles.includes("administrator"),
     isFinanceApprover: selected.organization.roles.includes("finance_approver"),
     companyKey,
-    selectCompany(nextCompanyId) {
-      if (nextCompanyId === selected.company.id || !companies.some((item) => item.company.id === nextCompanyId)) return;
-      window.sessionStorage.setItem("meenakshi.activeCompanyId", nextCompanyId);
-      setCompanyId(nextCompanyId);
-      setCompanyKey((key) => key + 1);
-    },
   };
 
   return <CompanyContext.Provider value={value}>{children}</CompanyContext.Provider>;

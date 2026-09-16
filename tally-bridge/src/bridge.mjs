@@ -146,6 +146,15 @@ function commandLease(config, command, activeCompany) {
   };
 }
 
+function tallyCompaniesMatch(expectedCompany, activeCompany) {
+  const expectedGuid = String(expectedCompany?.guid ?? "").trim().toLowerCase();
+  const activeGuid = String(activeCompany?.guid ?? "").trim().toLowerCase();
+  // GUID is Tally's stable company identity. A display-name change must not
+  // redirect a command away from the company currently open in Tally Prime.
+  if (expectedGuid || activeGuid) return Boolean(expectedGuid && activeGuid) && expectedGuid === activeGuid;
+  return String(expectedCompany?.name ?? "").trim().toLowerCase() === String(activeCompany?.name ?? "").trim().toLowerCase();
+}
+
 async function processOneCommand(config, activeCompany) {
   if (!activeCompany) return false;
   const { command } = await claimNextCommand(config);
@@ -153,10 +162,7 @@ async function processOneCommand(config, activeCompany) {
   commandActivity(command, "running");
   const lease = commandLease(config, command, activeCompany);
   try {
-    if (
-      activeCompany.guid.toLowerCase() !== command.expectedTallyCompany.guid.toLowerCase()
-      || activeCompany.name.toLowerCase() !== command.expectedTallyCompany.name.toLowerCase()
-    ) {
+    if (!tallyCompaniesMatch(command.expectedTallyCompany, activeCompany)) {
       lease.stop();
       await reportCommandResult(config, command.id, {
         status: "failed",

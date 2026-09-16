@@ -117,6 +117,30 @@ export async function POST(request: Request) {
         const { error: observationError } = await supabase.from("tally_connector_company_observations").upsert(observations, { onConflict: "connector_id,tally_company_guid" });
         if (observationError) throw observationError;
       }
+    } else if (runtimeSchemaAvailable && activeCompany.name && activeCompany.guid) {
+      // The bridge probes the active company on every heartbeat, whereas the
+      // full company list is intentionally cached. Keep this lightweight live
+      // pointer current so the web workspace can follow a Tally Prime switch
+      // without waiting for the next full company-list refresh.
+      const deactivatePrevious = await supabase
+        .from("tally_connector_company_observations")
+        .update({ is_active: false })
+        .eq("connector_id", connector.id)
+        .eq("is_active", true)
+        .neq("tally_company_guid", activeCompany.guid);
+      if (deactivatePrevious.error) throw deactivatePrevious.error;
+      const { error: activeObservationError } = await supabase
+        .from("tally_connector_company_observations")
+        .upsert({
+          organization_id: connector.organization_id,
+          connector_id: connector.id,
+          tally_company_guid: activeCompany.guid,
+          tally_company_name: activeCompany.name,
+          is_available: true,
+          is_active: true,
+          last_seen_at: now,
+        }, { onConflict: "connector_id,tally_company_guid" });
+      if (activeObservationError) throw activeObservationError;
     }
     const { data: bindings, error: bindingError } = await supabase.from("tally_connector_company_bindings").select("id, company_id, expected_tally_company_guid, expected_tally_company_name").eq("connector_id", connector.id).eq("is_active", true);
     if (bindingError) throw bindingError;

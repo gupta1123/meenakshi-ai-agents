@@ -54,20 +54,23 @@ export function WorkspaceEntry({ page, email, signOut }: { page: CollectionsPage
   return <Workspace page={page} email={email} signOut={signOut} tallyHealth={health} />;
 }
 
-function ReadinessGate(_props: { health: TallyHealth | null }) {
+function ReadinessGate({ health }: { health: TallyHealth | null }) {
+  const { company } = useCompany();
+  const companyMismatch = health?.status === "company_mismatch";
   return (
     <div className="workspace-content">
       <WorkspacePageHeader
         eyebrow="Tally connection"
-        title="Tally not connected"
-        detail="Keep Tally Prime and the Meenakshi Tally Connector open to use live discount checks."
+        title={companyMismatch ? "Tally company needs switching" : "Tally not connected"}
+        detail={companyMismatch ? `Switch Tally Prime to ${company.tally_company_name}; Meenakshi will continue automatically.` : "Keep Tally Prime and the Meenakshi Tally Connector open to use live discount checks."}
       />
+      {companyMismatch && <TallyCompanyMismatchNotice health={health} expectedCompanyName={company.tally_company_name} />}
     </div>
   );
 }
 
 function Workspace({ page, email, signOut, tallyHealth }: { page: CollectionsPage; email: string; signOut: () => Promise<void>; tallyHealth: TallyHealth | null }) {
-  const { companyKey, isAdministrator } = useCompany();
+  const { company, companyKey, isAdministrator } = useCompany();
   const { data, loading, error, refresh, setError } = useWorkspaceSession();
   const [notice, setNotice] = useState<string | null>(null);
   const customerNames = useMemo(() => new Map(data.reference?.masters.customers.map((customer) => [customer.id, labelFor(customer)]) ?? []), [data.reference]);
@@ -76,13 +79,19 @@ function Workspace({ page, email, signOut, tallyHealth }: { page: CollectionsPag
   const tallyEvidenceCurrent = page === "rulebook"
     ? Boolean(tallyHealth?.ready && tallyHealth.sync?.masters.status === "current")
     : workspaceCanCalculateLive(tallyHealth);
+  const companyMismatch = tallyHealth?.status === "company_mismatch";
 
   return <AppShell email={email} onSignOut={signOut} tallyStatus={tallyHealth?.status ?? (loading ? "required" : "bridge_stale")}>
     <div className="workspace-content" key={companyKey}>
       {error ? <InlineMessage tone="error">{error}</InlineMessage> : notice ? <InlineMessage tone="success">{notice}</InlineMessage> : null}
-      {loading && !hasLoadedWorkspace ? <Skeleton lines={7} /> : <>{!tallyEvidenceCurrent && <WorkspaceAvailabilityNotice page={page} />}{page === "control-centre" ? <OverviewPage {...pageProps} /> : page === "cash-discount" || page === "turnover-discount" ? <DiscountPage scheme={page === "cash-discount" ? "cd" : "tod"} {...pageProps} /> : page === "credit-notes" ? <CreditNotesPage {...pageProps} /> : page === "messages" ? <MessagesWorkspace {...pageProps} /> : <RulebookWorkspace {...pageProps} />}</>}
+      {loading && !hasLoadedWorkspace ? <Skeleton lines={7} /> : companyMismatch ? <TallyCompanyMismatchNotice health={tallyHealth} expectedCompanyName={company.tally_company_name} /> : <>{!tallyEvidenceCurrent && <WorkspaceAvailabilityNotice page={page} />}{page === "control-centre" ? <OverviewPage {...pageProps} /> : page === "cash-discount" || page === "turnover-discount" ? <DiscountPage scheme={page === "cash-discount" ? "cd" : "tod"} {...pageProps} /> : page === "credit-notes" ? <CreditNotesPage {...pageProps} /> : page === "messages" ? <MessagesWorkspace {...pageProps} /> : <RulebookWorkspace {...pageProps} />}</>}
     </div>
   </AppShell>;
+}
+
+function TallyCompanyMismatchNotice({ health, expectedCompanyName }: { health: TallyHealth | null; expectedCompanyName: string }) {
+  const activeCompanyName = health?.binding?.observedCompanyName || "another company";
+  return <InlineMessage tone="warning"><strong>Company context locked.</strong> Tally Prime is open to <strong>{activeCompanyName}</strong>. Switch it to <strong>{expectedCompanyName}</strong>; Meenakshi will update automatically and no data or actions are shown until the companies match.</InlineMessage>;
 }
 
 function WorkspaceAvailabilityNotice({ page }: { page: CollectionsPage }) {

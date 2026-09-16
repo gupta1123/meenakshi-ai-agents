@@ -48,7 +48,9 @@ async function accessToken() {
 export function WorkspaceSessionProvider({ email, signOut, children }: { email: string; signOut: () => Promise<void>; children: ReactNode }) {
   const { company, companyKey, isAdministrator } = useCompany();
   const pathname = usePathname();
-  const { health, reload: reloadTally } = useTallyHealth({ enabled: pathname !== "/cash-discount" });
+  // Every workflow, including Cash Discount, needs the live Tally status for
+  // the company picker and connection badge to reflect the active company.
+  const { health, reload: reloadTally } = useTallyHealth();
   const [data, setData] = useState<WorkspaceData>(emptyData);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);

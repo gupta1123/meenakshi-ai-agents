@@ -8,6 +8,7 @@ import { createContext, useCallback, useContext, useEffect, useState, type React
 import { StatusBadge } from "./ui";
 import { useCompany } from "./company-context";
 import { GlobalTallyMonitor } from "./global-tally-monitor";
+import { useTallyCompanySelection } from "./tally-company-selection";
 import headerStyles from "./app-shell-header.module.css";
 
 const navigation = [
@@ -36,12 +37,12 @@ export function WorkspacePageHeader({ eyebrow, title, detail, action }: Workspac
 export function AppShell({ children, email, tallyStatus, onSignOut }: { children: ReactNode; email: string; tallyStatus: string; onSignOut: () => Promise<void> }) {
   const pathname = usePathname();
   const activePathname = pathname ?? "";
-  const { company, organization, availableCompanies, isAdministrator, selectCompany } = useCompany();
+  const { company, organization, isAdministrator, availableCompanies } = useCompany();
+  const { selectCompany } = useTallyCompanySelection();
   const [menuOpen, setMenuOpen] = useState(false);
   const [pageHeader, setPageHeader] = useState<WorkspacePageHeaderContent | null>(null);
   const updatePageHeader = useCallback((header: WorkspacePageHeaderContent | null) => setPageHeader(header), []);
   const initials = email.split("@")[0]?.slice(0, 2).toUpperCase() || "MC";
-  const isTallyConnectionPage = activePathname === "/tally";
 
   return <WorkspacePageHeaderContext.Provider value={updatePageHeader}><div className="collections-shell">
     <aside className="collections-sidebar">
@@ -96,8 +97,7 @@ export function AppShell({ children, email, tallyStatus, onSignOut }: { children
         <button className="mobile-wordmark" aria-label="Navigation"><Menu size={20} /></button>
         {pageHeader && <div className={`workspace-page-header ${headerStyles.pageHeader}`}><div>{pageHeader.eyebrow && <p className="eyebrow">{pageHeader.eyebrow}</p>}<h1>{pageHeader.title}</h1>{pageHeader.detail && <p>{pageHeader.detail}</p>}</div></div>}
         <div className={`workspace-topbar-tools ${headerStyles.tools}`}>
-        {!isTallyConnectionPage && <div className="company-select-compact"><Building2 size={14} aria-hidden="true" /><select aria-label="Select active company" value={company.id} onChange={(event) => selectCompany(event.target.value)}>{availableCompanies.map(({ company: item }) => <option value={item.id} key={item.id}>{item.tally_company_name}</option>)}</select></div>}
-        {!isTallyConnectionPage && <div className="company-select"><span>Authorized company</span><select aria-label="Select active company" value={company.id} onChange={(event) => selectCompany(event.target.value)}>{availableCompanies.map(({ company: item, organization: companyOrganization }) => <option value={item.id} key={item.id}>{companyOrganization.name} · {item.tally_company_name}</option>)}</select></div>}
+        <div className="company-select-compact"><Building2 size={14} aria-hidden="true" /><select aria-label="Choose company to work with" onChange={(event) => selectCompany(event.target.value)} title="Choose company to work with" value={company.id}>{availableCompanies.map(({ company: option }) => <option key={option.id} value={option.id}>{option.tally_company_name}</option>)}</select></div>
         {pageHeader?.action}<GlobalTallyMonitor tallyStatus={tallyStatus} /></div>
       </header>
       {children}

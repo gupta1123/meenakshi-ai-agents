@@ -13,6 +13,6 @@ This is the separate Phase 3 administrator UI. It signs in with Supabase Auth an
 npm run dev
 ```
 
-Open `http://localhost:3000`, sign in as an organization administrator, and select the synchronized Tally company.
+Open `http://localhost:3000`, sign in as an organization administrator, and keep the intended registered company active in Tally Prime. Meenakshi follows that company automatically. Like Kalika, the company list can also express an intended company; it never switches Tally Prime itself. Until that company is opened in Tally Prime, operational pages remain safely locked.
 
 The Rulebook pages require the Phase 3 activation migration to be applied before validation/activation endpoints can work. See `../docs/api-reference.md` for the safe configuration and test sequence.
