@@ -30,7 +30,7 @@ function newTier(): PendingTier {
   return { id: globalThis.crypto?.randomUUID?.() ?? `tier-${Date.now()}-${Math.random()}`, minimumTonnes: "", benefitValue: "" };
 }
 
-function standardTonnesFactor(code: string | undefined) {
+export function standardTonnesFactor(code: string | undefined) {
   const unit = String(code ?? "").trim().toUpperCase().replaceAll(".", "");
   if (["MT", "MTS", "TON", "TONNE", "TONNES"].includes(unit)) return "1";
   if (["KG", "KGS", "KILOGRAM", "KILOGRAMS"].includes(unit)) return "0.001";

@@ -87,7 +87,8 @@ export async function GET(request: Request, context: RouteContext) {
     const priorRuleQuery = ruleVersionIds ? priorRuleBase.in("rule_version_id", ruleVersionIds) : priorRuleBase;
     const postingsQuery = supabase
       .from("cash_discount_debit_note_postings")
-      .select("id, candidate_id, status, debit_note_date, amount, calculation_reference, verified_tally_guid, verified_voucher_number, verified_amount, verified_at, failure_reason, reconciliation_reason, last_reconciled_at, created_at, updated_at")
+      // note_kind: per-MT Cash Discount Credit Notes share this table (docs/CD_LOGIC.md).
+      .select("id, candidate_id, status, debit_note_date, amount, calculation_reference, verified_tally_guid, verified_voucher_number, verified_amount, verified_at, failure_reason, reconciliation_reason, last_reconciled_at, created_at, updated_at, note_kind:debit_note_snapshot->>noteKind")
       .eq("company_id", company.id)
       .order("created_at", { ascending: false })
       .limit(250);

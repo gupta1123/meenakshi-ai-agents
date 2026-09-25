@@ -1,6 +1,6 @@
 # Cash Discount (CD): core logic
 
-**Status:** agreed rules, source of truth (client notes of 2026-09-25, `cdnotes.txt`). **Not built yet.** Section 8 lists what changes from the current implementation.
+**Status:** agreed rules, source of truth (client notes of 2026-09-25, `cdnotes.txt`). **Built 2026-09-26; active once migration `20260926090000_cash_discount_segments_per_mt.sql` is run and a per-MT rule is saved.** Legacy percentage rules keep their old behaviour until replaced. Section 9 lists what changes from the old implementation; section 11 maps the code.
 
 ## 1. The idea in one paragraph
 
@@ -94,3 +94,24 @@ Existing Cash Discount Debit Notes already created in Tally are kept as history;
 ## 10. Still to confirm
 
 Nothing. All rules above are agreed.
+
+## 11. Where the logic lives
+
+| Part | File |
+| --- | --- |
+| Rule tables, validation, draft copy, settlement snapshot, Credit Note queue | `supabase/migrations/20260926090000_cash_discount_segments_per_mt.sql` |
+| Save a draft's segments (overlap and Sundry Debtors checks) | `backend/src/app/api/companies/[companyId]/scheme-versions/[versionId]/cd-segments/route.ts` |
+| Rule editor: segments, products, MT per unit | `frontend/src/components/collections/rule-editor.tsx` |
+| Load a per-MT rule; connector scope (customers → segment, products, MT conversions) | `backend/src/lib/evaluation/evidence.ts` (`loadRule`, `loadLiveCdLocalBootstrap`) |
+| Read Tally: invoices with MT, Receipt/Journal allocations, existing CD Credit Notes | `tally-bridge/src/commands/live-cd-evidence.mjs` |
+| The calculation (categories, windows, amounts, GST deadline) | `tally-bridge/src/local-cd-settlement-evaluator.mjs`; identical copy `backend/src/lib/evaluation/cd-settlement.mjs` (a test fails if they differ) |
+| Save the check, queue Credit Notes for Discounted payments | `backend/src/lib/evaluation/live-cd.ts` (`completeCdSettlementRun`) |
+| Page data / staff "Create Credit Note" | `backend/src/app/api/companies/[companyId]/cash-discount/settlements/...` |
+| Cash Discount page (per-MT) | `frontend/src/components/collections/cash-discount-settlements.tsx` |
+| GST split and narration | `backend/src/lib/notes/debit-note-gst.mjs` (`noteKind = credit_note`) |
+| Create and verify the Credit Note in Tally | `tally-bridge/src/tally/debit-notes.mjs` (Credit Note mode of the Debit Note command) |
+| PDF | `backend/src/lib/notes/verified-note-document.mjs` |
+| TOD 25-day check counts the CD Credit Note | `tally-bridge/src/commands/live-tod-evidence.mjs` |
+| Tests | `tally-bridge/test/cd-settlements.test.mjs` |
+
+Cash Discount Credit Notes are stored with the Cash Discount Debit Notes (`cash_discount_debit_note_postings`, `note_kind = 'credit_note'`) and appear on the Debit Notes page labelled "Cash Discount Credit Note". WhatsApp is disabled for them until a Credit Note template for Cash Discount is approved in MSG91; the current `share_debit_memo` template describes a debit memo.

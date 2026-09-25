@@ -7,8 +7,10 @@ export function offersCashDiscount(narration: unknown) {
   return /\bcash\s*discount\b|\bc\s*\.?\s*d\s*\.?\b/i.test(text) && /%|\bper\s*cent(?:age)?\b/i.test(text);
 }
 import { decimal, money, nonNegative, percentOf } from "./decimal";
-import { loadLiveCdBatchRule, type EvaluationRunRecord } from "./evidence";
+import { loadLiveCdBatchRule, loadLiveCdLocalBootstrap, type EvaluationRunRecord } from "./evidence";
 import type { FrozenCdRule } from "./contracts";
+import { evaluateCashDiscountSettlements } from "./cd-settlement.mjs";
+import { getCompanyLaunchControl } from "@/lib/launch-control";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 type LiveCdPayment = {
@@ -341,8 +343,58 @@ export function mergeVerifiedDebitNotes(invoices: LiveCdInvoice[], postings: Ver
   });
 }
 
+/**
+ * Per-MT Cash Discount (docs/CD_LOGIC.md): re-run the settlement calculation on
+ * the connector's evidence, save the current snapshot, and queue a Credit Note
+ * for every Discounted payment when Credit Note creation is on. More-than-90%
+ * payments wait for staff. Re-running never duplicates: the queue key is per
+ * invoice, and the database allows one live Credit Note per invoice.
+ */
+export async function completeCdSettlementRun(run: EvaluationRunRecord, batch: LiveCdBatch) {
+  const supabase = createSupabaseAdminClient();
+  const bootstrap = await loadLiveCdLocalBootstrap(run, batch.ruleVersionId);
+  const rule = bootstrap.rule as FrozenCdRule & { customerSegments?: Record<string, number> };
+  const result = evaluateCashDiscountSettlements(rule, bootstrap.evaluatedOn, batch.invoices) as {
+    results: Array<Record<string, unknown>>;
+    candidates: Array<Record<string, unknown> & { customerId: string; invoiceGuid: string; category: string }>;
+    totals: Record<string, unknown>;
+  };
+  const summary = { schemeType: "cd", cdDiscountBasis: "amount_per_tonne", outcome: "completed", liveOnly: true, ...result.totals, settlementResults: result.results };
+  const { error: snapshotError } = await supabase.rpc("replace_meenakshi_cd_settlement_snapshot", {
+    p_company_id: run.company_id,
+    p_evaluation_run_id: run.id,
+    p_rule_version_id: rule.id,
+    p_source_fingerprint: batch.sourceFingerprint,
+    p_period_start: batch.dateFrom,
+    p_period_end: batch.dateTo,
+    p_candidates: result.candidates.map((candidate) => ({ ...candidate, evaluatedOn: bootstrap.evaluatedOn, customerTallyGuid: candidate.customerId, invoiceTallyGuid: candidate.invoiceGuid })),
+    p_summary: summary,
+  });
+  if (snapshotError) throw snapshotError;
+
+  let autoQueued = 0;
+  const control = await getCompanyLaunchControl(run.company_id);
+  if (control.mode === "posting_enabled") {
+    const { data: ready, error } = await supabase.from("cash_discount_recovery_candidates")
+      .select("id, invoice_tally_guid").eq("company_id", run.company_id).eq("current_snapshot", true)
+      .eq("candidate_kind", "settlement").eq("status", "action_required");
+    if (error) throw error;
+    for (const candidate of ready ?? []) {
+      const { error: queueError } = await supabase.rpc("enqueue_meenakshi_cd_credit_note", {
+        p_company_id: run.company_id, p_candidate_id: candidate.id, p_actor_id: run.requested_by, p_idempotency_key: `cd-cn-auto:${candidate.invoice_tally_guid}`,
+      });
+      // An invoice that already has a Credit Note is skipped, not a failure.
+      if (queueError && !/already exists|already being prepared/i.test(queueError.message)) throw queueError;
+      if (!queueError) autoQueued += 1;
+    }
+  }
+  return { totals: { ...result.totals, autoQueued }, rule, evaluatedOn: bootstrap.evaluatedOn };
+}
+
 export async function completeLiveCdRun(run: EvaluationRunRecord, batch: LiveCdBatch) {
   const supabase = createSupabaseAdminClient();
+  const { rule: selectedRule } = await loadLiveCdBatchRule(run, batch.ruleVersionId);
+  if (selectedRule.schemeType === "cd" && selectedRule.cdDiscountBasis === "amount_per_tonne") return completeCdSettlementRun(run, batch);
   const { data: verifiedPostings, error: postingError } = await supabase
     .from("cash_discount_debit_note_postings")
     .select("verified_tally_guid, verified_voucher_number, verified_amount, amount, debit_note_date, calculation_reference, cash_discount_recovery_candidates!inner(invoice_tally_guid, customer_name, bill_reference)")

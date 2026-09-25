@@ -3,6 +3,7 @@ import http from "node:http";
 import { fetchLiveCdEvidence } from "./commands/live-cd-evidence.mjs";
 import { fetchLiveTodEvidence } from "./commands/live-tod-evidence.mjs";
 import { evaluateLocalCashDiscount } from "./local-cd-evaluator.mjs";
+import { evaluateCashDiscountSettlements } from "./local-cd-settlement-evaluator.mjs";
 import { evaluateLocalTurnoverDiscount } from "./local-tod-evaluator.mjs";
 import { probeActiveCompany } from "./tally/company-probe.mjs";
 
@@ -102,7 +103,9 @@ export function startLocalApi(config) {
         ? await fetchLiveCdEvidence(command, { config, activeCompany, isCancelled: () => false }, null)
         : await fetchLiveTodEvidence(command, { config, activeCompany, isCancelled: () => false });
       const calculation = isCashDiscount
-        ? evaluateLocalCashDiscount(body.rule, body.evaluatedOn, evidence.invoices)
+        ? body.rule?.cdDiscountBasis === "amount_per_tonne"
+          ? evaluateCashDiscountSettlements(body.rule, body.evaluatedOn, evidence.invoices)
+          : evaluateLocalCashDiscount(body.rule, body.evaluatedOn, evidence.invoices)
         : evaluateLocalTurnoverDiscount(body.rule, body.evaluatedOn, body.periodStart, body.periodEnd, evidence.customerAggregates);
       respond(response, 200, { ...calculation, evidence, durationMs: Math.round(performance.now() - startedAt) }, origin, config);
     } catch (error) {

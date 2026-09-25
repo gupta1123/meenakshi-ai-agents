@@ -113,18 +113,27 @@ export async function prepareDebitNoteDocument(supabase, companyId, postingId) {
   // Tally rounds the voucher to paise; print what Tally holds.
   const total = Math.round(amount(posting.verified_amount) * 100) / 100;
   const party = required(snapshot.party?.name, "customer ledger");
+  // Per-MT Cash Discount Credit Notes share this table (note_kind = credit_note).
+  const isCreditNote = snapshot.noteKind === "credit_note";
   const { data: candidate } = posting.candidate_id
-    ? await supabase.from("cash_discount_recovery_candidates").select("invoice_number,invoice_date,granted_discount_percentage,missed_window_deadline").eq("id", posting.candidate_id).maybeSingle()
+    ? await supabase.from("cash_discount_recovery_candidates").select(isCreditNote ? "invoice_number,invoice_date,missed_window_deadline,eligible_tonnes,amount_per_tonne" : "invoice_number,invoice_date,granted_discount_percentage,missed_window_deadline").eq("id", posting.candidate_id).maybeSingle()
     : { data: null };
   const invoiceNumber = candidate?.invoice_number ?? snapshot.sourceInvoice?.number;
   const percentage = Number(candidate?.granted_discount_percentage);
-  const particulars = [
+  const tonnes = Number(candidate?.eligible_tonnes);
+  const rate = Number(candidate?.amount_per_tonne);
+  const particulars = isCreditNote ? [
+    "Cash discount allowed",
+    ...(invoiceNumber ? [`Against invoice ${invoiceNumber}${candidate?.invoice_date ? ` dated ${tallyDate(candidate.invoice_date)}` : ""}`] : []),
+    ...(Number.isFinite(tonnes) && Number.isFinite(rate) ? [`${tonnes.toLocaleString("en-IN", { maximumFractionDigits: 3 })} MT @ Rs.${rate.toLocaleString("en-IN")} per MT`] : []),
+    ...(candidate?.missed_window_deadline ? [`Paid by ${tallyDate(candidate.missed_window_deadline)}`] : []),
+  ] : [
     `Cash discount${percentage > 0 ? ` of ${percentage}%` : ""} recovered`,
     ...(invoiceNumber ? [`Against invoice ${invoiceNumber}${candidate?.invoice_date ? ` dated ${tallyDate(candidate.invoice_date)}` : ""}`] : []),
     ...(candidate?.missed_window_deadline ? [`Invoice was not paid in full by ${tallyDate(candidate.missed_window_deadline)}`] : []),
   ];
   const { pdf, sha256Hex } = renderTallyStyleNotePdf({
-    kind: "debit",
+    kind: isCreditNote ? "credit" : "debit",
     company: await companyDetails(supabase, companyId, required(snapshot.company?.name, "company name")),
     party: await partyDetails(supabase, companyId, null, snapshot.party?.guid, party),
     voucherNumber: required(posting.verified_voucher_number, "voucher number"),

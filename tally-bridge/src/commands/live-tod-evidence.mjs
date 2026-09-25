@@ -64,7 +64,7 @@ function applyContribution({ aggregate, voucher, voucherTaxableValue, voucherTon
 }
 
 /** Checks each period Sales invoice against its receipts; only invoices paid in full (GST-inclusive, ₹1 tolerance) by the due date count. */
-function checkPayments(pendingSales, allocations, paymentCheck) {
+function checkPayments(pendingSales, allocations, paymentCheck, cdCreditByInvoice = new Map()) {
   const paymentsByReference = new Map();
   for (const allocation of allocations) {
     for (const key of [allocation.targetVoucherGuid, allocation.billReference].map(normalized).filter(Boolean)) {
@@ -81,7 +81,10 @@ function checkPayments(pendingSales, allocations, paymentCheck) {
       .flatMap((reference) => paymentsByReference.get(normalized(reference)) ?? [])
       .map((payment) => [`${payment.receiptGuid}:${payment.billReference}:${payment.allocatedAmount}`, payment])).values()]
       .sort((left, right) => left.receiptDate.localeCompare(right.receiptDate));
-    const invoiceAmount = new Decimal(voucher.grossAmount || 0).abs();
+    // A discounted payment plus its Cash Discount Credit Note settles the
+    // invoice (docs/CD_LOGIC.md §8): the Credit Note reduces what must be paid.
+    const cashDiscountCredit = voucher.voucherNumber ? (cdCreditByInvoice.get(`${normalized(voucher.partyLedgerName)}|${voucher.voucherNumber}`) ?? new Decimal(0)) : new Decimal(0);
+    const invoiceAmount = new Decimal(voucher.grossAmount || 0).abs().minus(cashDiscountCredit);
     const { nominalDueDate, dueDate, shiftedFor } = todPaymentDueDate(voucher.voucherDate, paymentCheck);
     let paidTotal = new Decimal(0);
     let paidByDueDate = new Decimal(0);
@@ -140,6 +143,9 @@ export async function fetchLiveTodEvidence(command, context) {
   let totalMatchingVouchers = 0;
   const pendingSales = [];
   const allocations = [];
+  // Cash Discount Credit Notes by "<customer>|<invoice number>", read from our
+  // narration "Being Cash Discount allowed against Inv No. <n> dt. …".
+  const cdCreditByInvoice = new Map();
   while (cursor) {
     if (chunks >= MAX_CHUNKS) throw new Error("The requested Tally period is too large for one live calculation.");
     const result = await syncVouchers({ ...command, payload: { ...command.payload, syncRunId: command.payload.voucherSyncRunId, requestedScope: { ...scope, customerLedgerName: null, customers: null, dateTo: readTo, cursor } } }, context);
@@ -151,7 +157,14 @@ export async function fetchLiveTodEvidence(command, context) {
           if (allocation.allocationType === "agst_ref") allocations.push({ receiptGuid: voucher.guid, receiptNumber: voucher.voucherNumber || null, receiptDate: voucher.voucherDate, billReference: allocation.billReference || null, targetVoucherGuid: allocation.targetVoucherGuid || null, allocatedAmount: allocation.allocatedAmount });
         }
       }
-      // Vouchers after the period are read only for their receipts.
+      if (paymentCheck && voucher.voucherKind === "credit_note" && voucher.status === "posted") {
+        const invoiceNumber = /Cash Discount allowed against Inv No\. (\S+) /i.exec(voucher.narration ?? "")?.[1];
+        if (invoiceNumber) {
+          const key = `${normalized(voucher.partyLedgerName)}|${invoiceNumber}`;
+          cdCreditByInvoice.set(key, (cdCreditByInvoice.get(key) ?? new Decimal(0)).plus(new Decimal(voucher.grossAmount || 0).abs()));
+        }
+      }
+      // Vouchers after the period are read only for their receipts and Cash Discount Credit Notes.
       if (voucher.voucherDate > scope.dateTo) continue;
       const aggregate = aggregates.get(normalized(voucher.partyLedgerName));
       const sign = contributionSign(voucher);
@@ -183,7 +196,7 @@ export async function fetchLiveTodEvidence(command, context) {
     }
     cursor = result.cursorTo;
   }
-  const paymentChecks = paymentCheck ? checkPayments(pendingSales, allocations, paymentCheck) : null;
+  const paymentChecks = paymentCheck ? checkPayments(pendingSales, allocations, paymentCheck, cdCreditByInvoice) : null;
 
   const customerAggregates = [...aggregates.values()].map((aggregate) => {
     aggregate.contributions.sort((left, right) => `${left.voucherDate}:${left.tallyGuid}`.localeCompare(`${right.voucherDate}:${right.tallyGuid}`));

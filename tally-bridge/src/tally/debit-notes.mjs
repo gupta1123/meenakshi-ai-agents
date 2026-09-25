@@ -20,17 +20,49 @@ function absoluteDecimal(value) {
 function payload(command) {
   const debitNote = command.payload?.debitNote;
   if (!debitNote || typeof debitNote !== "object") throw new Error("Debit Note command is missing its immutable recovery payload.");
+  const creditNote = isCashDiscountCreditNote(debitNote);
   const required = [
     [debitNote.company?.guid, "company GUID"], [debitNote.company?.name, "company name"],
-    [debitNote.voucherType?.name, "Debit Note voucher type"],
+    [debitNote.voucherType?.name, creditNote ? "Credit Note voucher type" : "Debit Note voucher type"],
     [debitNote.party?.name, "customer ledger"],
-    [debitNote.salesLedger?.name, "source Sales ledger"],
-    [debitNote.debitNoteDate, "Debit Note date"], [debitNote.amount, "recovery amount"],
+    ...(creditNote ? [] : [[debitNote.salesLedger?.name, "source Sales ledger"]]),
+    [debitNote.debitNoteDate, "note date"], [debitNote.amount, "amount"],
     [debitNote.calculationReference, "calculation reference"], [debitNote.allocation?.reference, "invoice reference"],
   ];
-  for (const [value, label] of required) if (!String(value ?? "").trim()) throw new Error(`Debit Note command is missing ${label}.`);
-  if (!/^\d+(\.\d{1,4})?$/.test(String(debitNote.amount))) throw new Error("Debit Note amount is not a decimal string.");
+  for (const [value, label] of required) if (!String(value ?? "").trim()) throw new Error(`${creditNote ? "Credit" : "Debit"} Note command is missing ${label}.`);
+  if (!/^\d+(\.\d{1,4})?$/.test(String(debitNote.amount))) throw new Error("Note amount is not a decimal string.");
+  // A Cash Discount Credit Note is always posted in the GST invoice style.
+  if (creditNote && !gstNoteOf(debitNote)) throw new Error("Cash Discount Credit Note is missing its GST plan.");
   return debitNote;
+}
+
+/** Per-MT Cash Discount (docs/CD_LOGIC.md) gives the discount by Credit Note through this same command. */
+export function isCashDiscountCreditNote(note) { return note?.noteKind === "credit_note"; }
+
+// Cash Discount Credit Note in the client's GST style (their Credit Note
+// No. 15): party credited with the rounded total On Account; "(Discount)"
+// ledger, GST and Round Off debited — the mirror of the Debit Note below.
+export function buildGstCashDiscountCreditNoteImportXml(note, gst) {
+  const line = (name, deemed, amount, extra = "", isParty = false) => `<LEDGERENTRIES.LIST><LEDGERNAME>${escapeXml(name)}</LEDGERNAME><ISPARTYLEDGER>${isParty ? "Yes" : "No"}</ISPARTYLEDGER><ISDEEMEDPOSITIVE>${deemed}</ISDEEMEDPOSITIVE><AMOUNT>${amount}</AMOUNT>${extra}</LEDGERENTRIES.LIST>`;
+  const total = new Decimal(String(gst.total)).toFixed(2);
+  const roundOff = new Decimal(String(gst.roundOff?.amount ?? "0"));
+  const optional = (tag, value) => (value ? `<${tag}>${escapeXml(value)}</${tag}>` : "");
+  return [
+    "<ENVELOPE><HEADER><TALLYREQUEST>Import Data</TALLYREQUEST></HEADER><BODY><IMPORTDATA><REQUESTDESC><REPORTNAME>Vouchers</REPORTNAME><STATICVARIABLES><SVCURRENTCOMPANY>",
+    escapeXml(note.company.name), "</SVCURRENTCOMPANY></STATICVARIABLES></REQUESTDESC><REQUESTDATA><TALLYMESSAGE xmlns:UDF=\"TallyUDF\"><VOUCHER VCHTYPE=\"",
+    escapeXml(note.voucherType.name), "\" ACTION=\"Create\" OBJVIEW=\"Invoice Voucher View\"><DATE>", compactDate(note.debitNoteDate), "</DATE><VOUCHERTYPENAME>",
+    escapeXml(note.voucherType.name), "</VOUCHERTYPENAME><PERSISTEDVIEW>Invoice Voucher View</PERSISTEDVIEW><VCHENTRYMODE>Accounting Invoice</VCHENTRYMODE><ISINVOICE>Yes</ISINVOICE>",
+    "<PARTYLEDGERNAME>", escapeXml(note.party.name), "</PARTYLEDGERNAME>",
+    optional("BASICBUYERNAME", note.party.name), optional("PARTYGSTIN", gst.partyGstin), optional("PLACEOFSUPPLY", gst.placeOfSupply), optional("STATENAME", gst.placeOfSupply),
+    optional("REFERENCE", gst.reference), "<NARRATION>", escapeXml(gst.narration), "</NARRATION>",
+    line(note.party.name, "No", total, `<BILLALLOCATIONS.LIST><BILLTYPE>On Account</BILLTYPE><AMOUNT>${total}</AMOUNT></BILLALLOCATIONS.LIST>`, true),
+    line(gst.discountLedger.name, "Yes", `-${new Decimal(String(gst.taxableValue)).toFixed(2)}`),
+    ...gst.taxLines.map((tax) => line(tax.name, "Yes", `-${new Decimal(String(tax.amount)).toFixed(2)}`)),
+    // As on the TOD Credit Note: Round Off stays on the debit side (Yes); an
+    // addition is negative, a reduction positive.
+    ...(roundOff.isZero() ? [] : [line(gst.roundOff.name, "Yes", roundOff.negated().toFixed(2))]),
+    "</VOUCHER></TALLYMESSAGE></REQUESTDATA></IMPORTDATA></BODY></ENVELOPE>",
+  ].join("");
 }
 
 // GST Debit Note in the client's style (sample No. 324): invoice view, party
@@ -65,6 +97,7 @@ export function buildGstDebitNoteImportXml(debitNote, gst) {
 
 export function buildDebitNoteImportXml(debitNote) {
   const gst = gstNoteOf(debitNote);
+  if (gst && isCashDiscountCreditNote(debitNote)) return buildGstCashDiscountCreditNoteImportXml(debitNote, gst);
   if (gst) return buildGstDebitNoteImportXml(debitNote, gst);
   const amount = String(debitNote.amount);
   return [
@@ -92,14 +125,15 @@ function exactLedger(entries, name) { return entries.some((entry) => String(entr
 export async function findDebitNote(debitNote, { tallyUrl }) {
   const xml = buildCollectionExportXml({ collectionName: "Meenakshi Debit Note Readback", tallyType: "Voucher", fetchFields: FETCH_FIELDS, companyName: debitNote.company.name, dateFrom: debitNote.debitNoteDate, dateTo: debitNote.debitNoteDate });
   const responseXml = await postTallyXml(tallyUrl, xml, { timeoutMs: 90_000, operation: "Read back Meenakshi Debit Note" });
-  const matches = parseVouchers(responseXml).filter((voucher) => voucher.voucherKind === "debit_note"
+  const expectedKind = isCashDiscountCreditNote(debitNote) ? "credit_note" : "debit_note";
+  const matches = parseVouchers(responseXml).filter((voucher) => voucher.voucherKind === expectedKind
     && voucher.status === "posted"
     && identity(voucher.voucherTypeGuid, voucher.voucherTypeName, debitNote.voucherType)
     && identity(voucher.partyLedgerGuid, voucher.partyLedgerName, debitNote.party)
     && voucher.voucherDate === debitNote.debitNoteDate
     && voucher.narration === (gstNoteOf(debitNote)?.narration ?? debitNote.calculationReference)
     && absoluteDecimal(voucher.grossAmount) === absoluteDecimal(gstNoteOf(debitNote)?.total ?? debitNote.amount));
-  if (matches.length > 1) throw new Error("More than one Tally Debit Note matches this recovery reference.");
+  if (matches.length > 1) throw new Error(`More than one Tally ${expectedKind === "credit_note" ? "Credit" : "Debit"} Note matches this reference.`);
   return matches[0] ?? null;
 }
 
@@ -129,9 +163,34 @@ function verifyGstDebitNote(debitNote, gst, voucher, entries) {
   return { tallyGuid: voucher.guid, voucherNumber: voucher.voucherNumber || null, amount: absoluteDecimal(gst.recovery ?? debitNote.amount), debitNoteTotal: absoluteDecimal(gst.total), billReference: null, recovered: false };
 }
 
+// Mirror of verifyGstDebitNote: customer credited, discount and GST debited.
+function verifyGstCashDiscountCreditNote(note, gst, voucher, entries) {
+  const same = (left, right) => String(left ?? "").replace(/\s+/g, " ").trim() === String(right ?? "").replace(/\s+/g, " ").trim();
+  const find = (name) => entries.find((entry) => same(entry.ledgerName, name));
+  const isDebit = (entry) => String(entry?.amount ?? "").trim().startsWith("-");
+  const party = find(note.party.name);
+  if (!party || absoluteDecimal(party.amount) !== absoluteDecimal(gst.total) || isDebit(party)) throw new Error("Tally Credit Note did not credit the customer with the approved total.");
+  const debit = (name, amount) => {
+    const entry = find(name);
+    if (!entry || absoluteDecimal(entry.amount) !== absoluteDecimal(amount) || !isDebit(entry)) throw new Error(`Tally Credit Note did not debit ${name} with the expected amount.`);
+  };
+  debit(gst.discountLedger.name, gst.taxableValue);
+  for (const tax of gst.taxLines) debit(tax.name, tax.amount);
+  const roundOff = new Decimal(String(gst.roundOff?.amount ?? "0"));
+  if (!roundOff.isZero()) {
+    const entry = find(gst.roundOff.name);
+    if (!entry || absoluteDecimal(entry.amount) !== absoluteDecimal(roundOff.toFixed(2)) || isDebit(entry) !== roundOff.isPositive()) throw new Error("Tally Credit Note Round Off does not match.");
+  }
+  const allowed = [note.party.name, gst.discountLedger.name, ...gst.taxLines.map((tax) => tax.name), gst.roundOff?.name].filter(Boolean);
+  if (entries.some((entry) => String(entry.ledgerName ?? "").trim() && !allowed.some((name) => same(name, entry.ledgerName)))) throw new Error("Tally Credit Note contains an unexpected accounting ledger.");
+  if (voucher.inventoryLines.length) throw new Error("Tally Credit Note unexpectedly contains inventory lines.");
+  return { tallyGuid: voucher.guid, voucherNumber: voucher.voucherNumber || null, amount: absoluteDecimal(gst.recovery ?? note.amount), debitNoteTotal: absoluteDecimal(gst.total), billReference: null, recovered: false };
+}
+
 function verificationResult(debitNote, voucher) {
   const entries = Array.isArray(voucher?.sourcePayload?.ledgerEntries) ? voucher.sourcePayload.ledgerEntries : [];
   const gst = gstNoteOf(debitNote);
+  if (gst && isCashDiscountCreditNote(debitNote)) return verifyGstCashDiscountCreditNote(debitNote, gst, voucher, entries);
   if (gst) return verifyGstDebitNote(debitNote, gst, voucher, entries);
   const allocation = voucher.billAllocations.find((entry) => entry.billReference === debitNote.allocation.reference);
   if (!allocation) throw new Error("Tally Debit Note did not contain the required invoice allocation.");

@@ -7,6 +7,7 @@ import { apiRequest, jsonBody } from "@/lib/api";
 import { userFacingError } from "@/lib/user-copy";
 
 import { useCompany } from "./company-context";
+import { standardTonnesFactor } from "./guided-draft-setup";
 import type { ReferenceData, Scheme, VersionDetail } from "./types";
 import { Button, Drawer, IconButton, InlineMessage } from "./ui";
 import { accessToken } from "./workspace";
@@ -16,6 +17,8 @@ type CreatedRule = { schemeId: string; versionId: string; applied?: boolean };
 type CashDiscountSlab = { days: number; percentage: string };
 type TodTierEdit = { key: string; minimumTonnes: string; benefitValue: string };
 type TodConversionEdit = { key: string; sourceUomId: string; tonnesPerSourceUnit: string; isBuiltin: boolean };
+/** Cash Discount segment being edited (docs/CD_LOGIC.md). */
+type SegmentEdit = { key: string; label: string; days: string; amount: string; groupIds: string[] };
 type Props = {
   open: boolean;
   scheme: Scheme | null;
@@ -54,6 +57,18 @@ function normalizedSlabs(source: VersionDetail | null): CashDiscountSlab[] {
 }
 
 const rowKey = () => globalThis.crypto?.randomUUID?.() ?? `row-${Date.now()}-${Math.random()}`;
+const emptySegment = (label = "", days = "3"): SegmentEdit => ({ key: rowKey(), label, days, amount: "500", groupIds: [] });
+
+/** Saved segments; a legacy percentage rule becomes one segment with its groups and days. */
+function normalizedSegments(source: VersionDetail | null): SegmentEdit[] {
+  const saved = source?.configuration.cdSegments;
+  if (saved?.length) return saved.map((segment) => ({ key: segment.id ?? rowKey(), label: segment.label, days: String(segment.allowedWorkingDays), amount: String(segment.amountPerTonne), groupIds: [...segment.customerGroupIds] }));
+  if (source && source.version.schemeType === "cd") {
+    return [{ key: rowKey(), label: "All customers", days: String(source.version.allowedWorkingDays ?? 3), amount: "", groupIds: source.configuration.customerGroups.map((group) => group.customer_group_id) }];
+  }
+  return [emptySegment("3 working days", "3"), emptySegment("10 working days", "10")];
+}
+const segmentSignature = (segments: SegmentEdit[]) => JSON.stringify(segments.map((segment) => [segment.label.trim(), Number(segment.days), Number(segment.amount), [...segment.groupIds].sort()]));
 const emptyTier = (): TodTierEdit => ({ key: rowKey(), minimumTonnes: "", benefitValue: "" });
 const clientTodTiers = (): TodTierEdit[] => [
   ["30", "250"],
@@ -112,6 +127,10 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
   const [pickerView, setPickerView] = useState<"customers" | "products" | null>(null);
   const [todTiers, setTodTiers] = useState<TodTierEdit[]>(clientTodTiers);
   const [todConversions, setTodConversions] = useState<TodConversionEdit[]>([]);
+  // Cash Discount: segments, the segment whose groups are being picked, and MT per unit.
+  const [segments, setSegments] = useState<SegmentEdit[]>(() => normalizedSegments(null));
+  const [editingSegmentKey, setEditingSegmentKey] = useState<string | null>(null);
+  const [unitFactors, setUnitFactors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const createAttempt = useRef<{ key: string; code: string } | null>(null);
   const [editorError, setEditorError] = useState<{ message: string; area: "period" | "benefit" | "general" } | null>(null);
@@ -145,28 +164,37 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
     setPickerView(null);
     setTodTiers(source?.configuration.tiers.length ? source.configuration.tiers.map((tier) => ({ key: tier.id, minimumTonnes: String(tier.minimum_tonnes), benefitValue: String(source.version.todBenefitBasis === "amount_per_eligible_tonne" ? tier.discount_amount_per_tonne ?? "" : tier.discount_percentage ?? "") })) : clientTodTiers());
     setTodConversions(source?.configuration.conversions.map((conversion) => ({ key: conversion.source_uom_id, sourceUomId: conversion.source_uom_id, tonnesPerSourceUnit: String(conversion.tonnes_per_source_unit), isBuiltin: conversion.is_builtin })) ?? []);
+    setSegments(normalizedSegments(source ?? null));
+    setEditingSegmentKey(null);
+    setUnitFactors(Object.fromEntries(source?.configuration.conversions.map((conversion) => [conversion.source_uom_id, String(conversion.tonnes_per_source_unit)]) ?? []));
     setEditorError(null);
     onError(null);
   }, [open, sourceVersionId, scheme?.id, editingDraft, preparingUpdate]);
-
-  function updateSlab(index: number, patch: Partial<CashDiscountSlab>) {
-    setSlabs((current) => current.map((slab, slabIndex) => slabIndex === index ? { ...slab, ...patch } : slab));
-  }
 
   async function submit(form: HTMLFormElement) {
     if (!form.checkValidity()) {
       form.reportValidity();
       return;
     }
-    if (ruleType === "cd" && (!slabs.length || slabs.some((slab) => !slab.percentage || slab.days < 0))) {
-      setEditorError({ message: "Add at least one valid payment window.", area: "general" });
-      return;
-    }
     if (effectiveTo && effectiveTo < effectiveFrom) {
       setEditorError({ message: "The rule end date cannot be before its start date.", area: "period" });
       return;
     }
-    if (!selectedGroupIds.length) {
+    if (ruleType === "cd") {
+      const bad = segments.findIndex((segment) => !segment.label.trim() || !(Number(segment.days) >= 1 && Number(segment.days) <= 60 && Number.isInteger(Number(segment.days))) || !(Number(segment.amount) > 0) || !segment.groupIds.length);
+      if (!segments.length || bad >= 0) {
+        setEditorError({ message: segments.length ? `Complete segment ${bad + 1}: a name, 1–60 working days, a ₹ per MT amount and at least one customer group.` : "Add at least one segment.", area: "general" });
+        return;
+      }
+      if (!selectedStockTargets.length) {
+        setEditorError({ message: "Select the eligible products whose MT earns the Cash Discount.", area: "general" });
+        return;
+      }
+      if (cdConversionRows.some((row) => !(Number(row.factor) > 0))) {
+        setEditorError({ message: "Enter how many MT each product unit weighs.", area: "general" });
+        return;
+      }
+    } else if (!selectedGroupIds.length) {
       setEditorError({ message: "Select at least one customer group.", area: "general" });
       return;
     }
@@ -203,13 +231,16 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
         effectiveTo: effectiveTo || null,
         copyFromVersionId: preparingUpdate ? source?.version.id : undefined,
       };
+      // Cash Discount drafts start as a legacy rule and become per-MT when their
+      // segments are saved below; a per-MT draft takes no percentage slabs.
+      const perMtDraft = source?.version.cdDiscountBasis === "amount_per_tonne";
       const businessTerms = ruleType === "cd"
-        ? {
+        ? (editingDraft && perMtDraft ? {} : {
             slabs: [...slabs]
               .sort((left, right) => left.days - right.days)
               .map((slab) => ({ allowedWorkingDays: slab.days, percentage: slab.percentage })),
             checkNarration,
-          }
+          })
         : {
             periodMonths: Number(periodMonths),
             periodAnchorDate,
@@ -252,12 +283,35 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
             body: jsonBody({ ...common, ...businessTerms }),
           }));
       const versionId = result.version.id;
-      const savedGroupIds = new Set(source?.configuration.customerGroups.map((group) => group.customer_group_id) ?? []);
-      const nextGroupIds = new Set(selectedGroupIds);
-      await Promise.all([
-        ...selectedGroupIds.filter((id) => !savedGroupIds.has(id)).map((customerGroupId) => apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/groups`, { method: "POST", body: jsonBody({ customerGroupId }) })),
-        ...[...savedGroupIds].filter((id) => !nextGroupIds.has(id)).map((customerGroupId) => apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/groups`, { method: "DELETE", body: jsonBody({ customerGroupId }) })),
-      ]);
+      if (ruleType === "cd") {
+        // Segments own the customer groups (and switch the draft to per-MT).
+        await apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/cd-segments`, {
+          method: "PUT",
+          body: jsonBody({ segments: segments.map((segment) => ({ label: segment.label.trim(), allowedWorkingDays: Number(segment.days), amountPerTonne: segment.amount.trim(), customerGroupIds: segment.groupIds })) }),
+        });
+        const draft = await apiRequest<VersionDetail>(token, `/api/companies/${company.id}/scheme-versions/${versionId}`);
+        const existingStocks = new Set([
+          ...draft.configuration.stockItems.map((item) => `stockItem:${item.stock_item_id}`),
+          ...draft.configuration.stockGroups.map((item) => `stockGroup:${item.stock_group_id}`),
+        ]);
+        const nextStocks = new Set(selectedStockTargets);
+        await Promise.all([
+          ...selectedStockTargets.filter((target) => !existingStocks.has(target)).map((target) => { const [kind, id] = target.split(":"); return apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/stocks`, { method: "POST", body: jsonBody({ kind, id }) }); }),
+          ...[...existingStocks].filter((target) => !nextStocks.has(target)).map((target) => { const [kind, id] = target.split(":"); return apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/stocks`, { method: "DELETE", body: jsonBody({ kind, id }) }); }),
+        ]);
+        const nextUnits = new Set(cdConversionRows.map((row) => row.unitId));
+        await Promise.all([
+          ...draft.configuration.conversions.filter((item) => !nextUnits.has(item.source_uom_id)).map((item) => apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/conversions`, { method: "DELETE", body: jsonBody({ sourceUomId: item.source_uom_id }) })),
+          ...cdConversionRows.map((row) => apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/conversions`, { method: "POST", body: jsonBody({ sourceUomId: row.unitId, tonnesPerSourceUnit: row.factor, isBuiltin: row.factor === row.standard && (row.standard === "1" || row.standard === "0.001") }) })),
+        ]);
+      } else {
+        const savedGroupIds = new Set(source?.configuration.customerGroups.map((group) => group.customer_group_id) ?? []);
+        const nextGroupIds = new Set(selectedGroupIds);
+        await Promise.all([
+          ...selectedGroupIds.filter((id) => !savedGroupIds.has(id)).map((customerGroupId) => apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/groups`, { method: "POST", body: jsonBody({ customerGroupId }) })),
+          ...[...savedGroupIds].filter((id) => !nextGroupIds.has(id)).map((customerGroupId) => apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/groups`, { method: "DELETE", body: jsonBody({ customerGroupId }) })),
+        ]);
+      }
       if (ruleType === "tod") {
         const draft = await apiRequest<VersionDetail>(token, `/api/companies/${company.id}/scheme-versions/${versionId}`);
         const existingStocks = new Set([
@@ -321,15 +375,7 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
 
   const selectedType = scheme?.schemeType ?? ruleType;
   const sameSet = (left: string[], right: string[]) => JSON.stringify([...left].sort()) === JSON.stringify([...right].sort());
-  const sameSlabs = JSON.stringify(slabs.map((item) => [Number(item.days), Number(item.percentage)]).sort()) === JSON.stringify(normalizedSlabs(source).map((item) => [Number(item.days), Number(item.percentage)]).sort());
   const sameTiers = JSON.stringify(todTiers.map((item) => [Number(item.minimumTonnes), Number(item.benefitValue)]).sort()) === JSON.stringify((source?.configuration.tiers ?? []).map((item) => [Number(item.minimum_tonnes), Number(todBenefitBasis === "amount_per_eligible_tonne" ? item.discount_amount_per_tonne : item.discount_percentage)]).sort());
-  const unchanged = updating && Boolean(source) && ruleName.trim() === scheme?.name
-    && effectiveFrom === source?.version.effectiveFrom && (effectiveTo || null) === source?.version.effectiveTo
-    && sameSet(selectedGroupIds, source?.configuration.customerGroups.map((item) => item.customer_group_id) ?? [])
-    && (selectedType === "cd" ? sameSlabs && checkNarration === source?.version.checkNarration
-      : Number(periodMonths) === source?.version.periodMonths && periodAnchorDate === source?.version.periodAnchorDate
-        && todBenefitBasis === source?.version.todBenefitBasis && sameTiers
-        && sameSet(selectedStockTargets, [...(source?.configuration.stockItems.map((item) => `stockItem:${item.stock_item_id}`) ?? []), ...(source?.configuration.stockGroups.map((item) => `stockGroup:${item.stock_group_id}`) ?? [])]));
   const groups = reference?.masters.customerGroups.filter((group) => group.is_available) ?? [];
   const groupsById = new Map(groups.map((group) => [group.id, group]));
   const eligibleGroups = groups.filter((group) => {
@@ -381,6 +427,52 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
     }
     return false;
   };
+  // Cash Discount: the units used by the selected products, each needing an MT factor.
+  const unitsById = new Map((reference?.masters.units ?? []).map((unit) => [unit.id, unit]));
+  const coveredStockItemIds = new Set(selectedStockTargets.flatMap((target) => {
+    const [kind, id] = target.split(":");
+    return kind === "stockItem" ? [id] : stockDescendantTargets(id).filter((key) => key.startsWith("stockItem:")).map((key) => key.slice("stockItem:".length));
+  }));
+  const cdConversionRows = [...new Set(stockItems.filter((item) => coveredStockItemIds.has(item.id) && item.default_uom_id).map((item) => item.default_uom_id!))].map((unitId) => {
+    const unit = unitsById.get(unitId);
+    const standard = standardTonnesFactor(unit?.code ?? unit?.name) ?? "";
+    return { unitId, label: labelOf(unit ?? {}, "Unit"), standard, factor: unitFactors[unitId] ?? standard };
+  });
+  // Cash Discount: a group is unavailable to this segment when another segment has it, a parent of it, or a sub-group of it.
+  const isAncestorOf = (ancestorId: string, groupId: string) => {
+    let current = groupsById.get(groupId)?.parent_group_id ?? null;
+    const visited = new Set<string>();
+    while (current && !visited.has(current)) {
+      if (current === ancestorId) return true;
+      visited.add(current);
+      current = groupsById.get(current)?.parent_group_id ?? null;
+    }
+    return false;
+  };
+  const takenByOtherSegment = (groupId: string) => {
+    if (selectedType !== "cd" || !editingSegmentKey) return null;
+    return segments.find((segment) => segment.key !== editingSegmentKey
+      && segment.groupIds.some((id) => id === groupId || isAncestorOf(id, groupId) || isAncestorOf(groupId, id))) ?? null;
+  };
+  const openSegmentPicker = (segment: SegmentEdit) => { setEditingSegmentKey(segment.key); setSelectedGroupIds(segment.groupIds); setGroupSearch(""); setPickerView("customers"); };
+  const closePicker = () => {
+    if (editingSegmentKey) setSegments((current) => current.map((segment) => segment.key === editingSegmentKey ? { ...segment, groupIds: selectedGroupIds } : segment));
+    setEditingSegmentKey(null);
+    setPickerView(null);
+  };
+  const updateSegment = (key: string, patch: Partial<SegmentEdit>) => setSegments((current) => current.map((segment) => segment.key === key ? { ...segment, ...patch } : segment));
+  const savedStockTargets = [...(source?.configuration.stockItems.map((item) => `stockItem:${item.stock_item_id}`) ?? []), ...(source?.configuration.stockGroups.map((item) => `stockGroup:${item.stock_group_id}`) ?? [])];
+  const unchanged = updating && Boolean(source) && ruleName.trim() === scheme?.name
+    && effectiveFrom === source?.version.effectiveFrom && (effectiveTo || null) === source?.version.effectiveTo
+    && (selectedType === "cd"
+      ? source?.version.cdDiscountBasis === "amount_per_tonne" && segmentSignature(segments) === segmentSignature(normalizedSegments(source))
+        && sameSet(selectedStockTargets, savedStockTargets)
+        && cdConversionRows.every((row) => Number(row.factor) === Number(source?.configuration.conversions.find((item) => item.source_uom_id === row.unitId)?.tonnes_per_source_unit ?? NaN))
+      : sameSet(selectedGroupIds, source?.configuration.customerGroups.map((item) => item.customer_group_id) ?? [])
+        && Number(periodMonths) === source?.version.periodMonths && periodAnchorDate === source?.version.periodAnchorDate
+        && todBenefitBasis === source?.version.todBenefitBasis && sameTiers
+        && sameSet(selectedStockTargets, savedStockTargets));
+
   const groupMatches = (group: typeof eligibleGroups[number], query: string): boolean => labelOf(group, "Customer group").toLowerCase().includes(query) || (customerChildren.get(group.id) ?? []).some((child) => groupMatches(child, query));
   const stockGroupMatches = (group: typeof stockGroups[number], query: string): boolean => labelOf(group, "Product group").toLowerCase().includes(query) || (stockItemsByGroup.get(group.id) ?? []).some((item) => labelOf(item, "Product").toLowerCase().includes(query)) || (stockGroupChildren.get(group.id) ?? []).some((child) => stockGroupMatches(child, query));
 
@@ -391,7 +483,8 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
     const expanded = Boolean(query) || expandedCustomerGroupIds.includes(group.id);
     const covered = selectedCustomerAncestor(group);
     const checked = covered || selectedGroupIds.includes(group.id);
-    return <div key={group.id} className="rule-tree-branch"><div className={`rule-tree-row ${checked ? "selected" : ""}`} style={{ paddingLeft: `${6 + depth * 17}px` }}>{children.length ? <button type="button" className="rule-tree-toggle" aria-label={`${expanded ? "Collapse" : "Expand"} ${labelOf(group, "customer group")}`} onClick={() => setExpandedCustomerGroupIds((current) => expanded ? current.filter((id) => id !== group.id) : [...current, group.id])}>{expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button> : <span className="rule-tree-toggle" />}<label><input type="checkbox" checked={checked} disabled={covered} onChange={() => setSelectedGroupIds((current) => checked ? current.filter((id) => id !== group.id) : [...current.filter((id) => !customerDescendants(group.id).includes(id)), group.id])} /><span><strong>{labelOf(group, "Customer group")}</strong>{depth > 0 && <small>Subgroup</small>}</span></label></div>{expanded && children.map((child) => renderCustomerGroup(child, depth + 1))}</div>;
+    const taken = checked ? null : takenByOtherSegment(group.id);
+    return <div key={group.id} className="rule-tree-branch"><div className={`rule-tree-row ${checked ? "selected" : ""}${taken ? " is-taken" : ""}`} style={{ paddingLeft: `${6 + depth * 17}px` }} title={taken ? `Already in “${taken.label || "another segment"}”` : undefined}>{children.length ? <button type="button" className="rule-tree-toggle" aria-label={`${expanded ? "Collapse" : "Expand"} ${labelOf(group, "customer group")}`} onClick={() => setExpandedCustomerGroupIds((current) => expanded ? current.filter((id) => id !== group.id) : [...current, group.id])}>{expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</button> : <span className="rule-tree-toggle" />}<label><input type="checkbox" checked={checked} disabled={covered || Boolean(taken)} onChange={() => setSelectedGroupIds((current) => checked ? current.filter((id) => id !== group.id) : [...current.filter((id) => !customerDescendants(group.id).includes(id)), group.id])} /><span><strong>{labelOf(group, "Customer group")}</strong>{taken ? <small>In {taken.label || "another segment"}</small> : depth > 0 && <small>Subgroup</small>}</span></label></div>{expanded && children.map((child) => renderCustomerGroup(child, depth + 1))}</div>;
   }
 
   function renderStockGroup(group: typeof stockGroups[number], depth = 0): ReactNode {
@@ -409,12 +502,12 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
   if (pickerView) return <Drawer
     open={open}
     onClose={onClose}
-    onBack={() => setPickerView(null)}
-    title={pickerView === "customers" ? "Select customer groups" : "Select eligible products"}
+    onBack={closePicker}
+    title={pickerView === "customers" ? editingSegmentKey ? `Customer groups · ${segments.find((segment) => segment.key === editingSegmentKey)?.label || "segment"}` : "Select customer groups" : "Select eligible products"}
     width="wide"
   >
     <div className="full-rule-picker">
-      <div className="full-rule-picker-heading"><div><strong>{pickerView === "customers" ? `${selectedGroupIds.length} selected` : `${selectedStockTargets.length} selected`}</strong><p>{pickerView === "customers" ? "Selecting a parent group includes all its subgroups." : "Selecting a product group includes all products and subgroups below it."}</p></div><Button type="button" onClick={() => setPickerView(null)}>Done</Button></div>
+      <div className="full-rule-picker-heading"><div><strong>{pickerView === "customers" ? `${selectedGroupIds.length} selected` : `${selectedStockTargets.length} selected`}</strong><p>{pickerView === "customers" ? editingSegmentKey ? "Selecting a parent group includes all its subgroups. Groups already in another segment can’t be chosen." : "Selecting a parent group includes all its subgroups." : "Selecting a product group includes all products and subgroups below it."}</p></div><Button type="button" onClick={closePicker}>Done</Button></div>
       {pickerView === "customers" ? <>
         <label className="group-search"><Search size={15} /><input autoFocus value={groupSearch} onChange={(event) => setGroupSearch(event.target.value)} placeholder="Find a customer group" /></label>
         <div className="rule-editor-group-list rule-tree full-rule-tree">{customerRoots.map((group) => renderCustomerGroup(group))}</div>
@@ -465,36 +558,42 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
       </section>
 
       {selectedType === "cd" ? <>
-        <section className="rule-editor-section rule-editor-windows">
+        <section className="rule-editor-section cd-segment-section">
           <div className="rule-editor-section-heading">
-            <div><h3>Payment windows</h3><p>Shorter payment deadlines are evaluated first.</p></div>
-            <Button type="button" className="button-secondary rule-editor-add" onClick={() => setSlabs((current) => [
-              ...current,
-              { days: (current.at(-1)?.days ?? 0) + 7, percentage: "" },
-            ])}><Plus size={15} />Add window</Button>
+            <div><h3>Segments</h3><p>Each segment gives its customer groups a payment window and a discount per MT. A group can be in only one segment.</p></div>
+            <Button type="button" className="button-secondary rule-editor-add" onClick={() => setSegments((current) => [...current, emptySegment()])}><Plus size={15} />Add segment</Button>
           </div>
-          <div className="cd-slab-editor">
-            <div className="cd-slab-header" aria-hidden="true"><span /><span>Pay within</span><span>Discount</span><span /></div>
-            {slabs.map((slab, index) => <div className="cd-slab-row" key={index}>
-              <span className="cd-slab-index">{index + 1}</span>
-              <label><span className="sr-only">Pay within, window {index + 1}</span><div className="input-with-suffix"><input type="number" min="0" max="366" required value={slab.days} onChange={(event) => updateSlab(index, { days: Number(event.target.value) })} /><span>days</span></div></label>
-              <label><span className="sr-only">Discount, window {index + 1}</span><div className="input-with-suffix"><input inputMode="decimal" required value={slab.percentage} onChange={(event) => updateSlab(index, { percentage: event.target.value })} /><span>%</span></div></label>
-              <IconButton label={`Remove payment window ${index + 1}`} disabled={slabs.length === 1} onClick={() => setSlabs((current) => current.filter((_, slabIndex) => slabIndex !== index))}><Trash2 size={16} /></IconButton>
+          <div className="cd-segment-list">
+            {segments.map((segment, index) => <div className="cd-segment-card" key={segment.key}>
+              <div className="cd-segment-fields">
+                <span className="cd-slab-index">{index + 1}</span>
+                <label className="cd-segment-name"><span className="sr-only">Segment {index + 1} name</span><input value={segment.label} maxLength={80} placeholder="e.g. 3-day customers" onChange={(event) => updateSegment(segment.key, { label: event.target.value })} /></label>
+                <label><span className="sr-only">Working days, segment {index + 1}</span><div className="input-with-suffix"><input type="number" min="1" max="60" value={segment.days} onChange={(event) => updateSegment(segment.key, { days: event.target.value })} /><span>working days</span></div></label>
+                <label><span className="sr-only">Discount per MT, segment {index + 1}</span><div className="input-with-suffix"><input inputMode="decimal" value={segment.amount} placeholder="500" onChange={(event) => updateSegment(segment.key, { amount: event.target.value })} /><span>₹ / MT</span></div></label>
+                <IconButton label={`Remove segment ${index + 1}`} disabled={segments.length === 1} onClick={() => setSegments((current) => current.filter((item) => item.key !== segment.key))}><Trash2 size={16} /></IconButton>
+              </div>
+              <div className="cd-segment-groups">
+                <div className="rule-selected-summary" aria-label={`Customer groups in segment ${index + 1}`}>{segment.groupIds.map((id) => <span key={id}>{labelOf(groupsById.get(id) ?? {}, "Unavailable group")}</span>)}{!segment.groupIds.length && <span className="is-empty">No customer groups yet</span>}</div>
+                <Button type="button" className="button-secondary rule-editor-add" onClick={() => openSegmentPicker(segment)}><ListTree size={14} />{segment.groupIds.length ? "Change groups" : "Choose groups"}</Button>
+              </div>
             </div>)}
+          </div>
+          <p className="rule-editor-calendar-note">Working days skip Sundays and holidays from the business calendar. Invoices go out at full price; a Credit Note gives the discount when the customer pays the discounted amount within the window.</p>
+        </section>
+
+        <section className="rule-editor-section tod-edit-section">
+          <div className="rule-editor-section-heading"><div><h3>Eligible products</h3><p>The discount is ₹ per MT of these products on the invoice.</p></div><Button type="button" className="button-secondary rule-editor-add" onClick={() => setPickerView("products")}><ListTree size={14} />View all</Button></div>
+          <div className="rule-editor-group-picker">
+            <label className="group-search"><Search size={15} /><input value={stockSearch} onChange={(event) => setStockSearch(event.target.value)} placeholder="Find a product or product group" /></label>
+            <p className="rule-editor-group-note">Product groups include the products below them.</p><div className="rule-selected-summary" aria-label="Selected products">{selectedStockTargets.map((target) => { const [kind, id] = target.split(":"); const item = (kind === "stockGroup" ? stockGroups : stockItems).find((entry) => entry.id === id); return <span key={target}>{labelOf(item ?? {}, "Unavailable product")}</span>; })}{!selectedStockTargets.length && <span className="is-empty">No products selected</span>}</div>
+            <div className="rule-editor-group-list tod-choice-list tod-product-list rule-tree">{stockRoots.map((group) => renderStockGroup(group))}{orphanStockItems.filter((item) => !stockSearch.trim() || labelOf(item, "Product").toLowerCase().includes(stockSearch.trim().toLowerCase())).map((item) => { const key = `stockItem:${item.id}`; const checked = selectedStockTargets.includes(key); return <div className={`rule-tree-row rule-tree-item ${checked ? "selected" : ""}`} key={item.id}><span className="rule-tree-toggle" /><label><input type="checkbox" checked={checked} onChange={() => setSelectedStockTargets((current) => checked ? current.filter((target) => target !== key) : [...current, key])} /><span><strong>{labelOf(item, "Product")}</strong><small>Product</small></span></label></div>; })}</div>
           </div>
         </section>
 
-        <section className="rule-editor-section rule-editor-scope">
-          <div className="rule-editor-section-heading"><h3>Applies to</h3><Button type="button" className="button-secondary rule-editor-add" onClick={() => setPickerView("customers")}><ListTree size={14} />View all</Button></div>
-          <div className="rule-editor-group-picker">
-            <label className="group-search"><Search size={15} /><input value={groupSearch} onChange={(event) => setGroupSearch(event.target.value)} placeholder="Find a customer group" /></label>
-            <p className="rule-editor-group-note">Selected groups include their subgroups.</p><div className="rule-selected-summary" aria-label="Selected customer groups">{selectedGroupIds.map((id) => <span key={id}>{labelOf(groupsById.get(id) ?? {}, "Unavailable group")}</span>)}{!selectedGroupIds.length && <span>No groups selected</span>}</div>
-            <div className="rule-editor-group-list rule-tree">{customerRoots.map((group) => renderCustomerGroup(group))}</div>
-            {!selectedGroupIds.length && <p className="field-error">Select at least one customer group.</p>}
-          </div>
-          <p className="rule-editor-calendar-note">Payment deadlines use the company’s active business calendar.</p>
-          <label className="switch-field rule-editor-switch"><input type="checkbox" checked={checkNarration} onChange={(event) => setCheckNarration(event.target.checked)} /><span><strong>Check invoice narration</strong><small>Compare invoice terms with this rule; the rule remains the calculation basis.</small></span></label>
-        </section>
+        {cdConversionRows.length > 0 && <section className="rule-editor-section">
+          <div className="rule-editor-section-heading"><div><h3>MT per unit</h3><p>How much one Tally unit of these products weighs in MT.</p></div></div>
+          <div className="cd-unit-list">{cdConversionRows.map((row) => <label key={row.unitId} className="cd-unit-row"><span>1 {row.label} =</span><div className="input-with-suffix"><input inputMode="decimal" value={row.factor} placeholder="e.g. 0.05" onChange={(event) => setUnitFactors((current) => ({ ...current, [row.unitId]: event.target.value }))} /><span>MT</span></div>{row.standard && row.factor === row.standard && <small>Standard</small>}</label>)}</div>
+        </section>}
       </> : <div className="tod-editor-sections">
         <section className="rule-editor-section">
           <div className="rule-editor-section-heading"><div><h3>Review periods</h3><p>Each customer starts from zero again when a new period begins.</p></div></div>
@@ -535,7 +634,9 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
 
       <div className={studio.editorFooter}>
         {scheme && <span className={studio.applyNote}>Saving validates and applies the rule. Its previous version remains in history.</span>}
-        <Button type="submit" disabled={busy || (preparingUpdate && unchanged) || Boolean( !selectedGroupIds.length || (selectedType === "tod" && (!selectedStockTargets.length || !todTiers.length)))}>{busy ? scheme ? "Saving changes…" : "Creating…" : scheme ? "Save changes" : "Create rule"}</Button>
+        <Button type="submit" disabled={busy || (preparingUpdate && unchanged) || Boolean(selectedType === "cd"
+          ? !segments.length || segments.some((segment) => !segment.groupIds.length) || !selectedStockTargets.length
+          : !selectedGroupIds.length || !selectedStockTargets.length || !todTiers.length)}>{busy ? scheme ? "Saving changes…" : "Creating…" : scheme ? "Save changes" : "Create rule"}</Button>
       </div>
     </form>
   </Drawer>;

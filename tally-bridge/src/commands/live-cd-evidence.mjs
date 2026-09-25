@@ -54,6 +54,15 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
   const invoices = [];
   const allocations = [];
   const debitNotes = [];
+  // Per-MT Cash Discount (docs/CD_LOGIC.md): MT of eligible products per
+  // invoice, Journal settlements (e.g. TDS) and existing CD Credit Notes.
+  const perMt = scope.cdDiscountBasis === "amount_per_tonne";
+  const eligibleGuids = new Set((scope.eligibleStockItemGuids ?? []).map(normalized).filter(Boolean));
+  const eligibleNames = new Set((scope.eligibleStockItemNames ?? []).map(normalized).filter(Boolean));
+  const conversions = new Map((scope.unitConversions ?? []).map((item) => [normalized(item?.uomCode), new Decimal(String(item?.tonnesPerUnit ?? "0"))]));
+  const creditNotes = [];
+  const settlesBills = (voucher) => ["receipt", "payment"].includes(voucher.voucherKind)
+    || (perMt && voucher.voucherKind === "other" && /journal|payment/i.test(String(voucher.voucherTypeName ?? "")));
   let cursor = scope.dateFrom;
   let chunks = 0;
   let vouchersScanned = 0;
@@ -74,13 +83,27 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
           .filter((allocation) => allocation.allocationType === "new_ref")
           .map((allocation) => allocation.billReference)
           .filter(Boolean);
-        invoices.push({ customerId: customer.customerId, customerLedgerName: customer.ledgerName, sourceSalesLedgerName: sourceSalesLedgerName(voucher), tallyGuid: voucher.guid, voucherNumber: voucher.voucherNumber || null, billReferences, voucherDate: voucher.voucherDate, grossAmount: grossAmount.toFixed(), eligibleValue: grossAmount.toFixed(), narration: voucher.narration || "", inventoryLineCount: 0 });
+        let eligibleTonnes = new Decimal(0);
+        const missingUnits = new Set();
+        if (perMt) {
+          for (const line of voucher.inventoryLines ?? []) {
+            const selected = eligibleGuids.has(normalized(line.stockItemGuid)) || eligibleNames.has(normalized(line.stockItemName));
+            if (!selected || line.lineCategory !== "inventory") continue;
+            const conversion = conversions.get(normalized(line.uomCode));
+            if (!line.quantityIsReliable || !conversion || conversion.lte(0)) { missingUnits.add(line.uomCode || "Unknown unit"); continue; }
+            eligibleTonnes = eligibleTonnes.plus(new Decimal(line.quantity).abs().mul(conversion));
+          }
+        }
+        invoices.push({ customerId: customer.customerId, customerLedgerName: customer.ledgerName, sourceSalesLedgerName: sourceSalesLedgerName(voucher), tallyGuid: voucher.guid, voucherNumber: voucher.voucherNumber || null, billReferences, voucherDate: voucher.voucherDate, grossAmount: grossAmount.toFixed(), eligibleValue: grossAmount.toFixed(), narration: voucher.narration || "", inventoryLineCount: 0, ...(perMt ? { eligibleTonnes: eligibleTonnes.toFixed(), missingUnits: [...missingUnits].sort() } : {}) });
         if (invoices.length > MAX_INVOICES) throw new Error("The Cash Discount calculation found too many Sales invoices. Shorten the active rule period.");
       }
       // Tally can carry an against-reference settlement in either a Receipt
       // or Payment voucher (for example after a reversal/correction). Finora
       // reads both, so the direct path must do the same.
-      if (["receipt", "payment"].includes(voucher.voucherKind) && voucher.status === "posted") {
+      if (perMt && customer && voucher.voucherKind === "credit_note" && voucher.status === "posted") {
+        creditNotes.push({ tallyGuid: voucher.guid, voucherNumber: voucher.voucherNumber || null, voucherDate: voucher.voucherDate, customerLedgerName: customer.ledgerName, amount: new Decimal(voucher.grossAmount || 0).abs().toFixed(), narration: voucher.narration || "" });
+      }
+      if (settlesBills(voucher) && voucher.status === "posted") {
         for (const allocation of voucher.billAllocations) allocations.push({ receiptGuid: voucher.guid, receiptNumber: voucher.voucherNumber || null, receiptDate: voucher.voucherDate, billReference: allocation.billReference || null, targetVoucherGuid: allocation.targetVoucherGuid || null, allocationType: allocation.allocationType, allocatedAmount: allocation.allocatedAmount });
       }
       if (customer && voucher.voucherKind === "debit_note") {
@@ -126,6 +149,10 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
       return references.has(normalized(note.targetVoucherGuid)) || references.has(normalized(note.billReference)) || note.narration.includes(invoice.tallyGuid)
         || Boolean(invoice.voucherNumber && note.narration.includes(`Inv No. ${invoice.voucherNumber} `));
     }),
+    // Our CD Credit Note narration: "Being Cash Discount allowed against Inv No. <n> dt. …".
+    ...(perMt ? { creditNotes: creditNotes.filter((note) => normalized(note.customerLedgerName) === normalized(invoice.customerLedgerName)
+      && /cash discount/i.test(note.narration)
+      && Boolean(invoice.voucherNumber && note.narration.includes(`Inv No. ${invoice.voucherNumber} `))) } : {}),
   }));
   const sourceFingerprint = createHash("sha256").update(canonicalJson(invoiceResults)).digest("hex");
   return { mode: "live_cd_batch", evaluationRunId: command.payload.evaluationRunId ?? null, ruleVersionId: scope.ruleVersionId ?? null, dateFrom: scope.dateFrom, dateTo: scope.dateTo, chunks, vouchersScanned, invoices: invoiceResults, sourceFingerprint };

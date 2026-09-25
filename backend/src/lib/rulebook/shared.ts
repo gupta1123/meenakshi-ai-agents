@@ -34,6 +34,8 @@ export type RulebookVersionRow = {
   period_anchor_date: string | null;
   tod_review_calendar_id: string | null;
   tod_benefit_basis: "percentage_of_eligible_value" | "amount_per_eligible_tonne" | null;
+  /** Cash Discount: "amount_per_tonne" = segments with ₹/MT (docs/CD_LOGIC.md); "percentage_of_bill" = legacy. */
+  cd_discount_basis?: "percentage_of_bill" | "amount_per_tonne" | null;
   created_at: string;
   updated_at: string;
 };
@@ -190,6 +192,27 @@ export function readCashDiscountSlabs(value: unknown) {
   return slabs;
 }
 
+/** Discount rules may cover only Sundry Debtors or one of its customer sub-groups. */
+export async function requireSundryDebtorsGroup(companyId: string, customerGroupId: string) {
+  const { data, error } = await createSupabaseAdminClient()
+    .from("customer_groups")
+    .select("id, name, parent_group_id, is_available")
+    .eq("company_id", companyId);
+  if (error) throw error;
+  const groups = (data ?? []) as Array<{ id: string; name: string; parent_group_id: string | null; is_available: boolean }>;
+  const byId = new Map(groups.map((group) => [group.id, group]));
+  const selected = byId.get(customerGroupId);
+  if (!selected || selected.is_available !== true) throw new RulebookRequestError("Customer group is unavailable for this company.", 409);
+  const visited = new Set<string>();
+  let current: typeof selected | undefined = selected;
+  while (current && !visited.has(current.id)) {
+    if (current.name.trim().toLowerCase() === "sundry debtors") return byId;
+    visited.add(current.id);
+    current = current.parent_group_id ? byId.get(current.parent_group_id) : undefined;
+  }
+  throw new RulebookRequestError("Discount rules can include only Sundry Debtors or one of its customer subgroups.", 409);
+}
+
 export async function requireRulebookCompanyAdmin(request: Request, companyId: string): Promise<CompanyScope> {
   if (!isUuid(companyId)) throw new RulebookRequestError("Invalid company id.");
   return requireMeenakshiCompanyAccess(request, companyId, ["administrator"]);
@@ -238,7 +261,7 @@ export async function findRulebookVersion(versionId: string) {
   if (!isUuid(versionId)) throw new RulebookRequestError("Invalid scheme version id.");
   const { data, error } = await createSupabaseAdminClient()
     .from("scheme_versions")
-    .select("id, company_id, scheme_id, scheme_type, version_number, status, effective_from, effective_to, discount_percentage, calculation_base, rounding_method, rounding_scale, gst_treatment, credit_note_voucher_type_id, discount_ledger_id, requires_approval, working_calendar_id, allowed_working_days, near_eligibility_percent, cd_invoice_treatment, cd_narration_mode, cd_check_narration, period_months, period_anchor_date, tod_review_calendar_id, tod_benefit_basis, created_at, updated_at")
+    .select("id, company_id, scheme_id, scheme_type, version_number, status, effective_from, effective_to, discount_percentage, calculation_base, rounding_method, rounding_scale, gst_treatment, credit_note_voucher_type_id, discount_ledger_id, requires_approval, working_calendar_id, allowed_working_days, near_eligibility_percent, cd_invoice_treatment, cd_narration_mode, cd_check_narration, period_months, period_anchor_date, tod_review_calendar_id, tod_benefit_basis, cd_discount_basis, created_at, updated_at")
     .eq("id", versionId)
     .maybeSingle();
   if (error) throw error;
@@ -401,6 +424,7 @@ export function toVersionResponse(version: RulebookVersionRow) {
     periodAnchorDate: version.period_anchor_date,
     todReviewCalendarId: version.tod_review_calendar_id,
     todBenefitBasis: version.tod_benefit_basis,
+    cdDiscountBasis: version.scheme_type === "cd" ? version.cd_discount_basis ?? "percentage_of_bill" : null,
     createdAt: version.created_at,
     updatedAt: version.updated_at,
   };

@@ -2405,3 +2405,33 @@ input:hover, select:hover, textarea:hover { border-color: #b7aa99; }
 .tod-drawer-loading .tod-hero-main > div { display: grid; gap: 4px; }
 .tod-drawer-loading .tod-loading-section { display: grid; gap: 8px; margin-top: 4px; }
 @media (max-width: 760px) { .tod-page-skeleton-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* ── Cash Discount per-MT results page ──────────────────────────────────── */
+.cd-settlement-card { padding: 13px 14px 14px; }
+.cd-settlement-table .table-head, .cd-settlement-table > article { grid-template-columns: minmax(170px, 1.4fr) minmax(120px, 1fr) minmax(130px, 1fr) minmax(130px, 1fr) minmax(140px, auto); gap: 14px; align-items: center; }
+.cd-settlement-table > article { min-height: 54px; padding-block: 8px; }
+.cd-settlement-table > article > div { display: grid; gap: 3px; min-width: 0; }
+.cd-settlement-table strong { font-size: .78rem; font-variant-numeric: tabular-nums; }
+.cd-settlement-table small { color: #6f675c; font-size: .68rem; font-variant-numeric: tabular-nums; }
+.cd-settlement-note { justify-items: end; text-align: right; }
+.cd-settlement-note .button { min-height: 30px; padding: 4px 11px; font-size: .72rem; }
+@media (max-width: 760px) { .cd-settlement-note { justify-items: start; text-align: left; } }
+
+/* ── Cash Discount rule editor: segments (docs/CD_LOGIC.md) ─────────────── */
+.cd-segment-list { display: grid; gap: 10px; }
+.cd-segment-card { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--line); border-radius: 11px; background: #fff; }
+.cd-segment-fields { display: grid; grid-template-columns: 26px minmax(0, 1.4fr) minmax(0, 1fr) minmax(0, 1fr) 32px; align-items: center; gap: 8px; }
+.cd-segment-fields input { width: 100%; min-width: 0; }
+.cd-segment-groups { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding-left: 34px; }
+.cd-segment-groups .rule-selected-summary { flex: 1 1 auto; min-width: 0; }
+.rule-selected-summary .is-empty { color: var(--muted); font-style: italic; }
+.rule-tree-row.is-taken { opacity: .55; }
+.rule-tree-row.is-taken small { color: #8a5b0b; }
+.cd-unit-list { display: grid; gap: 8px; }
+.cd-unit-row { display: grid; grid-template-columns: minmax(90px, auto) minmax(0, 200px) auto; align-items: center; gap: 10px; font-size: .78rem; }
+.cd-unit-row small { color: var(--muted); font-size: .68rem; }
+@media (max-width: 640px) {
+  .cd-segment-fields { grid-template-columns: 26px minmax(0, 1fr) 32px; }
+  .cd-segment-fields > label:nth-of-type(2), .cd-segment-fields > label:nth-of-type(3) { grid-column: 2 / 3; }
+  .cd-segment-groups { flex-direction: column; padding-left: 0; }
+}

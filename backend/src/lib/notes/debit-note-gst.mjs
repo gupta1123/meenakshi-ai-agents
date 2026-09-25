@@ -44,7 +44,9 @@ export async function attachDebitNoteGstPlan(supabase, postingId) {
   if (snapshot.gstNote) return snapshot.gstNote;
 
   const { data: candidate } = await supabase.from("cash_discount_recovery_candidates")
-    .select("invoice_number, invoice_date, missed_window_deadline, granted_discount_percentage").eq("id", posting.candidate_id).maybeSingle();
+    .select("invoice_number, invoice_date, missed_window_deadline, granted_discount_percentage, eligible_tonnes, amount_per_tonne, settlement_category").eq("id", posting.candidate_id).maybeSingle();
+  // Per-MT Cash Discount (docs/CD_LOGIC.md) gives the discount by Credit Note.
+  const isCreditNote = snapshot.noteKind === "credit_note";
   const { data: customer } = await supabase.from("customers").select("tax_identifier, source_payload")
     .eq("company_id", posting.company_id).eq("tally_ledger_guid", snapshot.party?.guid).maybeSingle();
   const gstin = String(customer?.tax_identifier ?? "").trim().toUpperCase() || null;
@@ -59,11 +61,19 @@ export async function attachDebitNoteGstPlan(supabase, postingId) {
   if (ledgerError) throw ledgerError;
   const synced = new Map((ledgers ?? []).map((row) => [collapse(row.name), row]));
   const missing = names.filter((name) => !synced.has(collapse(name)));
-  if (missing.length) throw new Error(`These Tally ledgers are required for the Debit Note but were not found: ${missing.join(", ")}.`);
+  if (missing.length) throw new Error(`These Tally ledgers are required for the ${isCreditNote ? "Credit" : "Debit"} Note but were not found: ${missing.join(", ")}.`);
 
   const invoiceNumber = candidate?.invoice_number ?? snapshot.sourceInvoice?.number ?? null;
   const percentage = Number(candidate?.granted_discount_percentage);
-  const narration = [
+  const tonnes = Number(candidate?.eligible_tonnes ?? snapshot.cashDiscount?.eligibleTonnes);
+  const rate = Number(candidate?.amount_per_tonne ?? snapshot.cashDiscount?.amountPerTonne);
+  const narration = isCreditNote ? [
+    `Being Cash Discount allowed against Inv No. ${invoiceNumber}${candidate?.invoice_date ? ` dt. ${dotted(candidate.invoice_date)}` : ""}`,
+    `${Number.isFinite(tonnes) ? `${new Intl.NumberFormat("en-IN", { maximumFractionDigits: 3 }).format(tonnes)} MT` : ""}${Number.isFinite(rate) ? ` @ Rs.${inr(rate)}/MT` : ""}`,
+    `${candidate?.settlement_category === "over_ninety_percent" ? "Short payment allowed" : "Paid"}${candidate?.missed_window_deadline ? ` by ${dotted(candidate.missed_window_deadline)}` : ""}`,
+    `Value Rs.${inr(split.taxable)}`,
+    `Credit note amount Rs.${inr(split.total)}`,
+  ].join(" - ") : [
     `Being amount debited twds Cash Discount recovery against Inv No. ${invoiceNumber}${candidate?.invoice_date ? ` dt. ${dotted(candidate.invoice_date)}` : ""}`,
     `${percentage > 0 ? `${percentage}% ` : ""}discount not eligible${candidate?.missed_window_deadline ? `, payment not received by ${dotted(candidate.missed_window_deadline)}` : ""}`,
     `Value Rs.${inr(split.taxable)}`,

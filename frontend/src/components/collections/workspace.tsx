@@ -21,6 +21,7 @@ import { GuidedEvaluationQueue } from "./guided-evaluation-queue";
 import { GuidedEvaluationDrawer } from "./guided-evaluation-drawer";
 import { VerifiedCreditNoteDocument } from "./verified-credit-note-document";
 import { CreditNotesLoadingContent, MessagesLoadingContent, TodPageSkeleton } from "./workspace-loading-shell";
+import { CashDiscountSettlementsPage } from "./cash-discount-settlements";
 import { WhatsAppSendDrawer, type WhatsAppTarget } from "./whatsapp-send-drawer";
 import type { CashDiscountDebitNoteHistory, CashDiscountInvoiceCheck, CashDiscountLiveResult, CashDiscountRecovery, CollectionsPage, Contact, CreditNotePosting, EvaluationRun, LaunchControl, MessageTemplate, NotificationHealth, NotificationMessage, OperationsHealth, Proposal, ProposalDetail, ReferenceData, TallyHealth, Voucher } from "./types";
 import { Button, Card, Dialog, Drawer, EmptyState, IconButton, InlineMessage, MetricCard, SectionHeading, Skeleton, StatusBadge, formatDate, formatMoney, formatTonnes, labelFor, safePhone } from "./ui";
@@ -280,7 +281,7 @@ function DiscountPage(props: PageProps & { scheme: "cd" | "tod" }) {
   return props.scheme === "cd" ? <CashDiscountRecoveryPage {...props} /> : <DiscountPageBody {...props} />;
 }
 
-function CashDiscountRecoveryPage({ data, setNotice, setError }: PageProps & { scheme: "cd" | "tod" }) {
+function CashDiscountRecoveryPage({ data, setNotice, setError, isAdministrator }: PageProps & { scheme: "cd" | "tod" }) {
   const { company, companyKey } = useCompany();
   const searchParams = useSearchParams();
   const [evaluationOpen, setEvaluationOpen] = useState(false);
@@ -314,7 +315,7 @@ function CashDiscountRecoveryPage({ data, setNotice, setError }: PageProps & { s
   const postingKeys = useRef(new Map<string, string>());
   const recoveryFilterInitialized = useRef(false);
   // Several Cash Discount rules can be active; each keeps its own results.
-  type CdRuleOption = { id: string; name: string; versionNumber: number; discountPercentage: string; allowedWorkingDays: number | null };
+  type CdRuleOption = { id: string; name: string; versionNumber: number; discountPercentage: string; allowedWorkingDays: number | null; cdDiscountBasis?: "percentage_of_bill" | "amount_per_tonne" };
   const [cdRules, setCdRules] = useState<CdRuleOption[]>([]);
   const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
   useEffect(() => {
@@ -586,6 +587,9 @@ function CashDiscountRecoveryPage({ data, setNotice, setError }: PageProps & { s
   };
   const activity = running ? run?.status === "queued" ? "Waiting to begin" : run?.status === "evaluating" ? "Calculating recoveries" : "Reading invoices, receipts, and Debit Notes" : run?.completed_at ? `Latest check completed ${formatDate(run.completed_at)}` : "No completed check yet";
   const checkHeadline = running ? "Checking current Tally data" : !run ? "Run a Tally check to calculate Cash Discounts" : invoicesChecked === 0 ? "No invoices matched the active rule" : `${invoicesChecked} Sales invoice${invoicesChecked === 1 ? "" : "s"} evaluated`;
+
+  // A per-MT rule (docs/CD_LOGIC.md) gives the discount by Credit Note, not by Debit Note recovery.
+  if (cdRules.some((rule) => rule.cdDiscountBasis === "amount_per_tonne")) return <CashDiscountSettlementsPage isAdministrator={isAdministrator} setNotice={setNotice} setError={setError} />;
 
   if (loadingLatest) return <>
     <WorkspacePageHeader eyebrow="" title="Cash Discount" detail="" />
@@ -1747,6 +1751,9 @@ function DebitNotesPage({ data, refresh, setError, setNotice }: PageProps) {
   const attentionStatuses = ["failed", "reconciliation_required"];
   const deliveredStatuses = ["sent", "delivered", "read", "whatsapp_sent"];
   const notes = data.debitNotes;
+  // Per-MT Cash Discount Credit Notes share this list. The approved WhatsApp
+  // template describes a debit memo, so they cannot be sent with it.
+  const isCdCreditNote = (note: typeof notes[number]) => note.note_kind === "credit_note";
   const debitMessageStatus = (noteId: string) => data.messages.find((message) => message.cash_discount_debit_note_posting_id === noteId)?.status ?? "";
   const debitNotSent = (note: typeof notes[number]) => note.status === "created_verified" && !deliveredStatuses.includes(debitMessageStatus(note.id));
   const debitSent = (note: typeof notes[number]) => note.status === "created_verified" && deliveredStatuses.includes(debitMessageStatus(note.id));
@@ -1762,7 +1769,7 @@ function DebitNotesPage({ data, refresh, setError, setNotice }: PageProps) {
   const hasActiveWork = activeCount > 0 || data.messages.some((message) => message.cash_discount_debit_note_posting_id && ["queued", "sending"].includes(message.status));
   const messageForPosting = (postingId: string) => data.messages.find((message) => message.cash_discount_debit_note_posting_id === postingId) ?? null;
   const openNote = openNoteId ? notes.find((note) => note.id === openNoteId) ?? null : null;
-  const selectableIds = filtered.filter((note) => note.status === "created_verified").map((note) => note.id);
+  const selectableIds = filtered.filter((note) => note.status === "created_verified" && !isCdCreditNote(note)).map((note) => note.id);
   const selectableKey = selectableIds.join(",");
   useEffect(() => {
     const allowed = new Set(selectableKey ? selectableKey.split(",") : []);
@@ -1825,12 +1832,14 @@ function DebitNotesPage({ data, refresh, setError, setNotice }: PageProps) {
     <section className="credit-note-section credit-note-history debit-note-history"><div className="credit-note-section-heading"><h2>History</h2>{selectableIds.length > 0 && <label className="note-select-all"><input type="checkbox" checked={allSelected} onChange={() => setSelectedMessageIds(allSelected ? new Set() : new Set(selectableIds))} />Select all confirmed</label>}<span>{filtered.length} shown</span></div>{filtered.length ? <div className="note-table" role="table" aria-label="Debit Note history"><div className="note-table-head" role="row"><span /><span>Customer</span><span>Amount</span><span>Tally</span><span>WhatsApp</span><span /></div>{filtered.map((note) => {
       const issue = note.status === "reconciliation_required" ? note.reconciliation_reason ?? note.failure_reason ?? "The confirmed Debit Note was not found in the latest Tally check." : note.failure_reason;
       const noteMessage = messageForPosting(note.id);
-      const canSend = note.status === "created_verified";
+      const creditKind = isCdCreditNote(note);
+      const canSend = note.status === "created_verified" && !creditKind;
       const status = noteRowStatus(note, noteMessage);
+      if (creditKind && note.status === "created_verified") status.whatsapp = { label: "Template needed", tone: "muted" };
       // Same compact row as Credit Notes: one line, status pills, short problem line.
       return <div className="note-table-row" role="row" key={note.id}>
         <span>{canSend ? <input type="checkbox" aria-label={`Select ${note.candidate?.customer_name ?? "Debit Note"} for WhatsApp`} checked={selectedMessageIds.has(note.id)} onChange={() => setSelectedMessageIds((current) => { const next = new Set(current); if (next.has(note.id)) next.delete(note.id); else next.add(note.id); return next; })} /> : null}</span>
-        <div><strong>{note.candidate?.customer_name ?? "Customer unavailable"}</strong><small>Invoice {note.candidate?.invoice_number ?? "—"} · {formatBusinessDate(note.candidate?.invoice_date ?? note.debit_note_date)}</small></div>
+        <div><strong>{note.candidate?.customer_name ?? "Customer unavailable"}</strong><small>{creditKind ? "Cash Discount Credit Note · " : ""}Invoice {note.candidate?.invoice_number ?? "—"} · {formatBusinessDate(note.candidate?.invoice_date ?? note.debit_note_date)}</small></div>
         <strong className="note-table-amount">{formatMoney(note.verified_amount ?? note.amount)}</strong>
         <div><span className={`note-pill is-${status.tally.tone}`}>{status.tally.label}</span>{issue && <small className="note-table-problem" title={issue}>{issue}</small>}</div>
         <div><span className={`note-pill is-${status.whatsapp.tone}`}>{status.whatsapp.label}</span>{noteMessage?.recipient_phone_e164 && <small>{noteMessage.recipient_phone_e164}</small>}</div>

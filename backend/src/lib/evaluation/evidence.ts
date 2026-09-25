@@ -265,11 +265,38 @@ async function loadRule(companyId: string, versionId: string): Promise<FrozenCdR
       }
       throw cashDiscountSettingsError;
     }
+    // Per-MT rules (docs/CD_LOGIC.md). Before the 20260926090000 migration the
+    // column does not exist; the rule is then a legacy percentage rule.
+    const basis = await supabase.from("scheme_versions").select("cd_discount_basis").eq("id", row.id).maybeSingle();
+    if (basis.error && basis.error.code !== "42703") throw basis.error;
+    if (!basis.error && basis.data?.cd_discount_basis === "amount_per_tonne") {
+      const [segments, members] = await Promise.all([
+        supabase.from("scheme_version_cd_segments").select("id, label, allowed_working_days, amount_per_tonne, sort_order").eq("scheme_version_id", row.id).order("sort_order"),
+        supabase.from("scheme_version_cd_segment_groups").select("segment_id, customer_group_id").eq("scheme_version_id", row.id),
+      ]);
+      if (segments.error || members.error) throw segments.error ?? members.error;
+      if (!row.working_calendar_id || !segments.data?.length) throw new Error("The active Cash Discount rule has no segments.");
+      return {
+        ...base, schemeType: "cd", cdDiscountBasis: "amount_per_tonne",
+        slabs: [],
+        nearEligibilityPercent: row.near_eligibility_percent ?? "80",
+        checkNarration: false,
+        narrationMode: "disabled",
+        calendar: await loadCalendar(row.working_calendar_id),
+        segments: segments.data.map((segment) => ({
+          id: segment.id, label: segment.label, allowedWorkingDays: Number(segment.allowed_working_days), amountPerTonne: String(segment.amount_per_tonne),
+          customerGroupIds: (members.data ?? []).filter((member) => member.segment_id === segment.id).map((member) => member.customer_group_id),
+        })),
+        selectedStockItemIds: (stockItems.data ?? []).map((item) => item.stock_item_id),
+        selectedStockGroupIds: (stockGroups.data ?? []).map((item) => item.stock_group_id),
+        unitConversions: (conversions.data ?? []).map((item) => ({ id: `${row.id}:${item.source_uom_id}`, sourceUomId: item.source_uom_id, tonnesPerUnit: String(item.tonnes_per_source_unit) })),
+      };
+    }
     if (!row.working_calendar_id || !row.near_eligibility_percent || !cdSlabs.data?.length) {
       throw new Error("The active Cash Discount rule is incomplete.");
     }
     return {
-      ...base, schemeType: "cd",
+      ...base, schemeType: "cd", cdDiscountBasis: "percentage_of_bill",
       slabs: cdSlabs.data.map((slab) => ({ id: slab.id, allowedWorkingDays: Number(slab.allowed_working_days), percentage: String(slab.discount_percentage) })),
       nearEligibilityPercent: row.near_eligibility_percent,
       checkNarration: cashDiscountSettings?.cd_check_narration !== false,
@@ -444,33 +471,45 @@ export async function loadLiveTodContext(run: EvaluationRunRecord) {
   return { ...candidate, customer, evaluatedOn: dateText(run.request_context.evaluatedOn, utcToday()) };
 }
 
-async function buildLiveTodVoucherScope(
-  run: EvaluationRunRecord,
-  context: { rule: FrozenTodRule; periodStart: string; periodEnd: string; customers?: Array<CustomerEvidence & { ledgerName: string }>; customer?: CustomerEvidence & { ledgerName: string } },
-) {
+/** Eligible products and MT conversions of a rule, as the connector matches them (TOD and per-MT Cash Discount). */
+async function eligibleProductScope(companyId: string, ruleId: string, selectedItemIds: string[], selectedGroupIds: string[], unitConversions: Array<{ sourceUomId: string; tonnesPerUnit: string }>) {
   const supabase = createSupabaseAdminClient();
-  const selectedItemIds = context.rule.selectedStockItemIds;
-  const selectedGroupIds = context.rule.selectedStockGroupIds;
   const [{ data: coveredGroups, error: coveredGroupsError }, { data: units, error: unitsError }] = await Promise.all([
     selectedGroupIds.length
-      ? supabase.from("scheme_version_stock_group_coverage").select("stock_group_id").eq("scheme_version_id", context.rule.id)
+      ? supabase.from("scheme_version_stock_group_coverage").select("stock_group_id").eq("scheme_version_id", ruleId)
       : Promise.resolve({ data: [], error: null }),
-    supabase.from("tally_units").select("id, code, name").eq("company_id", run.company_id).eq("is_available", true),
+    supabase.from("tally_units").select("id, code, name").eq("company_id", companyId).eq("is_available", true),
   ]);
   if (coveredGroupsError || unitsError) throw coveredGroupsError ?? unitsError;
   const coveredGroupIds = (coveredGroups ?? []).map((row) => row.stock_group_id);
   const stockQueries = [
     selectedItemIds.length
-      ? supabase.from("stock_items").select("tally_stock_item_guid, name").eq("company_id", run.company_id).eq("is_available", true).in("id", selectedItemIds)
+      ? supabase.from("stock_items").select("tally_stock_item_guid, name").eq("company_id", companyId).eq("is_available", true).in("id", selectedItemIds)
       : Promise.resolve({ data: [], error: null }),
     coveredGroupIds.length
-      ? supabase.from("stock_items").select("tally_stock_item_guid, name").eq("company_id", run.company_id).eq("is_available", true).in("current_stock_group_id", coveredGroupIds)
+      ? supabase.from("stock_items").select("tally_stock_item_guid, name").eq("company_id", companyId).eq("is_available", true).in("current_stock_group_id", coveredGroupIds)
       : Promise.resolve({ data: [], error: null }),
   ];
   const [selectedItems, coveredItems] = await Promise.all(stockQueries);
   if (selectedItems.error || coveredItems.error) throw selectedItems.error ?? coveredItems.error;
   const itemRows = [...(selectedItems.data ?? []), ...(coveredItems.data ?? [])];
   const unitById = new Map((units ?? []).map((unit) => [unit.id, unit]));
+  return {
+    eligibleStockItemGuids: [...new Set(itemRows.map((item) => item.tally_stock_item_guid).filter(Boolean))],
+    eligibleStockItemNames: [...new Set(itemRows.map((item) => item.name).filter(Boolean))],
+    unitConversions: unitConversions.flatMap((conversion) => {
+      const unit = unitById.get(conversion.sourceUomId);
+      if (!unit) return [];
+      return [{ uomCode: unit.code || unit.name, tonnesPerUnit: conversion.tonnesPerUnit }];
+    }),
+  };
+}
+
+async function buildLiveTodVoucherScope(
+  run: EvaluationRunRecord,
+  context: { rule: FrozenTodRule; periodStart: string; periodEnd: string; customers?: Array<CustomerEvidence & { ledgerName: string }>; customer?: CustomerEvidence & { ledgerName: string } },
+) {
+  const products = await eligibleProductScope(run.company_id, context.rule.id, context.rule.selectedStockItemIds, context.rule.selectedStockGroupIds, context.rule.unitConversions);
   const batchCustomers = context.customers;
   const singleCustomer = context.customer;
   if (!batchCustomers && !singleCustomer) throw new Error("A Turnover Discount Tally scope needs at least one customer.");
@@ -494,13 +533,7 @@ async function buildLiveTodVoucherScope(
       holidays: context.rule.reviewCalendar?.activeHolidayDates ?? [],
       nonWorkingIsoWeekdays: context.rule.reviewCalendar?.nonWorkingIsoWeekdays?.length ? context.rule.reviewCalendar.nonWorkingIsoWeekdays : [7],
     },
-    eligibleStockItemGuids: [...new Set(itemRows.map((item) => item.tally_stock_item_guid).filter(Boolean))],
-    eligibleStockItemNames: [...new Set(itemRows.map((item) => item.name).filter(Boolean))],
-    unitConversions: context.rule.unitConversions.flatMap((conversion) => {
-      const unit = unitById.get(conversion.sourceUomId);
-      if (!unit) return [];
-      return [{ uomCode: unit.code || unit.name, tonnesPerUnit: conversion.tonnesPerUnit }];
-    }),
+    ...products,
   };
 }
 
@@ -552,11 +585,16 @@ export async function listActiveCdRules(companyId: string, onDate: string) {
     .select("id, scheme_id, version_number, discount_percentage, allowed_working_days, effective_from, effective_to, schemes(name)")
     .in("id", ids);
   if (error) throw error;
+  // Before the 20260926090000 migration the basis column is missing: all rules are percentage rules.
+  const basis = await createSupabaseAdminClient().from("scheme_versions").select("id, cd_discount_basis").in("id", ids);
+  if (basis.error && basis.error.code !== "42703") throw basis.error;
+  const basisById = new Map((basis.error ? [] : basis.data ?? []).map((row) => [row.id as string, row.cd_discount_basis as string]));
   return (data ?? []).map((row) => ({
     id: row.id, schemeId: row.scheme_id, versionNumber: row.version_number,
     name: String((row.schemes as { name?: string } | null)?.name ?? "Cash Discount rule"),
     discountPercentage: String(row.discount_percentage ?? ""), allowedWorkingDays: row.allowed_working_days,
     effectiveFrom: row.effective_from, effectiveTo: row.effective_to,
+    cdDiscountBasis: basisById.get(row.id) === "amount_per_tonne" ? "amount_per_tonne" as const : "percentage_of_bill" as const,
   })).sort((left, right) => left.name.localeCompare(right.name));
 }
 
@@ -599,6 +637,51 @@ export async function loadLiveCdLocalBootstrap(run: EvaluationRunRecord, request
     .select("id, tally_group_guid, name, parent_group_id")
     .eq("company_id", run.company_id);
   if (groupError) throw groupError;
+  if (rule.cdDiscountBasis === "amount_per_tonne") {
+    // Each customer belongs to the one segment covering its group (segments are
+    // mutually exclusive); the connector evaluator reads customerSegments.
+    const descendantsOf = (roots: string[]) => {
+      const covered = new Set(roots);
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const group of groups ?? []) if (group.parent_group_id && covered.has(group.parent_group_id) && !covered.has(group.id)) { covered.add(group.id); grew = true; }
+      }
+      return covered;
+    };
+    const segmentGroups = (rule.segments ?? []).map((segment) => descendantsOf(segment.customerGroupIds));
+    const allCovered = [...new Set(segmentGroups.flatMap((set) => [...set]))];
+    const customers = await loadAvailableCustomers(run.company_id, allCovered);
+    const customerSegments: Record<string, number> = {};
+    const eligibleCustomers: Array<{ customerId: string; ledgerName: string }> = [];
+    for (const customer of customers ?? []) {
+      const index = segmentGroups.findIndex((set) => customer.current_customer_group_id && set.has(customer.current_customer_group_id));
+      if (index < 0) continue;
+      const customerId = customer.tally_ledger_guid || customer.id;
+      customerSegments[customerId] = index;
+      eligibleCustomers.push({ customerId, ledgerName: customer.ledger_name });
+    }
+    if (!eligibleCustomers.length) throw new Error("The Cash Discount segments do not contain any available customers.");
+    const products = await eligibleProductScope(run.company_id, rule.id, rule.selectedStockItemIds ?? [], rule.selectedStockGroupIds ?? [], rule.unitConversions ?? []);
+    const maxWorkingDays = Math.max(...(rule.segments ?? []).map((segment) => segment.allowedWorkingDays));
+    return {
+      rule: { ...rule, customerSegments },
+      evaluatedOn,
+      voucherScope: {
+        purpose: "live_cd_evaluation",
+        liveAggregation: "cd",
+        schemeType: "cd",
+        cdDiscountBasis: "amount_per_tonne",
+        evaluationRunId: run.id,
+        ruleVersionId: rule.id,
+        customers: eligibleCustomers,
+        dateFrom: rule.effectiveFrom,
+        dateTo: evaluatedOn,
+        maxWorkingDays,
+        ...products,
+      },
+    };
+  }
   const selectedGroupIds = new Set(rule.selectedCustomerGroupIds);
   const coveredGroupIds = new Set(selectedGroupIds);
   let changed = true;
