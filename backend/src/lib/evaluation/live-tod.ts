@@ -36,7 +36,32 @@ export type LiveTodAggregate = {
     eligibleTonnes: string;
     eligibleTaxableValue: string;
   }>;
+  /** Present when the 25-day payment check ran: one row per period Sales invoice. */
+  paymentChecks?: TodPaymentCheck[];
+  excludedInvoices?: number;
   sourceFingerprint: string;
+};
+
+export type TodPaymentCheck = {
+  customerId: string;
+  customerLedgerName: string;
+  tallyGuid: string;
+  voucherNumber: string | null;
+  invoiceDate: string;
+  invoiceAmount: string;
+  dueDays: number;
+  nominalDueDate: string;
+  dueDate: string;
+  shiftedFor: Array<{ date: string; reason: "holiday" | "non_working_day" }>;
+  paidInFullOn: string | null;
+  daysTaken: number | null;
+  paidByDueDate: string;
+  paidTotal: string;
+  payments: Array<{ receiptNumber: string | null; receiptDate: string; amount: string }>;
+  tonnes: string;
+  taxableValue: string;
+  counted: boolean;
+  reason: "paid_in_full_on_time" | "paid_after_due_date" | "partly_paid" | "not_paid";
 };
 
 export type LiveTodBatchAggregate = {
@@ -155,6 +180,8 @@ export async function evaluateLiveTodAggregate(run: EvaluationRunRecord, aggrega
         contributionCount: aggregate.contributions.length,
         contributions: aggregate.contributions,
         productContributions: aggregate.productContributions,
+        paymentChecks: aggregate.paymentChecks ?? null,
+        excludedInvoices: aggregate.excludedInvoices ?? 0,
         rawVouchersStored: false,
       },
       groupMemberships: coverage.memberships.map((membership) => ({ customerId: customer.id, customerGroupId: membership.customerGroupId, isCoveredByRule: rule.selectedCustomerGroupIds.includes(membership.customerGroupId), snapshot: membership })),

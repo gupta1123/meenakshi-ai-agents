@@ -17,6 +17,8 @@ const labels: Record<string, string> = {
   cd_shortfall: "Cash Discount reminder",
   cd_credit_note_created: "Cash Discount Credit Note",
   tod_credit_note_created: "Turnover Discount Credit Note",
+  cd_debit_note_created: "Debit Note",
+  tod_tier_reached: "Turnover Discount tier update",
   cash_discount_narration_check_disabled: "Invoice narration was not checked",
   cash_discount_narration_missing: "Cash Discount terms were not found in the invoice narration",
   cash_discount_narration_conflict: "Invoice narration differs from the approved rule",
@@ -45,6 +47,7 @@ export function userFacingError(cause: unknown, fallback: string) {
     if (cause.status === 403) return "You do not have permission to complete that action.";
     if (cause.status === 404) return "That item is no longer available. Refresh the page and try again.";
     if (cause.status === 409) return apiMessage && !technicalLanguage.test(apiMessage) ? apiMessage : "This has changed since you opened it. Refresh the page and try again.";
+    if (cause.status === 422) return apiMessage && !technicalLanguage.test(apiMessage) ? apiMessage : fallback;
     if (cause.status === 429) return "Please wait a moment, then try again.";
     if (cause.status >= 500) return "We could not complete that right now. Please try again.";
     return fallback;
@@ -58,5 +61,9 @@ export function userFacingError(cause: unknown, fallback: string) {
 }
 
 export function userFacingDetail(value: string | null | undefined, fallback: string) {
+  if (/not approved in MSG91/i.test(value ?? "")) return "The selected WhatsApp template is not approved in MSG91. Choose an approved template in Messages.";
+  if (/requires a (?:Credit Note|verified note) PDF/i.test(value ?? "")) return "Prepare the PDF from the Tally-verified note before sending this WhatsApp message.";
+  if (/provider template ID|approved template requires|template component/i.test(value ?? "")) return "WhatsApp template setup is incomplete. Ask an administrator to configure the approved template in Messages before retrying.";
+  if (/\blease\b|\bnot leased\b/i.test(value ?? "")) return "The calculation stopped before saving. Review its status and run a new check.";
   return value && !technicalLanguage.test(value) ? value : fallback;
 }

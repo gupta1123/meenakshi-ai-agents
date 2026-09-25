@@ -20,3 +20,7 @@
   .tools { gap: 3px; }
   .tools :global(.company-select), .tools :global(.company-select-compact) { display: none; }
 }
+
+@media (max-width: 440px) {
+  .pageHeader :global(h1) { font-size: .88rem; }
+}

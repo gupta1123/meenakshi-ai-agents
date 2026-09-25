@@ -1,4 +1,4 @@
-import { extractBlocks, getAttribute, getTagText } from "./xml.mjs";
+import { extractBlocks, getAttribute, getTagText, getTagTexts } from "./xml.mjs";
 
 function value(block, name) {
   return getTagText(block, name) || getAttribute(block, name) || "";
@@ -118,6 +118,11 @@ export function parseCustomers(xml) {
     const customerGroupName = value(block, "PARENT");
     const taxIdentifier = value(block, "PARTYGSTIN");
     const phone = value(block, "MOBILE") || value(block, "PHONENUMBER") || value(block, "PHONE");
+    // Printed on Credit/Debit Note PDFs (Party's Name block).
+    const addressLines = getTagTexts(block, "ADDRESS").map((line) => line.trim()).filter(Boolean);
+    const address = addressLines.length ? addressLines.join(", ") : "";
+    const stateName = value(block, "LEDSTATENAME");
+    const pinCode = value(block, "PINCODE");
     return {
       guid: item.guid,
       masterId: item.masterId,
@@ -125,7 +130,7 @@ export function parseCustomers(xml) {
       ledgerName: item.name,
       customerGroupGuid,
       taxIdentifier,
-      sourcePayload: sourcePayload({ ...item, customerGroupGuid, customerGroupName, taxIdentifier, phone }),
+      sourcePayload: sourcePayload({ ...item, customerGroupGuid, customerGroupName, taxIdentifier, phone, address, stateName, pinCode }),
     };
   }).filter((item) => item.guid && item.ledgerName);
 }

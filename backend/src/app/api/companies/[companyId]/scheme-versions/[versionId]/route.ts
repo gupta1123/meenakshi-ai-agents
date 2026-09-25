@@ -92,11 +92,13 @@ export async function PATCH(request: Request, context: RouteContext) {
       if (body.checkNarration !== undefined) update.cd_check_narration = readBoolean(body.checkNarration, "checkNarration");
       if (body.nearEligibilityPercent !== undefined) update.near_eligibility_percent = readPositiveDecimal(body.nearEligibilityPercent, "nearEligibilityPercent", { maxScale: 2 });
     } else {
-      if (body.todBenefitBasis !== undefined && body.todBenefitBasis !== version.tod_benefit_basis) {
+      const currentBenefitBasis = version.tod_benefit_basis ?? "percentage_of_eligible_value";
+      const requestedBenefitBasis = body.todBenefitBasis === undefined ? currentBenefitBasis : readTodBenefitBasis(body.todBenefitBasis);
+      if (requestedBenefitBasis !== currentBenefitBasis) {
         const { count, error } = await createSupabaseAdminClient().from("scheme_version_tiers").select("id", { count: "exact", head: true }).eq("scheme_version_id", version.id);
         if (error) throw error;
         if (count) throw new RulebookRequestError("Remove the existing TOD tiers before changing how its benefit is calculated.", 409);
-        update.tod_benefit_basis = readTodBenefitBasis(body.todBenefitBasis);
+        update.tod_benefit_basis = requestedBenefitBasis;
       }
       if (body.periodMonths !== undefined) update.period_months = readInteger(body.periodMonths, "periodMonths", 1, 36);
       if (body.periodAnchorDate !== undefined) update.period_anchor_date = readDate(body.periodAnchorDate, "periodAnchorDate");

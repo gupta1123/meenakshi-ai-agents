@@ -20,6 +20,7 @@ export type CollectionsPage =
   | "cash-discount"
   | "turnover-discount"
   | "credit-notes"
+  | "debit-notes"
   | "messages"
   | "rulebook"
   | "tally";
@@ -101,6 +102,18 @@ export type Proposal = {
     reconciliation_reason?: string | null;
     last_reconciled_at?: string | null;
   } | null;
+  /** TOD only: the 25-day payment check of the latest calculation; null for older results. */
+  paymentSummary?: TodPaymentSummary | null;
+};
+
+export type TodPaymentSummary = {
+  total: number;
+  counted: number;
+  late: number;
+  partlyPaid: number;
+  unpaid: number;
+  excludedTonnes: string;
+  excluded: Array<{ voucherNumber: string | null; invoiceDate: string | null; dueDate: string | null; paidInFullOn: string | null; daysTaken: number | null; invoiceAmount: string; paidTotal: string; tonnes: string; reason: string }>;
 };
 
 export type CreditNotePosting = {
@@ -127,6 +140,7 @@ export type NotificationMessage = {
   id: string;
   proposal_id: string | null;
   credit_note_posting_id: string | null;
+  cash_discount_debit_note_posting_id?: string | null;
   event_type: string;
   recipient_phone_e164: string | null;
   status: string;
@@ -138,6 +152,7 @@ export type NotificationMessage = {
   failure_reason: string | null;
   created_at: string;
   opt_in_snapshot?: Record<string, unknown>;
+  customer_name?: string | null;
 };
 
 export type NotificationHealth = { counts: Record<string, number>; retrying: number; terminalFailures: number };
@@ -205,7 +220,7 @@ export type CashDiscountInvoiceCheck = {
   discountPercentage: string;
   earnedDiscountPercentage: string;
   eligibilityDeadline: string;
-  status: "retained" | "payment_due" | "recovery_due" | "needs_review";
+  status: "retained" | "payment_due" | "recovery_due" | "recovered" | "needs_review";
   paymentCount: number;
   latestPaymentDate: string | null;
   reviewMessage: string | null;
@@ -219,9 +234,11 @@ export type EvaluationRun = {
   error_summary: string | null;
   summary?: { message?: string | null; outcome?: string | null; liveOnly?: boolean; invoicesChecked?: number; actionRequired?: number; reviewRequired?: number; recoveryAmount?: string; alreadyRecovered?: string; openReminderReady?: number; openReminderReview?: number; openReminderCandidates?: CashDiscountOpenReminder[]; retained?: number; paymentDue?: number; tracking?: number; recoveryDue?: number; debitNoteAmount?: string; results?: CashDiscountInvoiceCheck[] } | null;
   scheme_type?: "cd" | "tod" | null;
+  scheme_version_id?: string | null;
   evaluation_date?: string | null;
   period_start?: string | null;
   period_end?: string | null;
+  periods?: Array<{ start: string; end: string }>;
   started_at?: string | null;
   updated_at?: string | null;
   attempts?: number | null;
@@ -257,6 +274,7 @@ export type CashDiscountRecovery = {
   next_window_working_days: number | null;
   next_window_percentage: string | null;
   status: "action_required" | "review_required" | "posting";
+  recovery_case?: "not_paid" | "partially_paid" | "paid_late" | "review";
   reason_code: string;
   review_message: string | null;
   narration_checked: boolean;
@@ -272,7 +290,7 @@ export type Voucher = { id: string; voucher_number: string; voucher_date: string
 
 export type Calendar = { id: string; name: string; isActive: boolean; revision: number; nonWorkingWeekdays: number[]; holidays: Array<{ id: string; holiday_date: string; name: string; is_active: boolean }> };
 
-export type Scheme = { id: string; schemeType: "cd" | "tod"; code: string; name: string; status: string; description: string | null };
+export type Scheme = { id: string; schemeType: "cd" | "tod"; code: string; name: string; status: string; operationalStatus?: string; appliedEffectiveFrom?: string | null; appliedEffectiveTo?: string | null; draftCount?: number; description: string | null };
 export type Version = { id: string; versionNumber: number; schemeType: "cd" | "tod"; status: string; effectiveFrom: string; effectiveTo: string | null; discountPercentage: string | null; roundingMethod: "half_up" | "half_even" | "truncate"; roundingScale: number; creditNoteVoucherTypeId: string | null; discountLedgerId: string | null; workingCalendarId: string | null; allowedWorkingDays: number | null; nearEligibilityPercent: string | null; checkNarration: boolean; invoiceTreatment: "after_qualification" | "deducted_upfront" | null; narrationMode: "informational" | "required" | "disabled" | null; periodMonths: number | null; periodAnchorDate: string | null; todReviewCalendarId: string | null; todBenefitBasis: "percentage_of_eligible_value" | "amount_per_eligible_tonne" | null };
 export type SchemeDetail = { scheme: Scheme; versions: Version[] };
 export type VersionDetail = { version: Version; configuration: { customerGroups: Array<{ customer_group_id: string }>; stockItems: Array<{ stock_item_id: string }>; stockGroups: Array<{ stock_group_id: string }>; conversions: Array<{ source_uom_id: string; tonnes_per_source_unit: string; is_builtin: boolean }>; tiers: Array<{ id: string; minimum_tonnes: string; discount_percentage: string | null; discount_amount_per_tonne: string | null }>; cdSlabs: Array<{ id?: string; allowedWorkingDays: number; percentage: string }> } };
@@ -282,7 +300,7 @@ export type CreditNoteAccountingSettings = {
   turnoverDiscount: { voucherTypeId: string | null; ledgerId: string | null };
   updatedAt: string;
 };
-export type Contact = { id: string; customer_id: string; phone_e164: string; contact_name: string | null; is_primary: boolean; is_active: boolean; customer: { ledgerName: string } | null };
+export type Contact = { id: string; customer_id: string; phone_e164: string; contact_name: string | null; is_primary: boolean; is_active: boolean; has_whatsapp_consent?: boolean; customer: { ledgerName: string } | null };
 export type MessageTemplate = {
   id: string;
   event_type: string;
@@ -312,6 +330,7 @@ export type CashDiscountDebitNoteHistory = {
   updated_at: string;
   candidate: {
     id: string;
+    customer_id: string | null;
     customer_name: string;
     invoice_number: string | null;
     invoice_date: string;

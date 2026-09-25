@@ -122,7 +122,7 @@ begin
     company_id, candidate_id, idempotency_key, debit_note_date, amount, calculation_reference,
     debit_note_voucher_type_id, recovery_ledger_id, debit_note_snapshot, created_by
   ) values (
-    p_company_id, candidate.id, p_idempotency_key, current_date, candidate.remaining_recovery, reference,
+    p_company_id, candidate.id, p_idempotency_key, current_date, round(candidate.remaining_recovery, 2), reference,
     null, null,
     jsonb_build_object(
       'company', jsonb_build_object('guid', company.tally_company_guid, 'name', company.tally_company_name),
@@ -130,7 +130,7 @@ begin
       'party', jsonb_build_object('guid', candidate.customer_tally_guid, 'name', candidate.customer_name),
       'salesLedger', jsonb_build_object('name', candidate.source_sales_ledger_name),
       'debitNoteDate', current_date,
-      'amount', candidate.remaining_recovery::text,
+      'amount', round(candidate.remaining_recovery, 2)::text,
       'calculationReference', reference,
       'allocation', jsonb_build_object('type', 'new_ref', 'reference', reference),
       'sourceInvoice', jsonb_build_object(

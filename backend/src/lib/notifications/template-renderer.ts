@@ -16,6 +16,13 @@ const defaultComponents: Record<NotificationEventType, TemplateComponent[]> = {
     { component: "body_var_4", value: "creditNoteAmountDisplay" },
     { component: "body_var_5", value: "invoiceReference" },
   ],
+  cd_debit_note_created: [
+    { component: "body_var_1", value: "customerName" },
+    { component: "body_var_2", value: "debitNoteNumber" },
+    { component: "body_var_3", value: "debitNoteDate" },
+    { component: "body_var_4", value: "debitNoteAmountDisplay" },
+    { component: "body_var_5", value: "invoiceReference" },
+  ],
   tod_tier_reached: [
     { component: "body_var_1", value: "customerName" },
     { component: "body_var_2", value: "todTierPercentage" },
@@ -33,9 +40,13 @@ const defaultComponents: Record<NotificationEventType, TemplateComponent[]> = {
   ],
 };
 
+export class TemplateConfigurationError extends Error {
+  readonly retryable = false;
+}
+
 function nonEmptyText(value: unknown, field: string) {
   const text = typeof value === "string" || typeof value === "number" ? String(value).trim() : "";
-  if (!text) throw new Error(`Approved template requires the ${field} value, but it is not available for this message.`);
+  if (!text) throw new TemplateConfigurationError(`Approved template requires the ${field} value, but it is not available for this message.`);
   return text;
 }
 

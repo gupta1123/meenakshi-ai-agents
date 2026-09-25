@@ -122,7 +122,9 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
     debitNotes: debitNotes.filter((note) => {
       if (normalized(note.customerLedgerName) !== normalized(invoice.customerLedgerName)) return false;
       const references = new Set([invoice.tallyGuid, invoice.voucherNumber, ...(invoice.billReferences ?? [])].map(normalized).filter(Boolean));
-      return references.has(normalized(note.targetVoucherGuid)) || references.has(normalized(note.billReference)) || note.narration.includes(invoice.tallyGuid);
+      // GST Debit Notes are On Account; they name the invoice in the narration.
+      return references.has(normalized(note.targetVoucherGuid)) || references.has(normalized(note.billReference)) || note.narration.includes(invoice.tallyGuid)
+        || Boolean(invoice.voucherNumber && note.narration.includes(`Inv No. ${invoice.voucherNumber} `));
     }),
   }));
   const sourceFingerprint = createHash("sha256").update(canonicalJson(invoiceResults)).digest("hex");

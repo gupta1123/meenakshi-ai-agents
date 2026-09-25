@@ -1,5 +1,21 @@
 const LOCAL_TALLY_BASE = "http://127.0.0.1:3219";
 
+export async function detectLocalTallyConnector(signal?: AbortSignal): Promise<string | null> {
+  try {
+    const response = await fetch(`${LOCAL_TALLY_BASE}/v1/identity`, {
+      cache: "no-store",
+      signal: signal ?? AbortSignal.timeout(2_000),
+    });
+    if (!response.ok) return null;
+    const payload = await response.json() as { connectorId?: unknown };
+    return typeof payload.connectorId === "string" && /^[0-9a-f-]{36}$/i.test(payload.connectorId)
+      ? payload.connectorId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export type LocalCdBootstrap = {
   evaluatedOn: string;
   expectedCompany: { name: string; guid: string };
@@ -23,7 +39,7 @@ export type LocalCdInvoiceCheck = {
   customerName: string; invoiceGuid: string; invoiceNumber: string | null; invoiceDate: string;
   invoiceAmount: string; amountPaid: string; outstandingAmount: string;
   discountPercentage: string; earnedDiscountPercentage: string; eligibilityDeadline: string;
-  status: "retained" | "payment_due" | "recovery_due" | "needs_review";
+  status: "retained" | "payment_due" | "recovery_due" | "recovered" | "needs_review";
   paymentCount: number; latestPaymentDate: string | null; reviewMessage: string | null;
 };
 
@@ -51,7 +67,16 @@ export async function runLocalCashDiscount(bootstrap: LocalCdBootstrap, signal?:
 export type LocalTodBootstrap = {
   evaluatedOn: string;
   expectedCompany: { name: string; guid: string };
+  activeSchemeVersionId: string;
+  periods: LocalTodPeriod[];
   batches: LocalTodBatchBootstrap[];
+};
+
+export type LocalTodPeriod = {
+  key: string;
+  start: string;
+  end: string;
+  state: "completed" | "current" | "upcoming";
 };
 
 export type LocalTodBatchBootstrap = {
@@ -89,7 +114,10 @@ async function runLocalTurnoverDiscountBatch(bootstrap: LocalTodBootstrap, batch
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...batch, evaluatedOn: bootstrap.evaluatedOn, expectedCompany: bootstrap.expectedCompany }),
     cache: "no-store",
-    signal: signal ?? AbortSignal.timeout(60_000),
+    // A completed quarter can contain materially more vouchers than the live
+    // projection. Give Tally enough time to finish its chunked read instead of
+    // turning a healthy, long-running calculation into a false failure.
+    signal: signal ?? AbortSignal.timeout(180_000),
   });
   const payload = await response.json().catch(() => ({})) as LocalTodResult & { error?: string };
   if (!response.ok) throw new Error(payload.error || "The local Tally connector could not complete the Turnover Discount calculation.");

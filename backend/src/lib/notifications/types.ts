@@ -1,6 +1,7 @@
 export const notificationEventTypes = [
   "cd_shortfall",
   "cd_credit_note_created",
+  "cd_debit_note_created",
   "tod_tier_reached",
   "tod_credit_note_created",
 ] as const;
@@ -19,6 +20,9 @@ export type NotificationPayload = {
   creditNoteNumber?: string | null;
   creditNoteDate?: string | null;
   creditNoteAmount?: string | number | null;
+  debitNoteNumber?: string | null;
+  debitNoteDate?: string | null;
+  debitNoteAmount?: string | number | null;
   todPeriodStart?: string | null;
   todPeriodEnd?: string | null;
   todTonnes?: string | number | null;
@@ -56,7 +60,7 @@ export type TemplateSnapshot = {
 export type NotificationMessageRow = {
   id: string;
   company_id: string;
-  proposal_id: string;
+  proposal_id: string | null;
   credit_note_posting_id: string | null;
   customer_contact_id: string;
   whatsapp_template_id: string;

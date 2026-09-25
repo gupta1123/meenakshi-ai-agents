@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bell, BookOpen, Building2, ChevronDown, CircleGauge, FileCheck2, Layers2, LogOut, Menu, ReceiptIndianRupee } from "lucide-react";
+import { Bell, BookOpen, Building2, ChevronDown, CircleGauge, FileCheck2, FileMinus2, Layers2, LogOut, Menu, ReceiptIndianRupee } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 
 import { StatusBadge } from "./ui";
@@ -16,6 +16,7 @@ const navigation = [
   { href: "/cash-discount", label: "Cash Discount", description: "Check a Sales invoice", icon: ReceiptIndianRupee },
   { href: "/turnover-discount", label: "Turnover Discount", description: "Check a customer period", icon: Layers2 },
   { href: "/credit-notes", label: "Credit Notes", description: "Posting and verification history", icon: FileCheck2 },
+  { href: "/debit-notes", label: "Debit Notes", description: "Cash Discount recoveries", icon: FileMinus2 },
   { href: "/messages", label: "Messages", description: "WhatsApp delivery history", icon: Bell },
   { href: "/rulebook", label: "Rulebook", description: "Administrator settings", icon: BookOpen, administratorOnly: true },
 ];
@@ -97,11 +98,11 @@ export function AppShell({ children, email, tallyStatus, onSignOut }: { children
         <button className="mobile-wordmark" aria-label="Navigation"><Menu size={20} /></button>
         {pageHeader && <div className={`workspace-page-header ${headerStyles.pageHeader}`}><div>{pageHeader.eyebrow && <p className="eyebrow">{pageHeader.eyebrow}</p>}<h1>{pageHeader.title}</h1>{pageHeader.detail && <p>{pageHeader.detail}</p>}</div></div>}
         <div className={`workspace-topbar-tools ${headerStyles.tools}`}>
-        <div className="company-select-compact"><Building2 size={14} aria-hidden="true" /><select aria-label="Choose company to work with" onChange={(event) => selectCompany(event.target.value)} title="Choose company to work with" value={company.id}>{availableCompanies.map(({ company: option }) => <option key={option.id} value={option.id}>{option.tally_company_name}</option>)}</select></div>
+        <div className="company-select-compact"><Building2 size={14} aria-hidden="true" /><select aria-label="Choose company to work with" onChange={(event) => selectCompany(event.target.value)} title="Choose company to work with" value={company.id}>{availableCompanies.map(({ company: option, organization: optionOrganization }) => <option key={option.id} value={option.id}>{availableCompanies.some((item) => item.organization.id !== optionOrganization.id) ? `${optionOrganization.name} — ` : ""}{option.tally_company_name}</option>)}</select></div>
         {pageHeader?.action}<GlobalTallyMonitor tallyStatus={tallyStatus} /></div>
       </header>
       {children}
     </main>
-    <nav className="mobile-nav" aria-label="Mobile navigation">{navigation.filter((item) => !item.administratorOnly || isAdministrator).slice(0, 6).map((item) => { const Icon = item.icon; const active = item.href === "/" ? activePathname === "/" : activePathname.startsWith(item.href); return <Link href={item.href} prefetch={false} key={item.href} className={active ? "active" : ""}><Icon size={18} /><span>{item.label}</span></Link>; })}</nav>
+    <nav className="mobile-nav" aria-label="Mobile navigation">{navigation.filter((item) => !item.administratorOnly || isAdministrator).map((item) => { const Icon = item.icon; const active = item.href === "/" ? activePathname === "/" : activePathname.startsWith(item.href); return <Link href={item.href} prefetch={false} key={item.href} className={active ? "active" : ""}><Icon size={18} /><span>{item.label}</span></Link>; })}</nav>
   </div></WorkspacePageHeaderContext.Provider>;
 }

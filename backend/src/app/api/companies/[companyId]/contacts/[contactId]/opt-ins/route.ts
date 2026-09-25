@@ -1,5 +1,6 @@
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
-import { appendRulebookAudit, readBoolean, readOptionalText, readTimestamp, requireRulebookCompanyAdmin, RulebookRequestError, rulebookErrorResponse } from "@/lib/rulebook/shared";
+import { appendRulebookAudit, readBoolean, readOptionalText, readTimestamp, RulebookRequestError, rulebookErrorResponse } from "@/lib/rulebook/shared";
+import { requireMeenakshiCompanyAccess } from "@/lib/authorization";
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
@@ -18,7 +19,7 @@ async function requireContact(companyId: string, contactId: string) {
 export async function GET(request: Request, context: RouteContext) {
   try {
     const { companyId, contactId } = await context.params;
-    const scope = await requireRulebookCompanyAdmin(request, companyId);
+    const scope = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
     await requireContact(scope.company.id, contactId);
     const { data, error } = await createSupabaseAdminClient().from("whatsapp_opt_ins").select("id, is_opted_in, source, recorded_at, evidence, revoked_at, created_at").eq("company_id", scope.company.id).eq("customer_contact_id", contactId).order("recorded_at", { ascending: false });
     if (error) throw error;
@@ -31,7 +32,7 @@ export async function GET(request: Request, context: RouteContext) {
 export async function POST(request: Request, context: RouteContext) {
   try {
     const { companyId, contactId } = await context.params;
-    const scope = await requireRulebookCompanyAdmin(request, companyId);
+    const scope = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
     const contact = await requireContact(scope.company.id, contactId);
     if (!contact.is_active) return jsonWithCors(request, { error: "An inactive contact cannot receive a WhatsApp opt-in record." }, { status: 409 });
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;

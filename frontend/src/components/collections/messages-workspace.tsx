@@ -1,30 +1,30 @@
 "use client";
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { ArrowRight, CheckCheck, CheckCircle2, CircleAlert, Eye, FileText, Layers, MessageSquare, Plus, RefreshCw, Send, Sparkles, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { ArrowRight, CheckCheck, Eye, FileText, Layers, MessageSquare, Plus, RefreshCw, Send, Sparkles, Trash2 } from "lucide-react";
 
 import { apiRequest, jsonBody } from "@/lib/api";
-import { userFacingError, userLabel } from "@/lib/user-copy";
+import { userFacingDetail, userFacingError, userLabel } from "@/lib/user-copy";
 import { supabase } from "@/lib/supabase";
 
 import { WorkspacePageHeader } from "./app-shell";
 import { useCompany } from "./company-context";
 import type { PageProps } from "./workspace";
 import type { MessageTemplate, NotificationMessage } from "./types";
-import { Button, Card, Drawer, EmptyState, IconButton, InlineMessage, MetricCard, SectionHeading, StatusBadge, formatDate, safePhone } from "./ui";
+import { Button, Drawer, EmptyState, IconButton, InlineMessage, StatusBadge, formatDate } from "./ui";
 
 type MessageDetail = {
   message: NotificationMessage & { delivered_at?: string | null; read_at?: string | null; scheduled_for?: string | null };
   attempts: Array<{ id: string; attempt_number: number; provider_message_id: string | null; status: string; attempted_at: string | null; completed_at: string | null; failure_reason: string | null }>;
+  preview: Array<{ component: string; type: string; value: string; variable: string }>;
+  // The approved MSG91 template text filled with this message's values.
+  sent?: { text: string; attachment: string | null; templateName: string } | null;
 };
-type MessagePreview = { preview: Array<{ component: string; type: string; value: string; variable: string }> };
 type CatalogResponse = { configured: boolean; templates: unknown };
 type Mapping = { component: string; value: string; type: "text" | "document"; filenameValue?: string };
-type CatalogOption = { id: string; label: string; providerTemplateId: string; languageCode: string; namespace?: string; variables: string[] };
-type ControlledTest = { id: number; sentAt: string; providerMessageId: string | null };
-
+type CatalogOption = { id: string; label: string; providerTemplateId: string; languageCode: string; namespace?: string; variables: string[]; variableTypes: Record<string, string> };
 const idempotencyKey = () => globalThis.crypto?.randomUUID?.() ?? `meenakshi-message-${Date.now()}`;
-const templateEvents = ["cd_shortfall", "cd_credit_note_created", "tod_tier_reached", "tod_credit_note_created"] as const;
+const templateEvents = ["cd_shortfall", "cd_debit_note_created", "cd_credit_note_created", "tod_credit_note_created", "tod_tier_reached"] as const;
 
 async function accessToken() {
   const { data } = await supabase?.auth.getSession() ?? { data: { session: null } };
@@ -38,6 +38,8 @@ function defaultValues(eventType: string) {
       ? ["customerName", "todTierPercentage", "todPeriodDisplay", "todTonnesDisplay", "benefitAmount"]
       : eventType === "tod_credit_note_created"
       ? ["customerName", "creditNoteNumber", "creditNoteAmountDisplay", "todPeriodDisplay", "todTonnesDisplay"]
+      : eventType === "cd_debit_note_created"
+      ? ["customerName", "debitNoteNumber", "debitNoteDate", "debitNoteAmountDisplay", "invoiceReference"]
       : ["customerName", "creditNoteNumber", "creditNoteDate", "creditNoteAmountDisplay", "invoiceReference"];
 }
 
@@ -68,6 +70,7 @@ function catalogOptions(payload: unknown): CatalogOption[] {
         if (String(row.status ?? "").toLowerCase() !== "approved") continue;
         const languageCode = typeof row.language === "string" ? row.language : "en";
         const variables = Array.isArray(row.variables) ? row.variables.filter((variable): variable is string => typeof variable === "string" && variable.trim().length > 0) : [];
+        const rawTypes = row.variable_type && typeof row.variable_type === "object" ? row.variable_type as Record<string, { type?: string }> : {};
         const candidate: CatalogOption = {
           id: `${providerTemplateId}:${languageCode}`,
           label: `${providerTemplateId} (${languageCode})`,
@@ -75,6 +78,7 @@ function catalogOptions(payload: unknown): CatalogOption[] {
           languageCode,
           namespace,
           variables,
+          variableTypes: Object.fromEntries(Object.entries(rawTypes).map(([key, value]) => [key, String(value?.type ?? "text").toLowerCase()])),
         };
         if (!output.some((existing) => existing.id === candidate.id)) output.push(candidate);
       }
@@ -89,47 +93,31 @@ export function MessagesWorkspace({ data, isAdministrator, refresh, setError, se
   const { company } = useCompany();
   const [selected, setSelected] = useState<NotificationMessage | null>(null);
   const [detail, setDetail] = useState<MessageDetail | null>(null);
-  const [preview, setPreview] = useState<MessagePreview["preview"] | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [resend, setResend] = useState<NotificationMessage | null>(null);
   const [templatesOpen, setTemplatesOpen] = useState(false);
-  const [testConfirmOpen, setTestConfirmOpen] = useState(false);
-  const [testSending, setTestSending] = useState(false);
-  const [controlledTests, setControlledTests] = useState<ControlledTest[]>([]);
+  const [sendingAgainId, setSendingAgainId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [eventFilter, setEventFilter] = useState("all");
   const metric = (statuses: string[]) => data.messages.filter((message) => statuses.includes(message.status)).length;
   const statuses = Array.from(new Set(data.messages.map((message) => message.status)));
   const events = Array.from(new Set(data.messages.map((message) => message.event_type)));
+  const pendingCount = metric(["queued", "sending"]) + (data.messageHealth?.retrying ?? 0);
+  // Read/opened is not tracked as a KPI; anything that reached WhatsApp counts as sent.
+  const sentCount = metric(["sent", "whatsapp_sent", "delivered", "read"]);
   const visibleMessages = data.messages.filter((message) => {
-    const searchable = `${message.event_type} ${message.resend_reason ?? ""} ${message.status}`.toLowerCase();
+    const searchable = `${message.customer_name ?? ""} ${message.recipient_phone_e164 ?? ""} ${message.event_type} ${message.resend_reason ?? ""} ${message.status}`.toLowerCase();
     return (statusFilter === "all" || message.status === statusFilter) && (eventFilter === "all" || message.event_type === eventFilter) && (!query.trim() || searchable.includes(query.trim().toLowerCase()));
   });
 
-  useEffect(() => {
-    if (!isAdministrator) { setControlledTests([]); return; }
-    void (async () => {
-      const token = await accessToken(); if (!token) return;
-      try { const result = await apiRequest<{ tests: ControlledTest[] }>(token, `/api/companies/${company.id}/notifications/test`); setControlledTests(result.tests); }
-      catch { setControlledTests([]); }
-    })();
-  }, [company.id, isAdministrator]);
-
   async function openMessage(message: NotificationMessage) {
-    setSelected(message); setDetail(null); setPreview(null); setDetailLoading(true);
+    setSelected(message); setDetail(null); setDetailLoading(true);
     const token = await accessToken();
     if (!token) return;
     try { setDetail(await apiRequest<MessageDetail>(token, `/api/companies/${company.id}/notifications/${message.id}`)); }
     catch (cause) { setError(userFacingError(cause, "Could not load the message details.")); }
     finally { setDetailLoading(false); }
-  }
-
-  async function loadPreview() {
-    if (!selected) return;
-    const token = await accessToken(); if (!token) return;
-    try { const response = await apiRequest<MessagePreview>(token, `/api/companies/${company.id}/notifications/previews`, { method: "POST", body: jsonBody({ notificationMessageId: selected.id }) }); setPreview(response.preview); }
-    catch (cause) { setError(userFacingError(cause, "Could not show the message preview.")); }
   }
 
   async function doResend(form: HTMLFormElement) {
@@ -142,40 +130,92 @@ export function MessagesWorkspace({ data, isAdministrator, refresh, setError, se
     } catch (cause) { setError(userFacingError(cause, "Could not resend the message.")); }
   }
 
-  async function sendControlledTest() {
+  // Credit and Debit Note messages are sent again as a fresh message to the
+  // same number; reminders keep the audited resend flow.
+  async function sendAgain(message: NotificationMessage) {
+    const kind = message.cash_discount_debit_note_posting_id ? "debit_note" : message.credit_note_posting_id ? "credit_note" : null;
+    const postingId = message.cash_discount_debit_note_posting_id ?? message.credit_note_posting_id;
+    if (!kind || !postingId) { setResend(message); return; }
     const token = await accessToken(); if (!token) return;
-    setTestSending(true);
+    setSendingAgainId(message.id); setError(null);
     try {
-      await apiRequest(token, `/api/companies/${company.id}/notifications/test`, { method: "POST", body: jsonBody({ confirm: true, ...(controlledTests.length === 1 ? { retest: "currency_format_correction" } : {}) }) });
-      const history = await apiRequest<{ tests: ControlledTest[] }>(token, `/api/companies/${company.id}/notifications/test`);
-      setControlledTests(history.tests);
-      setTestConfirmOpen(false);
-      setNotice(controlledTests.length === 1 ? "Correction retest accepted. Check your configured test number now; Meenakshi recorded the formatting retest." : "Controlled WhatsApp test accepted. Check your configured test number now; Meenakshi recorded the test audit.");
-    } catch (cause) {
-      setError(userFacingError(cause, "The controlled WhatsApp test could not be sent."));
-    } finally { setTestSending(false); }
+      const response = await apiRequest<{ results: Array<{ ok: boolean; error?: string }> }>(token, `/api/companies/${company.id}/notifications/send`, { method: "POST", body: jsonBody({ items: [{ kind, postingId, phone: message.recipient_phone_e164 }] }) });
+      const result = response.results[0];
+      if (!result?.ok) throw new Error(result?.error ?? "The message could not be sent again.");
+      setNotice(`WhatsApp queued again to ${message.recipient_phone_e164}.`); await refresh();
+    } catch (cause) { setError(userFacingError(cause, "Could not send the message again.")); }
+    finally { setSendingAgainId(null); }
   }
 
-  return <>
-    <WorkspacePageHeader eyebrow="Delivery history" title="Messages" detail="View customer WhatsApp messages that have the required consent and approved content." action={isAdministrator ? <div className="table-actions"><Button className="button-secondary" onClick={() => setTestConfirmOpen(true)} disabled={controlledTests.length >= 2}><Send size={15} />{controlledTests.length === 1 ? "Send correction retest" : "Send controlled test"}</Button><IconButton label="Manage approved templates" onClick={() => setTemplatesOpen(true)}><FileText size={17} /></IconButton></div> : undefined} />
-    {controlledTests.length > 0 && <InlineMessage tone="success">Controlled WhatsApp test sent {formatDate(controlledTests[0].sentAt)} to the configured test number. Delivery request recorded.</InlineMessage>}
+  return <div className="messages-page">
+    <WorkspacePageHeader eyebrow="Delivery history" title="Messages" detail="WhatsApp delivery status and audit history." />
     {data.messages.some((message) => message.event_type === "cd_shortfall" && ["queued", "sending"].includes(message.status)) && <InlineMessage tone="info">A <strong>Cash Discount reminder</strong> is ready for a customer who has given consent. It is only a WhatsApp reminder and does not create a Credit Note.</InlineMessage>}
-    <div className="metric-grid message-metrics"><MetricCard label="Waiting to send" value={metric(["queued", "sending"])} detail="Ready to be sent" tone="info" icon={<Send size={19} />} /><MetricCard label="Trying again" value={data.messageHealth?.retrying ?? 0} detail="Meenakshi is trying again" tone="attention" icon={<RefreshCw size={19} />} /><MetricCard label="Delivered" value={metric(["sent", "delivered", "read", "whatsapp_sent"])} detail="Delivery confirmed" tone="good" icon={<CheckCircle2 size={19} />} /><MetricCard label="Needs attention" value={data.messageHealth?.terminalFailures ?? 0} detail="Review why the message was not sent" tone={data.messageHealth?.terminalFailures ? "danger" : "neutral"} icon={<CircleAlert size={19} />} /></div>
-    <Card><div className="card-title"><div><p className="eyebrow">Messages</p><h2>Find a message</h2><p className="muted-copy">Cash Discount reminders are separate from Credit Notes, so you can see why each message was sent.</p></div><span className="table-count">{visibleMessages.length} shown</span></div><div className="queue-toolbar"><label className="queue-search"><span>Find message or status</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search messages" /></label><div className="filter-stack"><div className="segmented" aria-label="Message status filters"><button className={statusFilter === "all" ? "selected" : ""} onClick={() => setStatusFilter("all")}>All statuses</button>{statuses.map((status) => <button key={status} className={statusFilter === status ? "selected" : ""} onClick={() => setStatusFilter(status)}>{userLabel(status)}</button>)}</div><div className="segmented" aria-label="Message filters"><button className={eventFilter === "all" ? "selected" : ""} onClick={() => setEventFilter("all")}>All messages</button>{events.map((event) => <button key={event} className={eventFilter === event ? "selected" : ""} onClick={() => setEventFilter(event)}>{userLabel(event)}</button>)}</div></div></div>{visibleMessages.length ? <div className="data-table messages-table"><div className="table-head"><span>Message</span><span>Related item</span><span>Status</span><span>Consent</span><span>Created</span><span>Action</span></div>{visibleMessages.map((message) => { const source = message.credit_note_posting_id ? "Credit Note" : message.proposal_id ? message.event_type === "cd_shortfall" ? "Cash Discount" : "Discount result" : "Collections"; return <article key={message.id}><div><strong>{userLabel(message.event_type)}</strong><small>{message.resend_of_notification_id ? "Sent again" : "First message"} · {safePhone(message.recipient_phone_e164)}</small></div><small>{source}</small><StatusBadge status={message.status} /><small>{message.opt_in_snapshot ? "Consent recorded" : "Consent needed"}</small><small>{formatDate(message.created_at)}</small><div className="table-actions"><Button className="button-quiet" onClick={() => void openMessage(message)}><Eye size={15} />View</Button>{["sent", "delivered", "read", "failed"].includes(message.status) && <Button className="button-quiet" onClick={() => setResend(message)}>Resend</Button>}{message.status === "suppressed" && <small className="action-help">Add consent or an approved template first</small>}</div></article>; })}</div> : <EmptyState title={data.messages.length ? "No messages match this view" : "No messages yet"} detail={data.messages.length ? "Clear or change the filters to see all messages." : "Messages are sent only when customer consent and approved content are available."} action={data.messages.length ? <Button className="button-secondary" onClick={() => { setQuery(""); setStatusFilter("all"); setEventFilter("all"); }}>Clear filters</Button> : undefined} />}</Card>
-    <MessageDetailDrawer message={selected} detail={detail} preview={preview} loading={detailLoading} onClose={() => { setSelected(null); setDetail(null); setPreview(null); }} onPreview={() => void loadPreview()} />
-    <Drawer open={testConfirmOpen} onClose={() => !testSending && setTestConfirmOpen(false)} title={controlledTests.length === 1 ? "Send one correction retest" : "Send one controlled WhatsApp test"} description={controlledTests.length === 1 ? "This one permitted correction retest verifies the ₹ formatting. It sends only to the configured test number and cannot send to customers." : "This sends the active CD-shortfall template to the configured test number only. It cannot send to customers."}><div className="drawer-stack"><InlineMessage tone="warning">Use this only when you are ready to receive the real WhatsApp test now.</InlineMessage><dl className="detail-grid"><div><dt>Customer label</dt><dd>Apex Rebar Projects (test)</dd></div><div><dt>Template</dt><dd>Active CD shortfall</dd></div><div><dt>Recipient</dt><dd>Configured test number only</dd></div></dl><div className="drawer-actions"><Button onClick={() => void sendControlledTest()} disabled={testSending}>{testSending ? "Sending…" : controlledTests.length === 1 ? "Send correction retest" : "Send one test now"}</Button></div></div></Drawer>
-    <Drawer open={Boolean(resend)} onClose={() => setResend(null)} title="Send message again" description="The same customer and approved message content will be used."><form className="form-stack" onSubmit={(event) => { event.preventDefault(); void doResend(event.currentTarget); }}><label>Reason for sending again<textarea name="reason" required maxLength={500} placeholder="Why this message should be sent again" /></label><Button type="submit">Send again</Button></form></Drawer>
+    <div className="message-status-strip" aria-label="Message delivery summary">
+      <div><span>Pending</span><strong>{pendingCount}</strong></div>
+      <div><span>Sent</span><strong>{sentCount}</strong></div>
+      <div className={(data.messageHealth?.terminalFailures ?? 0) > 0 ? "has-attention" : ""}><span>Needs attention</span><strong>{data.messageHealth?.terminalFailures ?? 0}</strong></div>
+    </div>
+    <section className="messages-history">
+      <div className="message-filter-bar">
+        <label className="message-search"><span className="sr-only">Search messages</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search messages" /></label>
+        <label><span className="sr-only">Filter by status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="all">All statuses</option>{statuses.map((status) => <option key={status} value={status}>{userLabel(status)}</option>)}</select></label>
+        <label><span className="sr-only">Filter by message type</span><select value={eventFilter} onChange={(event) => setEventFilter(event.target.value)}><option value="all">All message types</option>{events.map((event) => <option key={event} value={event}>{userLabel(event)}</option>)}</select></label>
+        {(query || statusFilter !== "all" || eventFilter !== "all") && <Button className="button-quiet" onClick={() => { setQuery(""); setStatusFilter("all"); setEventFilter("all"); }}>Clear</Button>}
+      </div>
+      {visibleMessages.length ? <div className="data-table messages-table"><div className="table-head"><span>Customer</span><span>Message</span><span>Status</span><span>Last activity</span><span /></div>{visibleMessages.map((message) => { const source = message.credit_note_posting_id ? "Credit Note" : message.proposal_id ? message.event_type === "cd_shortfall" ? "Cash Discount" : "Discount result" : "Collections"; return <article key={message.id}><div><strong>{message.customer_name || "Customer"}</strong><small>{message.recipient_phone_e164 || "Number unavailable"}</small></div><div><strong>{userLabel(message.event_type)}</strong><small>{source} · {message.resend_of_notification_id ? "Resent" : "Original"}{!message.opt_in_snapshot ? " · Consent needed" : ""}</small></div><StatusBadge status={message.status} /><small>{formatDate(message.sent_at ?? message.created_at)}</small><div className="table-actions"><Button className="button-quiet" onClick={() => void openMessage(message)}><Eye size={14} />View</Button>{["failed", "suppressed", "cancelled"].includes(message.status) && <Button className="button-quiet" disabled={sendingAgainId === message.id} onClick={() => void sendAgain(message)}><Send size={14} />{sendingAgainId === message.id ? "Sending…" : "Send again"}</Button>}</div></article>; })}</div> : <EmptyState title={data.messages.length ? "No messages match this view" : "No messages yet"} detail={data.messages.length ? "Clear or change the filters to see all messages." : "Messages appear here when an approved notification is triggered."} action={data.messages.length ? <Button className="button-secondary" onClick={() => { setQuery(""); setStatusFilter("all"); setEventFilter("all"); }}>Clear filters</Button> : undefined} />}
+    </section>
+    <MessageDetailDrawer message={selected} detail={detail} loading={detailLoading} onClose={() => { setSelected(null); setDetail(null); }} />
+    <Drawer open={Boolean(resend)} onClose={() => setResend(null)} title="Send message again" description="The current template and consent will be checked before anything is queued."><form className="form-stack" onSubmit={(event) => { event.preventDefault(); void doResend(event.currentTarget); }}><label>Reason for sending again<textarea name="reason" required maxLength={500} placeholder="Why this message should be sent again" /></label><Button type="submit">Check and send again</Button></form></Drawer>
     {isAdministrator && <TemplateManager open={templatesOpen} onClose={() => setTemplatesOpen(false)} templates={data.templates} onSaved={async (message) => { setNotice(message); await refresh(); }} onError={setError} />}
-  </>;
+  </div>;
 }
 
-function MessageDetailDrawer({ message, detail, preview, loading, onClose, onPreview }: { message: NotificationMessage | null; detail: MessageDetail | null; preview: MessagePreview["preview"] | null; loading: boolean; onClose: () => void; onPreview: () => void }) {
-  return <Drawer open={Boolean(message)} onClose={onClose} title="Message details" description="See the message, delivery status, and customer consent.">{loading || !message ? <p className="muted-copy">Loading message history…</p> : <div className="drawer-stack"><dl className="detail-grid"><div><dt>Message</dt><dd>{userLabel(message.event_type)}</dd></div><div><dt>Recipient</dt><dd>{safePhone(message.recipient_phone_e164)}</dd></div><div><dt>Status</dt><dd><StatusBadge status={message.status} /></dd></div><div><dt>Sending attempts</dt><dd>{message.attempt_count} of {message.max_attempts}</dd></div><div><dt>Consent</dt><dd>{message.opt_in_snapshot ? "Consent recorded" : "Not available"}</dd></div></dl>{message.failure_reason && <InlineMessage tone="error">{message.failure_reason}</InlineMessage>}<section><div className="card-title"><div><p className="eyebrow">Message preview</p><h3>Approved WhatsApp message</h3></div><Button className="button-secondary" onClick={onPreview}>Show preview</Button></div>{preview ? <div className="preview-components">{preview.map((item) => <div key={item.component}><strong>{item.component}</strong><span>{item.value}</span></div>)}</div> : <p className="muted-copy">Show the approved message that will be sent to the customer.</p>}</section><section><h3>Sending history</h3>{detail?.attempts.length ? <div className="timeline">{detail.attempts.map((attempt) => <article key={attempt.id}><span /><div><strong>Try {attempt.attempt_number}: {userLabel(attempt.status)}</strong><p>{attempt.failure_reason ? "This attempt needs attention." : "Delivery status recorded."}</p><small>{formatDate(attempt.completed_at ?? attempt.attempted_at)}</small></div></article>)}</div> : <p className="muted-copy">No sending attempt has been recorded yet.</p>}</section></div>}</Drawer>;
+function MessageLoadingBlock({ className = "" }: { className?: string }) {
+  return <span aria-hidden="true" className={`workspace-loading-block ${className}`} />;
+}
+
+function MessageDetailLoading() {
+  return <div className="drawer-stack message-detail-loading" aria-label="Loading message details">
+    <div className="message-detail-loading-grid">{Array.from({ length: 4 }, (_, index) => <div key={index}><MessageLoadingBlock className="message-detail-loading-label" /><MessageLoadingBlock className="message-detail-loading-value" /></div>)}</div>
+    <section><MessageLoadingBlock className="message-detail-loading-label" /><div className="message-detail-loading-bubble"><MessageLoadingBlock className="message-detail-loading-line" /><MessageLoadingBlock className="message-detail-loading-copy" /><MessageLoadingBlock className="message-detail-loading-copy short" /><MessageLoadingBlock className="message-detail-loading-copy" /></div></section>
+    <section><MessageLoadingBlock className="message-detail-loading-heading" /><div className="message-detail-loading-timeline">{Array.from({ length: 2 }, (_, index) => <div key={index}><MessageLoadingBlock className="message-detail-loading-dot" /><div><MessageLoadingBlock className="message-detail-loading-line" /><MessageLoadingBlock className="message-detail-loading-copy short" /></div></div>)}</div></section>
+  </div>;
+}
+
+function WhatsAppMessagePreview({ eventType, preview, sent, at }: { eventType: string; preview: MessageDetail["preview"]; sent?: MessageDetail["sent"]; at: string | null }) {
+  if (sent?.text) {
+    return <div className="whatsapp-preview"><div className="whatsapp-preview-bar"><span>WhatsApp</span><small>Template {sent.templateName}</small></div><div className="whatsapp-chat"><div className="whatsapp-bubble">{sent.attachment && <p className="whatsapp-attachment">📄 {sent.attachment}</p>}<p style={{ whiteSpace: "pre-line" }}>{sent.text}</p><time>{formatDate(at)}</time></div></div></div>;
+  }
+  const values = new Map(preview.map((item) => [item.variable, item.value]));
+  const value = (key: string, fallback = "—") => values.get(key) || fallback;
+  const money = (displayKey: string, rawKey: string) => {
+    const display = value(displayKey, "");
+    if (display) return display.startsWith("₹") ? display : `₹${display}`;
+    const raw = value(rawKey);
+    return raw === "—" || raw.startsWith("₹") ? raw : `₹${raw}`;
+  };
+  const businessDate = (key: string) => {
+    const raw = value(key);
+    if (raw === "—") return raw;
+    const parsed = new Date(`${raw.slice(0, 10)}T00:00:00`);
+    return Number.isNaN(parsed.getTime()) ? raw : parsed.toLocaleDateString(undefined, { dateStyle: "medium" });
+  };
+  const lines = eventType === "cd_shortfall"
+    ? [<><strong>{value("customerName", "Customer")}</strong>, your Cash Discount payment is almost complete.</>, <>Amount received: <strong>{money("paidAmountDisplay", "paidAmount")}</strong></>, <>Amount remaining: <strong>{money("shortfallAmountDisplay", "shortfallAmount")}</strong></>, <>Pay by <strong>{businessDate("eligibilityDeadline")}</strong> to qualify.</>]
+    : eventType === "tod_tier_reached"
+      ? [<>Hello <strong>{value("customerName", "Customer")}</strong>,</>, <>You reached the <strong>{value("todTierPercentage")}% Turnover Discount slab</strong>.</>, <>Period: {value("todPeriodDisplay")}</>, <>Eligible quantity: {value("todTonnesDisplay")} tonnes</>, <>Projected benefit: <strong>₹{value("benefitAmount")}</strong></>]
+      : [<>Hello <strong>{value("customerName", "Customer")}</strong>,</>, <>Your Credit Note <strong>{value("creditNoteNumber")}</strong> for <strong>{value("creditNoteAmountDisplay")}</strong> is ready.</>, preview.some((item) => item.type === "document") ? <>The verified Credit Note is attached.</> : <>Your Credit Note details are shown above.</>];
+  return <div className="whatsapp-preview"><div className="whatsapp-preview-bar"><span>WhatsApp</span><small>Content preview</small></div><div className="whatsapp-chat"><div className="whatsapp-bubble">{lines.map((line, index) => <p key={index}>{line}</p>)}<time>{formatDate(at)}</time></div></div></div>;
+}
+
+function MessageDetailDrawer({ message, detail, loading, onClose }: { message: NotificationMessage | null; detail: MessageDetail | null; loading: boolean; onClose: () => void }) {
+  return <Drawer open={Boolean(message)} onClose={onClose} title={message ? userLabel(message.event_type) : "Message"}>{loading || !message ? <MessageDetailLoading /> : <div className="drawer-stack message-detail-drawer"><dl className="message-detail-summary"><div><dt>Recipient</dt><dd>{message.recipient_phone_e164 || "Number unavailable"}</dd></div><div><dt>Status</dt><dd><StatusBadge status={message.status} /></dd></div><div><dt>Attempts</dt><dd>{message.attempt_count} of {message.max_attempts}</dd></div><div><dt>Consent</dt><dd>{message.opt_in_snapshot && Object.keys(message.opt_in_snapshot).length ? "Recorded" : "Not available"}</dd></div></dl>{message.failure_reason && <InlineMessage tone="error">{userFacingDetail(message.failure_reason, "This message needs attention.")}</InlineMessage>}<section><p className="eyebrow">Message preview</p><WhatsAppMessagePreview eventType={message.event_type} preview={detail?.preview ?? []} sent={detail?.sent} at={message.sent_at ?? message.created_at} /></section><section><p className="eyebrow">Sending history</p>{detail?.attempts.length ? <div className="timeline">{detail.attempts.map((attempt) => <article key={attempt.id}><span /><div><strong>Try {attempt.attempt_number} · {userLabel(attempt.status)}</strong>{attempt.failure_reason && <p>This attempt needs attention.</p>}<small>{formatDate(attempt.completed_at ?? attempt.attempted_at)}</small></div></article>)}</div> : <p className="muted-copy">No sending attempt recorded.</p>}</section></div>}</Drawer>;
 }
 
 function getSampleVariableValue(varName: string): string {
   switch (varName) {
     case "customerName": return "Meenakshi Steels Ltd";
+    case "companyName": return "Meenakshi";
     case "paidAmount": return "1,50,000.00";
     case "paidAmountDisplay": return "₹1,50,000.00";
     case "benefitAmountDisplay": return "₹7,500.00";
@@ -186,6 +226,12 @@ function getSampleVariableValue(varName: string): string {
     case "creditNoteNumber": return "CN/2026-27/0142";
     case "creditNoteDate": return "08 Aug 2026";
     case "creditNoteAmountDisplay": return "₹12,450.00";
+    case "creditNoteAmount": return "12,450.00";
+    case "debitNoteNumber": return "DN/2026-27/0031";
+    case "debitNoteDate": return "12 Aug 2026";
+    case "debitNoteAmount": return "4,200.00";
+    case "debitNoteAmountDisplay": return "₹4,200.00";
+    case "documentUrl": return "Credit Note PDF";
     case "invoiceReference": return "INV/2026/8841";
     case "todPeriodDisplay": return "01 Jul 2026 - 31 Jul 2026";
     case "todTonnesDisplay": return "150.50";
@@ -199,15 +245,18 @@ function getAvailableVariables(eventType: string): string[] {
     return ["customerName", "paidAmount", "paidAmountDisplay", "benefitAmountDisplay", "shortfallAmount", "shortfallAmountDisplay", "eligibilityDeadline"];
   }
   if (eventType === "tod_credit_note_created") {
-    return ["customerName", "creditNoteNumber", "creditNoteAmountDisplay", "todPeriodDisplay", "todTonnesDisplay"];
+    return ["customerName", "companyName", "creditNoteNumber", "creditNoteDate", "creditNoteAmount", "creditNoteAmountDisplay", "todPeriodDisplay", "todTonnesDisplay", "documentUrl", "documentName"];
   }
   if (eventType === "tod_tier_reached") {
     return ["customerName", "todTierPercentage", "todPeriodDisplay", "todTonnesDisplay", "benefitAmount"];
   }
-  return ["customerName", "creditNoteNumber", "creditNoteDate", "creditNoteAmountDisplay", "invoiceReference"];
+  if (eventType === "cd_debit_note_created") {
+    return ["customerName", "companyName", "debitNoteNumber", "debitNoteDate", "debitNoteAmount", "debitNoteAmountDisplay", "invoiceReference", "documentUrl", "documentName"];
+  }
+  return ["customerName", "companyName", "creditNoteNumber", "creditNoteDate", "creditNoteAmount", "creditNoteAmountDisplay", "invoiceReference", "documentUrl", "documentName"];
 }
 
-function TemplateWhatsAppPreview({ eventType, mappings }: { eventType: string; mappings: Mapping[] }) {
+function TemplateWhatsAppPreview({ eventType, mappings, providerTemplateId }: { eventType: string; mappings: Mapping[]; providerTemplateId?: string }) {
   const getVal = (idx: number, fallback: string) => {
     const varName = mappings[idx]?.value || fallback;
     return getSampleVariableValue(varName);
@@ -216,9 +265,11 @@ function TemplateWhatsAppPreview({ eventType, mappings }: { eventType: string; m
   return (
     <div className="whatsapp-preview-bubble">
       <div className="whatsapp-preview-header">
-        <MessageSquare size={12} /> Approved WhatsApp Message
+        <MessageSquare size={12} /> Illustrative preview · confirm wording in MSG91
       </div>
-      {eventType === "cd_shortfall" ? (
+      {providerTemplateId === "share_credit_memo" ? (
+        <p><strong>PDF attachment</strong><br />Dear <span className="whatsapp-var-highlight">{getSampleVariableValue(mappings.find((row) => row.component === "body_1")?.value ?? "customerName")}</span>,<br /><br />Your credit memo <span className="whatsapp-var-highlight">{getSampleVariableValue(mappings.find((row) => row.component === "body_2")?.value ?? "creditNoteNumber")}</span> dated <span className="whatsapp-var-highlight">{getSampleVariableValue(mappings.find((row) => row.component === "body_3")?.value ?? "creditNoteDate")}</span> has been generated.<br /><br />Credit Amount: ₹<span className="whatsapp-var-highlight">{getSampleVariableValue(mappings.find((row) => row.component === "body_4")?.value ?? "creditNoteAmount")}</span><br /><br />Please find the credit memo PDF attached above.<br /><br />Thank you,<br />The <span className="whatsapp-var-highlight">{getSampleVariableValue(mappings.find((row) => row.component === "body_5")?.value ?? "companyName")}</span> Team</p>
+      ) : eventType === "cd_shortfall" ? (
         mappings.length === 4 ? (
           <p>
             Meenakshi: Hello <span className="whatsapp-var-highlight">{getVal(0, "customerName")}</span>. We received ₹<span className="whatsapp-var-highlight">{getVal(1, "paidAmount")}</span>. The remaining amount to qualify for the cash discount is ₹<span className="whatsapp-var-highlight">{getVal(2, "shortfallAmount")}</span>. Please complete payment by <span className="whatsapp-var-highlight">{getVal(3, "eligibilityDeadline")}</span>. Thank you.
@@ -231,6 +282,10 @@ function TemplateWhatsAppPreview({ eventType, mappings }: { eventType: string; m
       ) : eventType === "tod_tier_reached" ? (
         <p>
           Meenakshi: Hello <span className="whatsapp-var-highlight">{getVal(0, "customerName")}</span>. You have reached the <span className="whatsapp-var-highlight">{getVal(1, "todTierPercentage")}%</span> Turnover Discount tier for the period <span className="whatsapp-var-highlight">{getVal(2, "todPeriodDisplay")}</span>. Your eligible turnover is <span className="whatsapp-var-highlight">{getVal(3, "todTonnesDisplay")} MT</span> and your projected discount is ₹<span className="whatsapp-var-highlight">{getVal(4, "benefitAmount")}</span>. This will be processed as per the scheme terms. Thank you.
+        </p>
+      ) : eventType === "cd_debit_note_created" ? (
+        <p>
+          Dear <span className="whatsapp-var-highlight">{getVal(0, "customerName")}</span>, Debit Note <span className="whatsapp-var-highlight">{getVal(1, "debitNoteNumber")}</span> dated <span className="whatsapp-var-highlight">{getVal(2, "debitNoteDate")}</span> for <span className="whatsapp-var-highlight">{getVal(3, "debitNoteAmountDisplay")}</span> has been raised against invoice <span className="whatsapp-var-highlight">{getVal(4, "invoiceReference")}</span> because the Cash Discount payment deadline was missed.
         </p>
       ) : eventType === "tod_credit_note_created" ? (
         <p>
@@ -255,13 +310,21 @@ function TemplateManager({ open, onClose, templates, onSaved, onError }: { open:
   const [catalog, setCatalog] = useState<CatalogResponse | null>(null);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [eventType, setEventType] = useState<string>("cd_shortfall");
+  const [selectedProviderId, setSelectedProviderId] = useState("");
   const [eventFilter, setEventFilter] = useState<string>("all");
   const [mappings, setMappings] = useState<Mapping[]>(initialMappings("cd_shortfall"));
   const options = useMemo(() => catalogOptions(catalog?.templates), [catalog]);
 
+  useEffect(() => {
+    if (open && !catalog && !catalogLoading) void openCatalog();
+    // Only refresh on opening; the explicit Refresh button handles later changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
   function selectCatalogTemplate(optionId: string) {
     const option = options.find((candidate) => candidate.id === optionId);
     if (!option) return;
+    setSelectedProviderId(option.providerTemplateId);
     const providerIdInput = document.querySelector<HTMLInputElement>("#provider-template-id");
     if (providerIdInput) providerIdInput.value = option.providerTemplateId;
     const nameInput = document.querySelector<HTMLInputElement>("#internal-template-name");
@@ -270,7 +333,16 @@ function TemplateManager({ open, onClose, templates, onSaved, onError }: { open:
     if (languageInput) languageInput.value = option.languageCode;
     const namespaceInput = document.querySelector<HTMLInputElement>("#template-namespace");
     if (namespaceInput) namespaceInput.value = option.namespace ?? "";
-    setMappings(initialMappings(eventType, option.variables));
+    const defaults = option.providerTemplateId === "share_credit_memo" && ["tod_credit_note_created", "cd_credit_note_created"].includes(eventType)
+      ? ["customerName", "creditNoteNumber", "creditNoteDate", "creditNoteAmount", "companyName"]
+      : initialMappings(eventType, option.variables).map((mapping) => mapping.value);
+    let textIndex = 0;
+    setMappings(option.variables.map((component) => {
+      if (option.variableTypes[component] === "document") return { component, value: "documentUrl", type: "document" as const, filenameValue: "documentName" };
+      const value = defaults[textIndex] ?? "customerName";
+      textIndex += 1;
+      return { component, value, type: "text" as const };
+    }));
   }
 
   const activeCount = useMemo(() => templates.filter((t) => t.is_active).length, [templates]);
@@ -392,15 +464,23 @@ function TemplateManager({ open, onClose, templates, onSaved, onError }: { open:
                         </div>
                       </div>
                       <div className="table-actions">
-                        <StatusBadge status={tpl.is_active ? "ready" : "retired"} />
+                        {tpl.is_active && catalog && !options.some((option) => option.providerTemplateId === tpl.provider_template_id && option.languageCode === tpl.language_code)
+                          ? <span className="status-badge tone-attention">{catalog.configured ? "Not approved in MSG91" : "MSG91 not configured"}</span>
+                          : tpl.is_active && catalog
+                            ? <span className="status-badge tone-good">Approved in MSG91</span>
+                            : <StatusBadge status={tpl.is_active ? "active" : "retired"} />}
                         <Button type="button" className="button-quiet" onClick={() => void setActive(tpl, !tpl.is_active)}>
                           {tpl.is_active ? "Retire" : "Activate"}
                         </Button>
                       </div>
                     </div>
 
+                    {tpl.is_active && catalog && !options.some((option) => option.providerTemplateId === tpl.provider_template_id && option.languageCode === tpl.language_code)
+                      ? <InlineMessage tone="warning">{catalog.configured ? "This mapping is active locally, but MSG91 has not approved its template." : "MSG91 sending is not configured."} WhatsApp messages cannot be sent with it.</InlineMessage>
+                      : null}
+
                     {/* Visual WhatsApp Preview */}
-                    <TemplateWhatsAppPreview eventType={tpl.event_type} mappings={tpl.component_schema?.components?.map((mapping) => ({ ...mapping, type: mapping.type ?? "text" })) ?? initialMappings(tpl.event_type)} />
+                    <TemplateWhatsAppPreview eventType={tpl.event_type} providerTemplateId={tpl.provider_template_id} mappings={tpl.component_schema?.components?.map((mapping) => ({ ...mapping, type: mapping.type ?? "text" })) ?? initialMappings(tpl.event_type)} />
                   </article>
                 ))
               ) : (
@@ -447,7 +527,7 @@ function TemplateManager({ open, onClose, templates, onSaved, onError }: { open:
               <div className="form-grid">
                 <label>
                   WhatsApp template ID
-                  <input id="provider-template-id" name="providerTemplateId" required maxLength={160} placeholder="e.g. cd_shortfall_v1" />
+                  <input id="provider-template-id" name="providerTemplateId" required maxLength={160} placeholder="e.g. cd_shortfall_v1" onChange={(e) => setSelectedProviderId(e.target.value)} />
                 </label>
                 <label>
                   Display name
@@ -499,6 +579,10 @@ function TemplateManager({ open, onClose, templates, onSaved, onError }: { open:
                         <option key={v} value={v}>{v}</option>
                       ))}
                     </select>
+                    <select aria-label="Message detail type" value={m.type} onChange={(e) => setMappings((rows) => rows.map((r, i) => i === index ? { ...r, type: e.target.value as "text" | "document", value: e.target.value === "document" ? "documentUrl" : r.value, filenameValue: e.target.value === "document" ? "documentName" : undefined } : r))}>
+                      <option value="text">Text</option>
+                      <option value="document">PDF</option>
+                    </select>
                     <Button type="button" className="button-quiet" onClick={() => setMappings((rows) => rows.filter((_, i) => i !== index))}>
                       <Trash2 size={14} />
                     </Button>
@@ -512,7 +596,7 @@ function TemplateManager({ open, onClose, templates, onSaved, onError }: { open:
               {/* Live Preview Card */}
               <section>
                 <p className="eyebrow">Live WhatsApp Preview</p>
-                <TemplateWhatsAppPreview eventType={eventType} mappings={mappings} />
+                <TemplateWhatsAppPreview eventType={eventType} providerTemplateId={selectedProviderId} mappings={mappings} />
               </section>
 
               <label className="switch-field">

@@ -1,0 +1,43 @@
+;; Meenakshi: export a Credit/Debit Note as Tally's own printed PDF.
+;; The connector sets the voucher MasterID and output path, then calls the
+;; trigger report over the Tally API. The print is bound to that MasterID,
+;; so whatever is on the Tally screen cannot change which voucher is printed.
+;; Uses Tally's "Comprehensive Invoice" print form (the form Kalika's export
+;; lacked: it used "VCH Display", which printed a blank voucher shell).
+
+[Variable : MeenakshiNoteMasterID]
+Type : String
+
+[Variable : MeenakshiNotePdfPath]
+Type : String
+
+[System : Variable]
+MeenakshiNoteMasterID : ""
+MeenakshiNotePdfPath  : ""
+
+[Report : Meenakshi Note Print]
+Form   : Comprehensive Invoice
+Object : Voucher : "ID:" + ##MeenakshiNoteMasterID
+
+[Report : Meenakshi Note PDF Trigger]
+Form     : Meenakshi Note PDF Trigger
+Variable : MeenakshiNoteMasterID, MeenakshiNotePdfPath
+On : Load : Yes : Call : Meenakshi Export Note PDF
+
+[Form : Meenakshi Note PDF Trigger]
+Part : Meenakshi Note PDF Trigger
+
+[Part : Meenakshi Note PDF Trigger]
+Line : Meenakshi Note PDF Trigger
+
+[Line : Meenakshi Note PDF Trigger]
+Field : Meenakshi Note PDF Trigger
+
+[Field : Meenakshi Note PDF Trigger]
+Set As : ""
+
+[Function : Meenakshi Export Note PDF]
+00 : SET : SVPrintFileName : ##MeenakshiNotePdfPath
+10 : SET : SVExportFormat  : $$SysName:PDF
+20 : SET : SVOutputType    : "Export Button"
+30 : EXPORT REPORT : Meenakshi Note Print : Yes

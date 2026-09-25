@@ -36,9 +36,9 @@ function voucherXml({ guid = "credit-note-guid", voucherNumber = "CN-1", voucher
     <VOUCHERTYPENAME>Credit Note</VOUCHERTYPENAME><VOUCHERTYPEGUID>${voucherTypeGuid}</VOUCHERTYPEGUID>
     <PARTYLEDGERNAME>ACME</PARTYLEDGERNAME><PARTYLEDGERGUID></PARTYLEDGERGUID>
     <VOUCHERAMOUNT>-100.25</VOUCHERAMOUNT><NARRATION>CD:V1:INV-1:EVAL-1</NARRATION>
-    <ALLLEDGERENTRIES.LIST><LEDGERNAME>ACME</LEDGERNAME><AMOUNT>-100.25</AMOUNT></ALLLEDGERENTRIES.LIST>
-    <ALLLEDGERENTRIES.LIST><LEDGERNAME>Sales</LEDGERNAME><AMOUNT>100.25</AMOUNT></ALLLEDGERENTRIES.LIST>
-    <ALLLEDGERENTRIES.LIST><BILLALLOCATIONS.LIST><NAME>INV-1</NAME><BILLTYPE>Agst Ref</BILLTYPE><AMOUNT>-100.25</AMOUNT></BILLALLOCATIONS.LIST></ALLLEDGERENTRIES.LIST>
+    <ALLLEDGERENTRIES.LIST><LEDGERNAME>ACME</LEDGERNAME><AMOUNT>100.25</AMOUNT></ALLLEDGERENTRIES.LIST>
+    <ALLLEDGERENTRIES.LIST><LEDGERNAME>Sales</LEDGERNAME><AMOUNT>-100.25</AMOUNT></ALLLEDGERENTRIES.LIST>
+    <ALLLEDGERENTRIES.LIST><BILLALLOCATIONS.LIST><NAME>INV-1</NAME><BILLTYPE>Agst Ref</BILLTYPE><AMOUNT>100.25</AMOUNT></BILLALLOCATIONS.LIST></ALLLEDGERENTRIES.LIST>
   </VOUCHER>`;
 }
 
@@ -73,7 +73,7 @@ test("Credit Note verification detects accounting-mode evidence without using fl
     voucherTypeGuid: "credit-note-type", partyLedgerGuid: "customer-1", voucherDate: "2026-08-05",
     grossAmount: "-100.25", inventoryLines: [],
     billAllocations: [{ billReference: "INV-1", allocationType: "agst_ref" }],
-    sourcePayload: { ledgerEntries: [{ ledgerName: "ACME", amount: "-100.25" }, { ledgerName: "Sales", amount: "100.25" }] },
+    sourcePayload: { ledgerEntries: [{ ledgerName: "ACME", amount: "100.25" }, { ledgerName: "Sales", amount: "-100.25" }] },
   });
   assert.equal(result.amount, "100.25");
   assert.equal(result.unexpectedGstLedgerCount, 0);
@@ -90,8 +90,8 @@ test("commercial Credit Note XML supports proportional source Sales-ledger split
       { id: "sales-id-2", guid: "sales-2", name: "Export Sales", amount: "40.10" },
     ],
   });
-  assert.match(xml, /<LEDGERNAME>Local Sales<\/LEDGERNAME><ISDEEMEDPOSITIVE>No<\/ISDEEMEDPOSITIVE><AMOUNT>60\.15<\/AMOUNT>/);
-  assert.match(xml, /<LEDGERNAME>Export Sales<\/LEDGERNAME><ISDEEMEDPOSITIVE>No<\/ISDEEMEDPOSITIVE><AMOUNT>40\.10<\/AMOUNT>/);
+  assert.match(xml, /<LEDGERNAME>Local Sales<\/LEDGERNAME><ISDEEMEDPOSITIVE>Yes<\/ISDEEMEDPOSITIVE><AMOUNT>-60\.15<\/AMOUNT>/);
+  assert.match(xml, /<LEDGERNAME>Export Sales<\/LEDGERNAME><ISDEEMEDPOSITIVE>Yes<\/ISDEEMEDPOSITIVE><AMOUNT>-40\.10<\/AMOUNT>/);
 });
 
 test("Credit Note read-back accepts the exact synced party name only when Tally omitted PARTYLEDGERGUID", async () => {
@@ -125,17 +125,17 @@ test("Credit Note read-back refuses ambiguous existing vouchers before importing
   });
 });
 
-test("Cash Discount Debit Note XML creates a new customer reference and credits the source Sales ledger", () => {
+test("Cash Discount Debit Note XML creates a new customer reference and debits the customer and credits the source Sales ledger", () => {
   const xml = buildDebitNoteImportXml(debitNote);
   assert.match(xml, /<VOUCHER VCHTYPE="Debit Note" ACTION="Create">/);
-  assert.match(xml, /<LEDGERNAME>ACME<\/LEDGERNAME><ISDEEMEDPOSITIVE>No<\/ISDEEMEDPOSITIVE><AMOUNT>50\.25<\/AMOUNT>/);
-  assert.match(xml, /<NAME>INV-1<\/NAME><BILLTYPE>New Ref<\/BILLTYPE><AMOUNT>50\.25<\/AMOUNT>/);
-  assert.match(xml, /<LEDGERNAME>Sales<\/LEDGERNAME><ISDEEMEDPOSITIVE>Yes<\/ISDEEMEDPOSITIVE><AMOUNT>-50\.25<\/AMOUNT>/);
+  assert.match(xml, /<LEDGERNAME>ACME<\/LEDGERNAME><ISDEEMEDPOSITIVE>Yes<\/ISDEEMEDPOSITIVE><AMOUNT>-50\.25<\/AMOUNT>/);
+  assert.match(xml, /<NAME>INV-1<\/NAME><BILLTYPE>New Ref<\/BILLTYPE><AMOUNT>-50\.25<\/AMOUNT>/);
+  assert.match(xml, /<LEDGERNAME>Sales<\/LEDGERNAME><ISDEEMEDPOSITIVE>No<\/ISDEEMEDPOSITIVE><AMOUNT>50\.25<\/AMOUNT>/);
   assert.doesNotMatch(xml, /INVENTORYENTRIES|(?:IGST|CGST|SGST|UTGST)/i);
 });
 
 test("Debit Note read-back requires the exact immutable recovery reference", async () => {
-  const xml = `<ENVELOPE><BODY><DATA><COLLECTION><VOUCHER><GUID>dn-guid</GUID><VOUCHERNUMBER>DN-1</VOUCHERNUMBER><DATE>20260805</DATE><VOUCHERTYPENAME>Debit Note</VOUCHERTYPENAME><PARTYLEDGERNAME>ACME</PARTYLEDGERNAME><VOUCHERAMOUNT>50.25</VOUCHERAMOUNT><NARRATION>MEENAKSHI-CD-RECOVERY-1</NARRATION><ALLLEDGERENTRIES.LIST><LEDGERNAME>ACME</LEDGERNAME><AMOUNT>50.25</AMOUNT><BILLALLOCATIONS.LIST><NAME>INV-1</NAME><BILLTYPE>New Ref</BILLTYPE><AMOUNT>50.25</AMOUNT></BILLALLOCATIONS.LIST></ALLLEDGERENTRIES.LIST><ALLLEDGERENTRIES.LIST><LEDGERNAME>Sales</LEDGERNAME><AMOUNT>-50.25</AMOUNT></ALLLEDGERENTRIES.LIST></VOUCHER></COLLECTION></DATA></BODY></ENVELOPE>`;
+  const xml = `<ENVELOPE><BODY><DATA><COLLECTION><VOUCHER><GUID>dn-guid</GUID><VOUCHERNUMBER>DN-1</VOUCHERNUMBER><DATE>20260805</DATE><VOUCHERTYPENAME>Debit Note</VOUCHERTYPENAME><PARTYLEDGERNAME>ACME</PARTYLEDGERNAME><VOUCHERAMOUNT>50.25</VOUCHERAMOUNT><NARRATION>MEENAKSHI-CD-RECOVERY-1</NARRATION><ALLLEDGERENTRIES.LIST><LEDGERNAME>ACME</LEDGERNAME><AMOUNT>-50.25</AMOUNT><BILLALLOCATIONS.LIST><NAME>INV-1</NAME><BILLTYPE>New Ref</BILLTYPE><AMOUNT>-50.25</AMOUNT></BILLALLOCATIONS.LIST></ALLLEDGERENTRIES.LIST><ALLLEDGERENTRIES.LIST><LEDGERNAME>Sales</LEDGERNAME><AMOUNT>50.25</AMOUNT></ALLLEDGERENTRIES.LIST></VOUCHER></COLLECTION></DATA></BODY></ENVELOPE>`;
   await withTallyResponse(xml, async (tallyUrl) => {
     const voucher = await findDebitNote(debitNote, { tallyUrl });
     assert.equal(voucher?.guid, "dn-guid");

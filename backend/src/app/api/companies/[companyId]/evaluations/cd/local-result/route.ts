@@ -26,7 +26,8 @@ export async function POST(request: Request, context: RouteContext) {
       p_organization_id: organization.id,
       p_company_id: company.id,
       p_actor_id: userId,
-      p_request_context: { schemeType: "cd", batch: true, evaluatedOn, localFirst: true },
+      // ruleVersionId lets the page show "last calculated" per Cash Discount rule.
+      p_request_context: { schemeType: "cd", batch: true, evaluatedOn, localFirst: true, ruleVersionId: body.evidence.ruleVersionId },
       p_idempotency_key: idempotencyKey,
     });
     if (error) throw error;

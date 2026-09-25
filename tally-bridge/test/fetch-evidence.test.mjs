@@ -1,7 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { executeCommand } from "../src/commands/dispatch.mjs";
-import { fetchLiveTodEvidence } from "../src/commands/live-tod-evidence.mjs";
+import { fetchLiveTodEvidence, todPaymentDueDate } from "../src/commands/live-tod-evidence.mjs";
+
+test("TOD payment due date is day 25, shifted past Sundays and holidays", () => {
+  const check = { dueDays: 25, holidays: [], nonWorkingIsoWeekdays: [7] };
+  assert.deepEqual(todPaymentDueDate("2026-08-01", check), { nominalDueDate: "2026-08-26", dueDate: "2026-08-26", shiftedFor: [] });
+  assert.equal(todPaymentDueDate("2026-08-05", check).dueDate, "2026-08-31", "Sunday 30 Aug moves to Monday");
+  const withHoliday = todPaymentDueDate("2026-08-05", { ...check, holidays: ["2026-08-31"] });
+  assert.equal(withHoliday.dueDate, "2026-09-01", "Monday holiday moves to the next working day");
+  assert.deepEqual(withHoliday.shiftedFor.map((item) => item.reason), ["non_working_day", "holiday"]);
+  assert.equal(todPaymentDueDate("2026-08-01", { ...check, holidays: ["2026-08-15"] }).dueDate, "2026-08-26", "holidays inside the 25 days still count");
+});
 
 test("targeted evidence command keeps paired master and voucher checkpoints distinct", async () => {
   const originalFetch = globalThis.fetch;

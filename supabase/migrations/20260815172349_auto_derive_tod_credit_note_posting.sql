@@ -186,7 +186,19 @@ begin
   if mismatch_reason is null and p_result->>'companyGuid' <> tally_posting #>> '{company,guid}' then mismatch_reason := 'Tally company does not match'; end if;
   if mismatch_reason is null and p_result->>'voucherTypeGuid' <> tally_posting #>> '{voucherType,guid}' then mismatch_reason := 'Tally Credit Note type does not match'; end if;
   if mismatch_reason is null and p_result->>'partyLedgerGuid' <> tally_posting #>> '{party,guid}' then mismatch_reason := 'Tally customer ledger does not match'; end if;
-  if mismatch_reason is null and coalesce(p_result->'sourceSalesLedgerEvidence','[]'::jsonb) <> coalesce(tally_posting->'sourceSalesLedgers','[]'::jsonb) then mismatch_reason := 'Tally source Sales ledger split does not match'; end if;
+  if mismatch_reason is null and (
+    select coalesce(jsonb_agg(jsonb_build_object(
+      'guid', entry->>'guid', 'name', entry->>'name',
+      'amount', round((entry->>'amount')::numeric, 2)
+    ) order by entry->>'guid'), '[]'::jsonb)
+    from jsonb_array_elements(coalesce(p_result->'sourceSalesLedgerEvidence', '[]'::jsonb)) entry
+  ) <> (
+    select coalesce(jsonb_agg(jsonb_build_object(
+      'guid', entry->>'guid', 'name', entry->>'name',
+      'amount', round((entry->>'amount')::numeric, 2)
+    ) order by entry->>'guid'), '[]'::jsonb)
+    from jsonb_array_elements(coalesce(tally_posting->'sourceSalesLedgers', '[]'::jsonb)) entry
+  ) then mismatch_reason := 'Tally source Sales ledger split does not match'; end if;
   if mismatch_reason is null and verified_amount <> posting.discount_amount then mismatch_reason := 'Tally amount does not equal the approved amount'; end if;
   if mismatch_reason is null and p_result->>'voucherDate' <> posting.credit_note_date::text then mismatch_reason := 'Tally Credit Note date does not match'; end if;
   if mismatch_reason is null and p_result->>'billAllocationType' <> posting.bill_allocation_type::text then mismatch_reason := 'Tally bill allocation type does not match'; end if;

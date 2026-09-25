@@ -15,7 +15,7 @@ import { Button, Card, InlineMessage } from "./ui";
 import { WorkspaceLoadingShell } from "./workspace-loading-shell";
 
 type ActiveCompanyResponse = {
-  status: "ready" | "no_authorized_companies" | "tally_not_connected" | "company_not_open" | "active_company_not_registered" | "ambiguous_active_companies" | "company_not_authorized" | "connection_check_failed";
+  status: "ready" | "no_authorized_companies" | "tally_not_connected" | "company_not_open" | "company_mismatch" | "active_company_not_registered" | "ambiguous_active_companies" | "company_not_authorized" | "connection_check_failed";
   company: { id: string } | null;
   activeTallyCompany?: { name: string; guid: string } | null;
 };
@@ -126,6 +126,7 @@ export function AuthGate({ children }: { children: (props: { email: string; sign
 
   const availableCompanies = useMemo(() => bootstrap?.organizations.flatMap((organization) => organization.companies.map((company) => ({ company, organization }))) ?? [], [bootstrap]);
   const selectCompany = useCallback((companyId: string) => {
+    window.sessionStorage.setItem("meenakshi.activeCompanyId", companyId);
     setCompanySelection({ companyId, isManual: true });
     setActiveCompanyRefresh((value) => value + 1);
   }, []);
@@ -136,16 +137,26 @@ export function AuthGate({ children }: { children: (props: { email: string; sign
       return;
     }
     let active = true;
-    window.sessionStorage.removeItem("meenakshi.activeCompanyId");
+    const storedCompanyId = window.sessionStorage.getItem("meenakshi.activeCompanyId") ?? "";
+    const storedCompanyIsAuthorised = availableCompanies.some((item) => item.company.id === storedCompanyId);
+    const targetCompanyId = companySelection.companyId
+      || (storedCompanyIsAuthorised ? storedCompanyId : "")
+      || availableCompanies[0]?.company.id
+      || "";
+    if (!targetCompanyId) return;
+    if (!companySelection.companyId) {
+      setCompanySelection({ companyId: targetCompanyId, isManual: storedCompanyIsAuthorised });
+    }
     const resolveActiveCompany = async () => {
       try {
-        const response = await apiRequest<ActiveCompanyResponse>(token, "/api/active-company");
+        const response = await apiRequest<ActiveCompanyResponse>(token, `/api/active-company?companyId=${encodeURIComponent(targetCompanyId)}`);
         if (!active) return;
         const isAuthorisedCompany = response.status === "ready"
           && Boolean(response.company && availableCompanies.some((item) => item.company.id === response.company?.id));
         if (isAuthorisedCompany) {
           const activeCompanyId = response.company!.id;
-          setCompanySelection((current) => current.isManual && current.companyId !== activeCompanyId ? current : { companyId: activeCompanyId, isManual: false });
+          window.sessionStorage.setItem("meenakshi.activeCompanyId", activeCompanyId);
+          setCompanySelection((current) => current.companyId === activeCompanyId ? current : { companyId: activeCompanyId, isManual: current.isManual });
         }
       } catch {
         // Keep the last usable selection while the next heartbeat check retries.
@@ -154,7 +165,7 @@ export function AuthGate({ children }: { children: (props: { email: string; sign
     void resolveActiveCompany();
     const timer = window.setInterval(() => { void resolveActiveCompany(); }, 15_000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [activeCompanyRefresh, availableCompanies, bootstrap, token]);
+  }, [activeCompanyRefresh, availableCompanies, bootstrap, companySelection.companyId, token]);
 
   if (frontendConfigurationError) return <main className="access-page"><Card><p className="eyebrow">App setup</p><h1>Meenakshi is not ready yet</h1><p className="section-detail">Ask your administrator to complete the application setup.</p></Card></main>;
   if (loading || (token && !bootstrap && !error)) return <WorkspaceLoadingShell />;

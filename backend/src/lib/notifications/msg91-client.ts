@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { msg91Recipient, normalizeStoredE164 } from "./eligibility";
+import { msg91Recipient } from "./eligibility";
 import { renderMsg91Template } from "./template-renderer";
 import type { NotificationEventType, NotificationPayload, TemplateSnapshot } from "./types";
 
@@ -21,12 +21,7 @@ export function getMsg91Config() {
   const senderNumber = env("MSG91_WHATSAPP_NUMBER");
   const baseUrl = (env("MSG91_WHATSAPP_API_BASE_URL") || DEFAULT_BASE_URL).replace(/\/+$/, "");
   const transport = env("MEENAKSHI_MSG91_TRANSPORT").toLowerCase() || "live";
-  const testRecipientRaw = env("MEENAKSHI_MSG91_TEST_RECIPIENT_E164");
-  const testRecipientE164 = testRecipientRaw ? normalizeStoredE164(testRecipientRaw) : null;
-  if (testRecipientRaw && !testRecipientE164) {
-    throw new Error("MEENAKSHI_MSG91_TEST_RECIPIENT_E164 must be a valid E.164 number, for example +919876543210.");
-  }
-  return { authKey, senderNumber, baseUrl, transport, testRecipientE164, isConfigured: Boolean(authKey && senderNumber) || transport === "mock" };
+  return { authKey, senderNumber, baseUrl, transport, isConfigured: Boolean(authKey && senderNumber) || transport === "mock" };
 }
 
 export async function fetchMsg91WhatsappTemplates(fetcher: FetchLike = fetch) {
@@ -71,10 +66,6 @@ export async function sendMsg91Notification(input: {
   const config = getMsg91Config();
   const recipient = msg91Recipient(input.recipientPhoneE164);
   if (!recipient) throw new Msg91DeliveryError("Recipient phone must be a stored E.164 number.", false);
-  const recipientE164 = normalizeStoredE164(input.recipientPhoneE164);
-  if (config.testRecipientE164 && recipientE164 !== config.testRecipientE164) {
-    throw new Msg91DeliveryError("Notification blocked by the configured MSG91 test-recipient gate.", false, 403, { testRecipientE164: config.testRecipientE164 });
-  }
   if (!config.isConfigured) throw new Msg91DeliveryError("MSG91 WhatsApp is not configured.", false);
 
   const templatePayload = renderMsg91Template({ eventType: input.eventType, recipient, payload: input.payload, template: input.template });

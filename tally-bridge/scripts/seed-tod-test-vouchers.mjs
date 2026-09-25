@@ -17,6 +17,10 @@ const cases = [
   { key: "TIER3-500", voucherType: "Sales", party: "Central India Rebar Projects", quantity: 500 },
   { key: "RETURN-BASE-300", voucherType: "Sales", party: "Deccan Rebar Projects", quantity: 300 },
   { key: "RETURN-120", voucherType: "Credit Note", party: "Deccan Rebar Projects", quantity: 120, isReturn: true },
+  { key: "QUARTERLY-PUNE-40", voucherType: "Sales", party: "Apex TMT Traders", quantity: 40 },
+  { key: "QUARTERLY-PUNE-20", voucherType: "Sales", party: "Apex TMT Traders", quantity: 20 },
+  { key: "QUARTERLY-PUNE-RETURN-15", voucherType: "Credit Note", party: "Apex TMT Traders", quantity: 15, isReturn: true },
+  { key: "QUARTERLY-CONTROL-40", voucherType: "Sales", party: "Apex Rebar Projects", quantity: 40 },
 ];
 
 function compactDate(value) { return value.replaceAll("-", ""); }

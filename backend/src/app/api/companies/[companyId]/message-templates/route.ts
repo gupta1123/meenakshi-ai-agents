@@ -1,6 +1,7 @@
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { fetchMsg91WhatsappTemplates, getMsg91Config } from "@/lib/notifications/msg91-client";
 import { readTemplateComponentSchema } from "@/lib/notifications/template-renderer";
+import { liveProviderTemplateProblem } from "@/lib/notifications/provider-template";
 import { isNotificationEventType } from "@/lib/notifications/types";
 import { appendRulebookAudit, readBoolean, readOptionalText, readRequiredText, requireRulebookCompanyAdmin, RulebookRequestError, rulebookErrorResponse } from "@/lib/rulebook/shared";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
@@ -32,9 +33,9 @@ function templateInput(body: Record<string, unknown>) {
 
 async function assertNoOpenTemplateMessages(templateId: string) {
   const { count, error } = await createSupabaseAdminClient().from("notification_messages")
-    .select("id", { count: "exact", head: true }).eq("whatsapp_template_id", templateId).in("status", ["queued", "failed", "sending"]);
+    .select("id", { count: "exact", head: true }).eq("whatsapp_template_id", templateId).in("status", ["queued", "sending"]);
   if (error) throw error;
-  if ((count ?? 0) > 0) throw new RulebookRequestError("This template has queued or retrying messages. Wait for them to finish before replacing the active template.", 409);
+  if ((count ?? 0) > 0) throw new RulebookRequestError("This template has queued or sending messages. Wait for them to finish before replacing the active template.", 409);
 }
 
 export async function GET(request: Request, context: RouteContext) {
@@ -64,6 +65,10 @@ export async function POST(request: Request, context: RouteContext) {
     const scope = await requireRulebookCompanyAdmin(request, companyId);
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     const input = templateInput(body);
+    if (input.is_active) {
+      const problem = await liveProviderTemplateProblem({ providerTemplateId: input.provider_template_id, languageCode: input.language_code, componentSchema: input.component_schema });
+      if (problem) throw new RulebookRequestError(problem, 422);
+    }
     const supabase = createSupabaseAdminClient();
     // Insert inactive first so replacing a template never leaves a period with
     // two active versions. The old one is preserved for historical snapshots.

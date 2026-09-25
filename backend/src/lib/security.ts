@@ -1,7 +1,14 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 
 export function createConnectorControlToken() {
   return randomBytes(32).toString("base64url");
+}
+
+export function createPendingConnectorIdentity() {
+  return {
+    installationKey: `meenakshi-${randomUUID()}`,
+    machineFingerprint: `pending:${randomUUID()}`,
+  };
 }
 
 export function hashConnectorSecret(value: string) {

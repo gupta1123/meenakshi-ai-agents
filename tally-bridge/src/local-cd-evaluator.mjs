@@ -31,6 +31,12 @@ function workingDayDeadline(calendar, startDate, allowedWorkingDays) {
   throw new Error("Could not calculate the Cash Discount payment deadline.");
 }
 
+// "CD 1.5%", "1.5% cash discount", "Less 2 percent C.D." qualify; "18% GST" or "CD" alone do not.
+export function offersCashDiscount(narration) {
+  const text = String(narration ?? "");
+  return /\bcash\s*discount\b|\bc\s*\.?\s*d\s*\.?\b/i.test(text) && /%|\bper\s*cent(?:age)?\b/i.test(text);
+}
+
 export function parseCashDiscountNarration(value) {
   const sourceText = String(value ?? "").replace(/\s+/g, " ").trim();
   if (!sourceText) return { mentioned: false, percentage: null, allowedDays: null, dayType: null };
@@ -71,13 +77,17 @@ export function evaluateLocalCashDiscount(rule, evaluatedOn, invoices) {
   for (const invoice of invoices) {
     const netInvoiceAmount = decimal(invoice.grossAmount).abs();
     if (netInvoiceAmount.lessThanOrEqualTo(0)) continue;
+    // Only invoices whose narration offers Cash Discount count: it must mention
+    // CD / cash discount together with a percentage ("%" or "percent"). The
+    // rule percentage always applies; the narration only qualifies the invoice.
+    if (!offersCashDiscount(invoice.narration)) continue;
     const narration = parseCashDiscountNarration(invoice.narration);
     const narrationSlab = narration.percentage === null ? null : slabs.find((slab) => decimal(slab.percentage).equals(narration.percentage));
     const narrationMatches = Boolean(narrationSlab)
       && (narration.allowedDays === null || narrationSlab.allowedWorkingDays === narration.allowedDays)
       && narration.dayType !== "calendar_days";
     const narrationConflict = rule.narrationMode === "required" && (!narration.mentioned || !narrationMatches);
-    const grantedPercentage = rule.checkNarration && narrationSlab ? decimal(narrationSlab.percentage) : highestPercentage;
+    const grantedPercentage = highestPercentage;
     if (grantedPercentage.lessThanOrEqualTo(0) || grantedPercentage.greaterThanOrEqualTo(100)) continue;
 
     const impliedGrossAmount = netInvoiceAmount.div(decimal(1).minus(grantedPercentage.div(100)));
@@ -88,16 +98,20 @@ export function evaluateLocalCashDiscount(rule, evaluatedOn, invoices) {
     const earnedWindow = paidInFullOn
       ? windows.filter((window) => paidInFullOn <= window.deadline).sort((left, right) => decimal(right.percentage).comparedTo(decimal(left.percentage)))[0] ?? null
       : windows.filter((window) => evaluatedOn <= window.deadline).sort((left, right) => decimal(right.percentage).comparedTo(decimal(left.percentage)))[0] ?? null;
+    // Invoices paid in full after the deadline are not recovered and not listed.
+    if (paidInFullOn && !earnedWindow) continue;
     const earnedPercentage = earnedWindow ? decimal(earnedWindow.percentage) : decimal(0);
     const recoveryRequired = nonNegative(percentOf(impliedGrossAmount, grantedPercentage.minus(earnedPercentage)));
     const postedDebitNotes = (invoice.debitNotes ?? []).filter((note) => note.status === "posted");
     const alreadyRecovered = postedDebitNotes.reduce((total, note) => total.plus(decimal(note.amount).abs()), decimal(0));
     const remainingRecovery = nonNegative(recoveryRequired.minus(alreadyRecovered));
-    const overRecovered = alreadyRecovered.greaterThan(recoveryRequired.plus(decimal("0.01")));
+    // Debit Notes are posted rounded to whole rupees (with GST), so a
+    // difference under Rs.1 either way is rounding, not a new recovery.
+    const overRecovered = alreadyRecovered.greaterThan(recoveryRequired.plus(decimal("1")));
     const missingSalesLedger = !String(invoice.sourceSalesLedgerName ?? "").trim();
     const finalDeadline = windows.at(-1).deadline;
     const openShortfall = nonNegative(netInvoiceAmount.minus(paidToDate));
-    const needsRecovery = remainingRecovery.greaterThan(decimal("0.0049"));
+    const needsRecovery = alreadyRecovered.greaterThan(0) ? remainingRecovery.greaterThanOrEqualTo(decimal("1")) : remainingRecovery.greaterThan(decimal("0.0049"));
     const needsReview = overRecovered || narrationConflict || (needsRecovery && missingSalesLedger);
     const status = needsReview ? "needs_review" : needsRecovery ? "recovery_due" : openShortfall.greaterThan(0) ? "payment_due" : "retained";
     const reviewMessage = overRecovered ? "Existing Debit Notes exceed the recovery now supported by the latest receipts. Review possible backdated payment or duplicate recovery."

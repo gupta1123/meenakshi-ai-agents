@@ -40,14 +40,38 @@ export async function GET(request: Request, context: RouteContext) {
       return jsonWithCors(request, cached.data, { headers: { "Cache-Control": "private, max-age=5, stale-while-revalidate=10", "X-Cache": "HIT" } });
     }
     const supabase = createSupabaseAdminClient();
+    const columns = "id, scheme_version_id, evaluation_date, period_start, period_end, status, error_summary, request_context, started_at, completed_at, created_at, updated_at, attempts, max_attempts, idempotency_key";
+    // A TOD calculation stores one child run per customer (hundreds), keyed
+    // "<calculationId>:<uuid>". Limiting raw rows therefore showed only the
+    // latest one or two calculations. Load calculations first, then the
+    // children of TOD calculations with only the fields the totals need.
+    const childKey = "________-____-____-____-____________:________-____-____-____-____________";
     let runsQuery = supabase
       .from("evaluation_runs")
-      .select("id, scheme_version_id, evaluation_date, period_start, period_end, status, error_summary, request_context, summary, started_at, completed_at, created_at, updated_at, attempts, max_attempts, idempotency_key")
+      .select(`${columns}, summary`)
       .eq("company_id", company.id)
+      .not("idempotency_key", "like", childKey)
       .order("created_at", { ascending: false });
     if (requestedScheme) runsQuery = runsQuery.eq("request_context->>schemeType", requestedScheme);
-    const { data: runs, error } = await runsQuery.limit(limit);
+    const { data: rootRuns, error } = await runsQuery.limit(limit);
     if (error) throw error;
+    type RunRow = NonNullable<typeof rootRuns>[number];
+    const runs: RunRow[] = [...(rootRuns ?? [])];
+    const todRoots = (rootRuns ?? []).filter((run) => schemeTypeFromRequestContext(run.request_context) === "tod");
+    await Promise.all(todRoots.map(async (root) => {
+      for (let from = 0; ; from += 1000) {
+        const { data: children, error: childError } = await supabase.from("evaluation_runs")
+          .select(`${columns}, calculatedDiscountAmount:summary->calculatedDiscountAmount`)
+          .eq("company_id", company.id).like("idempotency_key", `${root.id}:%`)
+          .order("id").range(from, from + 999);
+        if (childError) throw childError;
+        for (const child of children ?? []) {
+          const { calculatedDiscountAmount, ...rest } = child as typeof child & { calculatedDiscountAmount?: unknown };
+          runs.push({ ...rest, summary: { calculatedDiscountAmount } } as RunRow);
+        }
+        if ((children ?? []).length < 1000) break;
+      }
+    }));
 
     const versionIds = requestedScheme
       ? []

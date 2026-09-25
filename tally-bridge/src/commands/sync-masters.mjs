@@ -8,7 +8,7 @@ const MASTER_EXPORTS = [
   { key: "stockItems", collectionName: "Meenakshi Stock Items", tallyType: "StockItem", tag: "stock item", fetchFields: "Name,Parent,ParentGUID,StockGroup,StockGroupGUID,BaseUnits,Units,GUID,MasterID,AlterID", parse: parseStockItems },
   { key: "ledgers", collectionName: "Meenakshi Ledgers", tallyType: "Ledger", tag: "ledger", fetchFields: "Name,Parent,GUID,MasterID,AlterID,GSTApplicable,GSTApplicability,Mobile,Phone,PhoneNumber,ContactPerson,AttentionTo", parse: parseLedgers },
   { key: "voucherTypes", collectionName: "Meenakshi Voucher Types", tallyType: "VoucherType", tag: "voucher type", fetchFields: "Name,Parent,GUID,MasterID,AlterID", parse: parseVoucherTypes },
-  { key: "customers", collectionName: "Meenakshi Customers", tallyType: "Ledger", tag: "customer ledger", fetchFields: "Name,Parent,ParentGUID,GUID,MasterID,AlterID,PartyGSTIN,Mobile,Phone,PhoneNumber,ContactPerson,AttentionTo", parse: parseCustomers },
+  { key: "customers", collectionName: "Meenakshi Customers", tallyType: "Ledger", tag: "customer ledger", fetchFields: "Name,Parent,ParentGUID,GUID,MasterID,AlterID,PartyGSTIN,Mobile,Phone,PhoneNumber,ContactPerson,AttentionTo,Address,LedStateName,PinCode", parse: parseCustomers },
 ];
 
 export async function syncMasters(command, { config, activeCompany }) {

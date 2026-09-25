@@ -46,11 +46,22 @@ export async function POST(request: Request, context: RouteContext) {
     if (companyError) throw companyError;
     const row = company as { id: string; organization_id: string; tally_company_guid: string; tally_company_name: string; is_active: boolean } | null;
     if (!row || !row.is_active || row.organization_id !== connector.organization_id) return jsonWithCors(request, { error: "Company is not available to this connector." }, { status: 404 });
-    const { data: binding, error } = await supabase.from("tally_connector_company_bindings").insert({ organization_id: connector.organization_id, company_id: row.id, connector_id: connector.id, expected_tally_company_guid: row.tally_company_guid, expected_tally_company_name: row.tally_company_name, is_active: true }).select("id, company_id, connector_id, expected_tally_company_guid, expected_tally_company_name, is_active, created_at").single();
-    if (error) {
-      if (error.code === "23505") return jsonWithCors(request, { error: "This company already has a connector binding." }, { status: 409 });
-      throw error;
+    const { data: bindingId, error: assignmentError } = await supabase.rpc("assign_tally_company_connector", { p_company_id: row.id, p_connector_id: connector.id });
+    let bindingQuery = bindingId
+      ? supabase.from("tally_connector_company_bindings").select("id, company_id, connector_id, expected_tally_company_guid, expected_tally_company_name, is_active, created_at").eq("id", bindingId).single()
+      : null;
+    // Keep ordinary first-time registration working while the additive
+    // migration awaits its deliberate manual application. Reassignment still
+    // requires the migration because the legacy unique constraint rejects it.
+    if (assignmentError?.code === "PGRST202") {
+      bindingQuery = supabase.from("tally_connector_company_bindings").insert({ organization_id: connector.organization_id, company_id: row.id, connector_id: connector.id, expected_tally_company_guid: row.tally_company_guid, expected_tally_company_name: row.tally_company_name, is_active: true }).select("id, company_id, connector_id, expected_tally_company_guid, expected_tally_company_name, is_active, created_at").single();
+    } else if (assignmentError) {
+      throw assignmentError;
     }
+    if (!bindingQuery) throw new Error("Connector assignment did not return a binding.");
+    const { data: binding, error } = await bindingQuery;
+    if (error?.code === "23505") return jsonWithCors(request, { error: "This company already has a connector binding. Apply the multi-installation routing migration before moving it." }, { status: 409 });
+    if (error) throw error;
     await appendMeenakshiAuditEvent({ organizationId: connector.organization_id, companyId: row.id, actorType: "user", actorId: scope.userId, action: "tally_connector_company_bound", entityType: "tally_connector_company_binding", entityId: (binding as { id: string }).id, newValue: { connectorId: connector.id, expectedCompanyGuid: row.tally_company_guid } });
     return jsonWithCors(request, { binding }, { status: 201 });
   } catch (error) { return errorResponse(request, error); }

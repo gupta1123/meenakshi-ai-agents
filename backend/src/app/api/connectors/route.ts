@@ -2,7 +2,7 @@ import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { appendMeenakshiAuditEvent } from "@/lib/audit";
 import { MeenakshiAccessError, requireMeenakshiOrganizationAccess } from "@/lib/authorization";
 import { serializeTallyConnector, TALLY_CONNECTOR_SELECT, type TallyConnectorRow } from "@/lib/bridge";
-import { createConnectorControlToken, hashConnectorSecret, isUuid, readText } from "@/lib/security";
+import { createConnectorControlToken, createPendingConnectorIdentity, hashConnectorSecret, isUuid, readText } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 function errorResponse(request: Request, error: unknown) {
@@ -27,11 +27,12 @@ export async function POST(request: Request) {
   try {
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     const organizationId = readText(body.organizationId, 80);
-    const installationKey = readText(body.installationKey, 160);
+    const pendingIdentity = createPendingConnectorIdentity();
+    const installationKey = readText(body.installationKey, 160) ?? pendingIdentity.installationKey;
     const displayName = readText(body.displayName, 160) ?? "Meenakshi Tally Bridge";
-    const machineFingerprint = readText(body.machineFingerprint, 500);
-    if (!isUuid(organizationId) || !installationKey || !machineFingerprint) {
-      return jsonWithCors(request, { error: "organizationId, installationKey, and machineFingerprint are required." }, { status: 400 });
+    const machineFingerprint = readText(body.machineFingerprint, 500) ?? pendingIdentity.machineFingerprint;
+    if (!isUuid(organizationId)) {
+      return jsonWithCors(request, { error: "organizationId must be a UUID." }, { status: 400 });
     }
     const scope = await requireMeenakshiOrganizationAccess(request, organizationId, ["administrator"]);
     const controlToken = createConnectorControlToken();
@@ -45,6 +46,6 @@ export async function POST(request: Request) {
     }
     const connector = data as unknown as TallyConnectorRow;
     await appendMeenakshiAuditEvent({ organizationId, actorType: "user", actorId: scope.userId, action: "tally_connector_created", entityType: "tally_connector", entityId: connector.id, newValue: { installationKey, displayName, status: connector.status } });
-    return jsonWithCors(request, { connector: serializeTallyConnector(connector), controlToken }, { status: 201 });
+    return jsonWithCors(request, { connector: serializeTallyConnector(connector), controlToken, tallyUrl: "http://localhost:9000" }, { status: 201 });
   } catch (error) { return errorResponse(request, error); }
 }

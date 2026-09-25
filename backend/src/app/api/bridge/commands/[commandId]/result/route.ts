@@ -8,6 +8,7 @@ import { applyVoucherSyncResult, markVoucherSyncFailed } from "@/lib/tally/inges
 import { isLiveTodAggregate, isLiveTodBatchAggregate } from "@/lib/evaluation/live-tod";
 import { completeLiveCdRun, isLiveCdBatch } from "@/lib/evaluation/live-cd";
 import { wakeEvaluationRunAfterTallyResult } from "@/lib/evaluation/wake-run";
+import { prepareCreditNoteDocument, prepareDebitNoteDocument } from "@/lib/notes/verified-note-document.mjs";
 
 type RouteContext = { params: Promise<{ commandId: string }> };
 type CommandRow = { id: string; organization_id: string; company_id: string; connector_id: string; correlation_id: string; attempts: number; max_attempts: number; command_type: string; payload: Record<string, unknown> };
@@ -277,6 +278,14 @@ export async function POST(request: Request, context: RouteContext) {
     }).eq("id", row.id).eq("connector_id", connector.id).eq("status", "sending").eq("attempts", attempt).select("id, status, attempts, available_at, completed_at").maybeSingle();
     if (updateError) throw updateError;
     if (!updated) return jsonWithCors(request, { error: "Command state changed before the result was recorded." }, { status: 409 });
+    if (requestedStatus === "verified" && row.command_type === "verify_credit_note" && postingId) {
+      try { await prepareCreditNoteDocument(supabase, row.company_id, postingId); }
+      catch (documentError) { console.error("Credit Note verified; reference PDF preparation needs retry:", documentError); }
+    }
+    if (requestedStatus === "verified" && row.command_type === "create_debit_note" && debitPostingId) {
+      try { await prepareDebitNoteDocument(supabase, row.company_id, debitPostingId); }
+      catch (documentError) { console.error("Debit Note verified; reference PDF preparation needs retry:", documentError); }
+    }
     await appendMeenakshiAuditEvent({
       organizationId: row.organization_id, companyId: row.company_id, actorType: "tally_connector",
       action: nextStatus === "failed" || nextStatus === "dead_letter" ? "tally_command_failed" : nextStatus === "accepted" ? "tally_command_accepted" : "tally_command_completed",

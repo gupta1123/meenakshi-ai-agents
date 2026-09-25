@@ -52,6 +52,8 @@ function readJson(request) {
 }
 
 export function startLocalApi(config) {
+  let stopping = false;
+  let retryTimer = null;
   const server = http.createServer(async (request, response) => {
     const origin = String(request.headers.origin ?? "").replace(/\/+$/, "");
     if (origin && !allowedOrigins(config).has(origin)) {
@@ -69,6 +71,12 @@ export function startLocalApi(config) {
       } catch (error) {
         respond(response, 503, { ready: false, error: error instanceof Error ? error.message : String(error) }, origin, config);
       }
+      return;
+    }
+    if (request.method === "GET" && request.url === "/v1/identity") {
+      // The connector ID is not a credential. It lets this browser choose
+      // the connector running on this PC without exposing pairing secrets.
+      respond(response, 200, { connectorId: config.connectorId }, origin, config);
       return;
     }
     const isCashDiscount = request.url === "/v1/cash-discount";
@@ -101,7 +109,26 @@ export function startLocalApi(config) {
       respond(response, 422, { error: error instanceof Error ? error.message : String(error), durationMs: Math.round(performance.now() - startedAt) }, origin, config);
     }
   });
-  server.on("error", (error) => console.error(`Local calculation API failed: ${error instanceof Error ? error.message : String(error)}`));
-  server.listen(LOCAL_TALLY_PORT, "127.0.0.1", () => console.log(`MEENAKSHI_LOCAL_API http://127.0.0.1:${LOCAL_TALLY_PORT}`));
-  return server;
+  const listen = () => {
+    if (stopping || server.listening) return;
+    server.listen(LOCAL_TALLY_PORT, "127.0.0.1");
+  };
+  server.on("listening", () => console.log(`MEENAKSHI_LOCAL_API http://127.0.0.1:${LOCAL_TALLY_PORT}`));
+  server.on("error", (error) => {
+    console.error(`Local calculation API failed; retrying: ${error instanceof Error ? error.message : String(error)}`);
+    if (stopping || retryTimer) return;
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      listen();
+    }, 2_000);
+  });
+  listen();
+  return {
+    close() {
+      stopping = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      retryTimer = null;
+      if (server.listening) server.close();
+    },
+  };
 }

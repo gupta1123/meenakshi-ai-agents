@@ -20,6 +20,9 @@ export async function POST(request: Request, context: RouteContext) {
     return jsonWithCors(request, { notificationMessageId: messageIdCreated, queued: true }, { status: 201 });
   } catch (error) {
     const message = error instanceof Error ? error.message : typeof error === "object" && error && "message" in error ? String((error as { message?: unknown }).message ?? "") : "";
+    if (/not approved in MSG91|requires a Credit Note PDF|template setup is incomplete|needs a PDF|mapping.*MSG91 template/i.test(message)) {
+      return jsonWithCors(request, { error: message }, { status: 422 });
+    }
     if (/Only sent, delivered, read, or failed|active approved template|required before resending|current recorded opt-in|current near-eligibility|verified Tally Credit Note/i.test(message)) {
       return jsonWithCors(request, { error: message }, { status: 409 });
     }

@@ -145,19 +145,22 @@ export async function GET(request: Request, context: RouteContext) {
         }) : liveProducts.map((row, index) => ({ tallyVoucherId: null, lineNumber: index + 1, productName: String(row.productName ?? "Tally item"), productGroupName: row.productGroupName ? String(row.productGroupName) : null, sourceQuantity: String(row.sourceQuantity ?? "0"), sourceUom: row.sourceUom ? String(row.sourceUom) : null, eligibleTonnes: String(row.eligibleTonnes ?? "0"), eligibleTaxableValue: String(row.eligibleTaxableValue ?? "0"), contributionSign: 1, blockingReason: null })),
       };
       const posting = raw.creditNotePosting as Record<string, unknown> | null;
-      // posting already contains document jsonb; unwrap via toSafeCreditNoteDocument would need raw row - pass through
+      // The RPC embeds the raw document row. Normalize it before returning it:
+      // callers need `available`/`failureReason`, and private storage paths
+      // must never be exposed to the browser.
+      const safeDocument = posting?.document ? toSafeCreditNoteDocument(posting.document as CreditNoteDocumentRow) : null;
       const notification = await notificationSummary({
         companyId: company.id,
         organizationId: company.organization_id,
         proposal: raw.proposal as { id: string; customer_id: string; scheme_type: string; status: string; shortfall_amount: string | number | null; achieved_tier_id: string | null },
         posting: posting as { id: string; status: string } | null,
       });
-      return jsonWithCors(request, { proposal: raw.proposal, latestEvaluation: raw.latestEvaluation ?? null, openIssues: raw.openIssues ?? [], reviews: raw.reviews ?? [], creditNotePosting: posting ? { ...posting, document: (posting as { document: unknown }).document ?? null } : null, notification, tallyEvidence: mappedEvidence }, { headers: { "Cache-Control": "private, max-age=10, stale-while-revalidate=20", "X-Cache": "MISS" } });
+      return jsonWithCors(request, { proposal: raw.proposal, latestEvaluation: raw.latestEvaluation ?? null, openIssues: raw.openIssues ?? [], reviews: raw.reviews ?? [], creditNotePosting: posting ? { ...posting, document: safeDocument } : null, notification, tallyEvidence: mappedEvidence }, { headers: { "Cache-Control": "no-store", "X-Cache": "MISS" } });
     }
     if (rpcError && !isMissingRpc) console.warn("get_proposal_detail RPC failed, falling back:", rpcError);
     const fallback = await loadProposalDetailFallback(company, proposalId);
     if (!fallback) return jsonWithCors(request, { error: "Proposal not found." }, { status: 404 });
-    return jsonWithCors(request, fallback, { headers: { "Cache-Control": "private, max-age=10, stale-while-revalidate=20", "X-Cache": isMissingRpc ? "FALLBACK-MISSING-RPC" : "FALLBACK" } });
+    return jsonWithCors(request, fallback, { headers: { "Cache-Control": "no-store", "X-Cache": isMissingRpc ? "FALLBACK-MISSING-RPC" : "FALLBACK" } });
   } catch (error) {
     if (error instanceof MeenakshiAccessError) return jsonWithCors(request, { error: error.message }, { status: error.status });
     console.error("Could not read proposal:", error);

@@ -48,6 +48,7 @@ export type RulebookSchemeRow = {
   status: "draft" | "active" | "paused" | "expired" | "retired";
   created_at: string;
   updated_at: string;
+  scheme_versions?: Array<{ status: string; effective_from: string; effective_to: string | null }>;
 };
 
 export class RulebookRequestError extends Error {
@@ -341,6 +342,20 @@ export async function appendRulebookAudit(input: {
 }
 
 export function toSchemeResponse(scheme: RulebookSchemeRow) {
+  const today = new Date().toISOString().slice(0, 10);
+  const versions = scheme.scheme_versions ?? [];
+  const applied = versions.filter((version) => version.status === "active");
+  const current = applied.find((version) => version.effective_from <= today && (!version.effective_to || version.effective_to >= today));
+  const latestApplied = [...applied].sort((a, b) => (b.effective_to ?? "9999-12-31").localeCompare(a.effective_to ?? "9999-12-31"))[0] ?? null;
+  const operationalStatus = scheme.status !== "active"
+    ? scheme.status
+    : current
+      ? "active"
+      : applied.some((version) => version.effective_from > today)
+        ? "scheduled"
+        : applied.length
+          ? "expired"
+          : "setup_incomplete";
   return {
     id: scheme.id,
     companyId: scheme.company_id,
@@ -349,6 +364,10 @@ export function toSchemeResponse(scheme: RulebookSchemeRow) {
     name: scheme.name,
     description: scheme.description,
     status: scheme.status,
+    operationalStatus,
+    appliedEffectiveFrom: (current ?? latestApplied)?.effective_from ?? null,
+    appliedEffectiveTo: (current ?? latestApplied)?.effective_to ?? null,
+    draftCount: versions.filter((version) => version.status === "draft").length,
     createdAt: scheme.created_at,
     updatedAt: scheme.updated_at,
   };

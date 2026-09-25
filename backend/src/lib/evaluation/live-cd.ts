@@ -1,5 +1,11 @@
 import { workingDayBreakdown } from "./calendar";
 import { parseCashDiscountNarration } from "./cash-discount-narration";
+
+// "CD 1.5%", "1.5% cash discount", "Less 2 percent C.D." qualify; "18% GST" or "CD" alone do not.
+export function offersCashDiscount(narration: unknown) {
+  const text = String(narration ?? "");
+  return /\bcash\s*discount\b|\bc\s*\.?\s*d\s*\.?\b/i.test(text) && /%|\bper\s*cent(?:age)?\b/i.test(text);
+}
 import { decimal, money, nonNegative, percentOf } from "./decimal";
 import { loadLiveCdBatchRule, type EvaluationRunRecord } from "./evidence";
 import type { FrozenCdRule } from "./contracts";
@@ -55,6 +61,20 @@ export type LiveCdBatch = {
   sourceFingerprint: string;
 };
 
+type VerifiedDebitNotePosting = {
+  verified_tally_guid: string | null;
+  verified_voucher_number: string | null;
+  verified_amount: string | number | null;
+  amount: string | number;
+  debit_note_date: string;
+  calculation_reference: string;
+  cash_discount_recovery_candidates: {
+    invoice_tally_guid: string;
+    customer_name: string;
+    bill_reference: string;
+  } | null;
+};
+
 export type CashDiscountRecoveryCandidate = {
   customerTallyGuid: string;
   customerName: string;
@@ -106,7 +126,7 @@ export type CashDiscountInvoiceCheck = {
   discountPercentage: string;
   earnedDiscountPercentage: string;
   eligibilityDeadline: string;
-  status: "retained" | "payment_due" | "recovery_due" | "needs_review";
+  status: "retained" | "payment_due" | "recovery_due" | "recovered" | "needs_review";
   paymentCount: number;
   latestPaymentDate: string | null;
   reviewMessage: string | null;
@@ -140,6 +160,10 @@ export function evaluateLiveCdInvoices(rule: FrozenCdRule, evaluatedOn: string, 
   for (const invoice of invoices) {
     const netInvoiceAmount = decimal(invoice.grossAmount).abs();
     if (netInvoiceAmount.lessThanOrEqualTo(0)) continue;
+    // Only invoices whose narration offers Cash Discount count: it must mention
+    // CD / cash discount together with a percentage ("%" or "percent"). The
+    // rule percentage always applies; the narration only qualifies the invoice.
+    if (!offersCashDiscount(invoice.narration)) continue;
     const narration = parseCashDiscountNarration(invoice.narration);
     const narrationPercentage = narration.percentage;
     const narrationSlab = narrationPercentage === null
@@ -149,7 +173,7 @@ export function evaluateLiveCdInvoices(rule: FrozenCdRule, evaluatedOn: string, 
       && (narration.allowedDays === null || narrationSlab?.allowedWorkingDays === narration.allowedDays)
       && narration.dayType !== "calendar_days";
     const narrationConflict = rule.narrationMode === "required" && (!narration.mentioned || !narrationMatches);
-    const grantedPercentage = rule.checkNarration && narrationSlab ? decimal(narrationSlab.percentage) : highestPercentage;
+    const grantedPercentage = highestPercentage;
     if (grantedPercentage.lessThanOrEqualTo(0) || grantedPercentage.greaterThanOrEqualTo(100)) continue;
 
     const impliedGrossAmount = netInvoiceAmount.div(decimal(1).minus(grantedPercentage.div(100)));
@@ -164,6 +188,8 @@ export function evaluateLiveCdInvoices(rule: FrozenCdRule, evaluatedOn: string, 
     const earnedWindow = paidInFullOn
       ? windows.filter((window) => paidInFullOn <= window.deadline).sort((left, right) => decimal(right.percentage).comparedTo(decimal(left.percentage)))[0] ?? null
       : windows.filter((window) => evaluatedOn <= window.deadline).sort((left, right) => decimal(right.percentage).comparedTo(decimal(left.percentage)))[0] ?? null;
+    // Invoices paid in full after the deadline are not recovered and not listed.
+    if (paidInFullOn && !earnedWindow) continue;
     const earnedPercentage = earnedWindow ? decimal(earnedWindow.percentage) : decimal(0);
     const finalDeadline = windows.at(-1)!.deadline;
     const openShortfall = nonNegative(netInvoiceAmount.minus(paidToDate));
@@ -186,11 +212,14 @@ export function evaluateLiveCdInvoices(rule: FrozenCdRule, evaluatedOn: string, 
     const postedDebitNotes = (invoice.debitNotes ?? []).filter((note) => note.status === "posted");
     const alreadyRecovered = postedDebitNotes.reduce((total, note) => total.plus(decimal(note.amount).abs()), decimal(0));
     const remainingRecovery = nonNegative(recoveryRequired.minus(alreadyRecovered));
-    const overRecovered = alreadyRecovered.greaterThan(recoveryRequired.plus(decimal("0.01")));
+    // Debit Notes are posted rounded to whole rupees (with GST), so a
+    // difference under Rs.1 either way is rounding, not a new recovery.
+    const overRecovered = alreadyRecovered.greaterThan(recoveryRequired.plus(decimal("1")));
     const missingSalesLedger = !String(invoice.sourceSalesLedgerName ?? "").trim();
-    const needsRecovery = remainingRecovery.greaterThan(decimal("0.0049"));
+    const needsRecovery = alreadyRecovered.greaterThan(0) ? remainingRecovery.greaterThanOrEqualTo(decimal("1")) : remainingRecovery.greaterThan(decimal("0.0049"));
     const needsReview = overRecovered || narrationConflict || (needsRecovery && missingSalesLedger);
-    const status = needsReview ? "needs_review" : needsRecovery ? "recovery_due" : openShortfall.greaterThan(0) ? "payment_due" : "retained";
+    const fullyRecovered = !overRecovered && alreadyRecovered.greaterThan(0) && !needsRecovery;
+    const status = needsReview ? "needs_review" : needsRecovery ? "recovery_due" : fullyRecovered ? "recovered" : openShortfall.greaterThan(0) ? "payment_due" : "retained";
     const reviewMessage = overRecovered
       ? "Existing Debit Notes exceed the recovery now supported by the latest receipts. Review possible backdated payment or duplicate recovery."
       : narrationConflict
@@ -282,9 +311,49 @@ export async function evaluateLiveCdBatch(run: EvaluationRunRecord, batch: LiveC
   return { ...(evaluateLiveCdInvoices(rule, evaluatedOn, batch.invoices)), rule, evaluatedOn };
 }
 
+export function mergeVerifiedDebitNotes(invoices: LiveCdInvoice[], postings: VerifiedDebitNotePosting[]) {
+  const byInvoiceGuid = new Map<string, VerifiedDebitNotePosting[]>();
+  for (const posting of postings) {
+    const invoiceGuid = posting.cash_discount_recovery_candidates?.invoice_tally_guid;
+    if (!invoiceGuid || !posting.verified_tally_guid) continue;
+    const existing = byInvoiceGuid.get(invoiceGuid) ?? [];
+    existing.push(posting);
+    byInvoiceGuid.set(invoiceGuid, existing);
+  }
+  return invoices.map((invoice) => {
+    const known = byInvoiceGuid.get(invoice.tallyGuid) ?? [];
+    if (!known.length) return invoice;
+    const seen = new Set((invoice.debitNotes ?? []).map((note) => note.tallyGuid));
+    const recovered = known
+      .filter((posting) => !seen.has(posting.verified_tally_guid!))
+      .map((posting): LiveCdDebitNote => ({
+        tallyGuid: posting.verified_tally_guid!,
+        voucherNumber: posting.verified_voucher_number,
+        voucherDate: posting.debit_note_date,
+        customerLedgerName: posting.cash_discount_recovery_candidates!.customer_name,
+        status: "posted",
+        billReference: posting.cash_discount_recovery_candidates!.bill_reference,
+        targetVoucherGuid: invoice.tallyGuid,
+        amount: String(posting.verified_amount ?? posting.amount),
+        narration: posting.calculation_reference,
+      }));
+    return recovered.length ? { ...invoice, debitNotes: [...(invoice.debitNotes ?? []), ...recovered] } : invoice;
+  });
+}
+
 export async function completeLiveCdRun(run: EvaluationRunRecord, batch: LiveCdBatch) {
-  const result = await evaluateLiveCdBatch(run, batch);
   const supabase = createSupabaseAdminClient();
+  const { data: verifiedPostings, error: postingError } = await supabase
+    .from("cash_discount_debit_note_postings")
+    .select("verified_tally_guid, verified_voucher_number, verified_amount, amount, debit_note_date, calculation_reference, cash_discount_recovery_candidates!inner(invoice_tally_guid, customer_name, bill_reference)")
+    .eq("company_id", run.company_id)
+    .eq("status", "created_verified");
+  if (postingError) throw postingError;
+  const enrichedBatch = {
+    ...batch,
+    invoices: mergeVerifiedDebitNotes(batch.invoices, (verifiedPostings ?? []) as unknown as VerifiedDebitNotePosting[]),
+  };
+  const result = await evaluateLiveCdBatch(run, enrichedBatch);
   const compactSummary = {
     schemeType: "cd",
     outcome: "completed",

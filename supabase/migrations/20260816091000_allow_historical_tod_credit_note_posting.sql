@@ -17,15 +17,21 @@ begin
   select pg_get_functiondef(target_function)
   into function_definition;
 
-  if position('where id = proposal_record.scheme_version_id and status = ''active''' in function_definition) = 0 then
+  if position('where id = proposal_record.scheme_version_id and status = ''active''' in function_definition) > 0 then
+    function_definition := replace(
+      function_definition,
+      'where id = proposal_record.scheme_version_id and status = ''active''',
+      'where id = proposal_record.scheme_version_id and status in (''active'', ''retired'')'
+    );
+  elsif position('where version.id = proposal_record.scheme_version_id and version.status = ''active''' in function_definition) > 0 then
+    function_definition := replace(
+      function_definition,
+      'where version.id = proposal_record.scheme_version_id and version.status = ''active''',
+      'where version.id = proposal_record.scheme_version_id and version.status in (''active'', ''retired'')'
+    );
+  else
     raise exception 'Credit Note approval function has an unexpected definition';
   end if;
-
-  function_definition := replace(
-    function_definition,
-    'where id = proposal_record.scheme_version_id and status = ''active''',
-    'where id = proposal_record.scheme_version_id and status in (''active'', ''retired'')'
-  );
   function_definition := replace(
     function_definition,
     'Proposal rule version is no longer active',

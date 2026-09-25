@@ -1,0 +1,29 @@
+.panel { display: grid; gap: 14px; }
+.list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(200px, 240px); gap: 8px 16px; align-items: center; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper); }
+.row[data-state="sent"] { border-color: #c6e3cf; background: #f6fbf7; }
+.row[data-state="failed"] { border-color: #efc4bc; }
+.identity { display: grid; gap: 3px; min-width: 0; }
+.identity strong { overflow: hidden; color: var(--ink); font-size: .82rem; text-overflow: ellipsis; white-space: nowrap; }
+.identity small { color: var(--muted); font-size: .7rem; }
+.previous { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 3px; color: var(--muted); font-size: .68rem; }
+.phone { display: grid; gap: 4px; }
+.phone span { color: var(--ink-soft); font-size: .66rem; font-weight: 700; }
+.phone input { width: 100%; min-height: 40px; padding: 0 12px; border: 1px solid var(--line-strong); border-radius: 10px; background: #fff; font: inherit; font-size: .86rem; letter-spacing: .02em; }
+.phone input:focus { border-color: #6fb285; outline: 0; box-shadow: 0 0 0 4px rgb(22 128 61 / 12%); }
+.phone input[aria-invalid="true"] { border-color: #e2a597; }
+.hint { color: var(--rose); font-size: .66rem; }
+.outcome { display: flex; align-items: flex-start; gap: 6px; margin: 0; font-size: .74rem; font-weight: 650; line-height: 1.45; }
+.outcome svg { flex: 0 0 auto; margin-top: 1px; }
+.outcome[data-tone="ok"] { color: var(--green); }
+.outcome[data-tone="error"] { grid-column: 1 / -1; color: #8f352a; }
+.footer { position: sticky; bottom: -36px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px 16px; margin: 4px -22px -36px; padding: 14px 22px 18px; border-top: 1px solid var(--line); background: rgb(255 255 255 / 96%); }
+.footer p { flex: 1 1 220px; margin: 0; color: var(--ink-soft); font-size: .74rem; }
+.footer > div { display: flex; gap: 8px; }
+
+@media (max-width: 760px) {
+  .row { grid-template-columns: 1fr; }
+  .footer { margin: 4px -17px -30px; padding: 12px 17px calc(14px + env(safe-area-inset-bottom, 0px)); bottom: -30px; }
+  .footer > div { width: 100%; }
+  .footer > div > * { flex: 1; }
+}

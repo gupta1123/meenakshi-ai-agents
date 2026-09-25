@@ -4,7 +4,7 @@ import { usePathname } from "next/navigation";
 
 import styles from "./workspace-loading-shell.module.css";
 
-type LoadingPage = "overview" | "discount" | "history" | "rulebook" | "tally";
+type LoadingPage = "overview" | "discount" | "credit-notes" | "messages" | "rulebook" | "tally";
 
 function Block({ className = "" }: { className?: string }) {
   return <span aria-hidden="true" className={`workspace-loading-block ${className}`} />;
@@ -13,7 +13,8 @@ function Block({ className = "" }: { className?: string }) {
 function pageForPath(pathname: string): LoadingPage {
   if (pathname === "/tally") return "tally";
   if (pathname === "/cash-discount" || pathname === "/turnover-discount") return "discount";
-  if (pathname === "/credit-notes" || pathname === "/messages") return "history";
+  if (pathname === "/credit-notes" || pathname === "/debit-notes") return "credit-notes";
+  if (pathname === "/messages") return "messages";
   if (pathname === "/rulebook") return "rulebook";
   return "overview";
 }
@@ -34,8 +35,23 @@ function DiscountLoading() {
   return <><PageHeading action /><div className="workspace-loading-readiness"><Block className="loading-chip" /><Rows count={3} /></div><div className="workspace-loading-panel"><div className="workspace-loading-panel-header"><Block className="loading-panel-title" /><Block className="loading-action small" /></div><Rows count={5} /></div></>;
 }
 
-function HistoryLoading() {
-  return <><PageHeading action /><div className="workspace-loading-summary"><Block className="loading-chip" /><Block className="loading-summary-copy" /><Block className="loading-summary-copy short" /></div><div className="workspace-loading-panel"><div className="workspace-loading-panel-header"><Block className="loading-panel-title" /><Block className="loading-action small" /></div><Rows count={6} /></div></>;
+export function MessagesLoadingContent() {
+  return <div className="messages-loading" aria-label="Loading Messages">
+    <div className="messages-loading-summary">{Array.from({ length: 4 }, (_, index) => <div key={index}><Block className="loading-message-label" /><Block className="loading-message-value" /></div>)}</div>
+    <div className="messages-loading-filters"><Block className="loading-message-search" /><Block className="loading-message-select" /><Block className="loading-message-type" /></div>
+    <div className="messages-loading-table">
+      <div className="messages-loading-table-head">{Array.from({ length: 5 }, (_, index) => <Block key={index} className="loading-message-column" />)}</div>
+      {Array.from({ length: 4 }, (_, index) => <div className="messages-loading-row" key={index}><div><Block className="loading-message-main" /><Block className="loading-message-meta" /></div><div><Block className="loading-message-context" /><Block className="loading-message-context-meta" /></div><Block className="loading-message-status" /><Block className="loading-message-activity" /><Block className="loading-message-action" /></div>)}
+    </div>
+  </div>;
+}
+
+export function CreditNotesLoadingContent() {
+  return <div className="credit-notes-loading" aria-label="Loading Credit Notes">
+    <div className="credit-notes-loading-summary">{Array.from({ length: 5 }, (_, index) => <div key={index}><Block className="loading-credit-value" /><Block className="loading-credit-label" /></div>)}</div>
+    <Block className="loading-credit-filter" />
+    <div className="credit-notes-loading-section"><Block className="loading-credit-heading" /><div className="credit-notes-loading-row"><div><Block className="loading-credit-customer" /><Block className="loading-credit-period" /></div><Block className="loading-credit-amount" /><Block className="loading-credit-action" /></div></div>
+  </div>;
 }
 
 function RulebookLoading() {
@@ -95,7 +111,7 @@ function TallyLoading() {
 
 export function WorkspaceLoadingShell() {
   const page = pageForPath(usePathname() ?? "/");
-  const content = page === "tally" ? <TallyLoading /> : page === "discount" ? <DiscountLoading /> : page === "history" ? <HistoryLoading /> : page === "rulebook" ? <RulebookLoading /> : <OverviewLoading />;
+  const content = page === "tally" ? <TallyLoading /> : page === "discount" ? <DiscountLoading /> : page === "credit-notes" ? <CreditNotesLoadingContent /> : page === "messages" ? <MessagesLoadingContent /> : page === "rulebook" ? <RulebookLoading /> : <OverviewLoading />;
 
   return <div className={`collections-shell workspace-loading-shell ${styles.shell}`} aria-busy="true" aria-label="Loading workspace">
     <aside className="collections-sidebar workspace-loading-sidebar">
@@ -104,7 +120,7 @@ export function WorkspaceLoadingShell() {
       <div className="workspace-loading-user"><Block className="loading-avatar" /><div><Block className="loading-nav-label" /><Block className="loading-nav-detail" /></div></div>
     </aside>
     <main className="collections-main">
-      <header className="workspace-topbar workspace-loading-topbar"><div><Block className="loading-topbar-label" /><Block className="loading-topbar-company" /></div><Block className="loading-topbar-status" /></header>
+      <header className="workspace-topbar workspace-loading-topbar">{page === "credit-notes" || page === "messages" ? <><div className="loading-credit-page-title"><Block className="loading-credit-title" /><Block className="loading-credit-subtitle" /></div><div className="loading-credit-topbar-tools"><Block className="loading-credit-company" />{page === "messages" && <Block className="loading-message-test" />}<Block className="loading-credit-icon" /><Block className="loading-topbar-status" /></div></> : <><div><Block className="loading-topbar-label" /><Block className="loading-topbar-company" /></div><Block className="loading-topbar-status" /></>}</header>
       <section className={`workspace-content workspace-loading-content workspace-loading-${page}`}>{content}</section>
     </main>
   </div>;
