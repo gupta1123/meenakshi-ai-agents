@@ -184,7 +184,7 @@ export function GuidedEvaluationQueue({ scheme, latestRun, onError, onRetry, onV
           <div><strong>{result}</strong><small>{detail}</small></div>
           <div><span className={`calculation-status calculation-status-${status.tone}`}>{status.label}</span><small>{durationLabel(run)}</small></div>
           <div className="queue-next">{run.status === "completed"
-            ? <Button className="button-quiet" onClick={() => onViewResults(run, isLatestForPeriod(run))}><Eye size={15} />{isLatestForPeriod(run) ? "View results" : "View snapshot"}</Button>
+            ? <Button className="button-quiet" title={isLatestForPeriod(run) ? "Live results for this period. Credit Notes can be created here." : "Read-only record of what this calculation found. A newer calculation replaced it."} onClick={() => onViewResults(run, isLatestForPeriod(run))}><Eye size={15} />{isLatestForPeriod(run) ? "View live results" : "View snapshot"}</Button>
             : wasStopped
               ? <Button className="button-quiet" onClick={onRetry}>Start again</Button>
             : resolved

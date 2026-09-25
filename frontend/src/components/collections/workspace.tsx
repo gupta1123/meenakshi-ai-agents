@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, ArrowRight, BellRing, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, ClipboardCheck, Eye, FileCheck2, RefreshCw, Send, Square } from "lucide-react";
+import { Activity, ArrowRight, BellRing, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, ChevronUp, CircleAlert, ClipboardCheck, Eye, FileCheck2, RefreshCw, Send, Square } from "lucide-react";
 
 import { apiRequest, jsonBody } from "@/lib/api";
 import { staffStatusLabel } from "@/lib/staff-status";
@@ -20,7 +20,7 @@ import { MessagesWorkspace } from "./messages-workspace";
 import { GuidedEvaluationQueue } from "./guided-evaluation-queue";
 import { GuidedEvaluationDrawer } from "./guided-evaluation-drawer";
 import { VerifiedCreditNoteDocument } from "./verified-credit-note-document";
-import { CreditNotesLoadingContent, MessagesLoadingContent } from "./workspace-loading-shell";
+import { CreditNotesLoadingContent, MessagesLoadingContent, TodPageSkeleton } from "./workspace-loading-shell";
 import { WhatsAppSendDrawer, type WhatsAppTarget } from "./whatsapp-send-drawer";
 import type { CashDiscountDebitNoteHistory, CashDiscountInvoiceCheck, CashDiscountLiveResult, CashDiscountRecovery, CollectionsPage, Contact, CreditNotePosting, EvaluationRun, LaunchControl, MessageTemplate, NotificationHealth, NotificationMessage, OperationsHealth, Proposal, ProposalDetail, ReferenceData, TallyHealth, Voucher } from "./types";
 import { Button, Card, Dialog, Drawer, EmptyState, IconButton, InlineMessage, MetricCard, SectionHeading, Skeleton, StatusBadge, formatDate, formatMoney, formatTonnes, labelFor, safePhone } from "./ui";
@@ -94,7 +94,7 @@ function Workspace({ page, email, signOut, tallyHealth }: { page: CollectionsPag
   return <AppShell email={email} onSignOut={signOut} tallyStatus={tallyHealth?.status ?? (loading ? "checking" : "bridge_stale")}>
     <div className="workspace-content" key={companyKey}>
       {error ? <InlineMessage tone="error">{error}</InlineMessage> : notice ? <InlineMessage tone="success">{notice}</InlineMessage> : null}
-      {error && !loading && !hasLoadedWorkspace ? <EmptyState title="Workspace unavailable" detail="The latest data could not be loaded. This is not an empty result." action={<Button onClick={() => void refresh()}>Try again</Button>} /> : loading && !hasLoadedWorkspace ? page === "credit-notes" ? <><WorkspacePageHeader eyebrow="" title="Credit Notes" detail="Create and track Credit Notes." /><CreditNotesLoadingContent /></> : page === "messages" ? <><WorkspacePageHeader eyebrow="" title="Messages" detail="WhatsApp delivery status and audit history." /><MessagesLoadingContent /></> : <Skeleton lines={7} /> : companyMismatch ? <TallyCompanyMismatchNotice health={tallyHealth} expectedCompanyName={company.tally_company_name} /> : <>{!tallyEvidenceCurrent && <WorkspaceAvailabilityNotice page={page} connected={Boolean(tallyHealth?.ready)} />}{page === "control-centre" ? <OverviewPage {...pageProps} /> : page === "cash-discount" || page === "turnover-discount" ? <DiscountPage scheme={page === "cash-discount" ? "cd" : "tod"} {...pageProps} /> : page === "credit-notes" ? <CreditNotesPage {...pageProps} /> : page === "debit-notes" ? <DebitNotesPage {...pageProps} /> : page === "messages" ? <MessagesWorkspace {...pageProps} /> : <RulebookWorkspace {...pageProps} />}</>}
+      {error && !loading && !hasLoadedWorkspace ? <EmptyState title="Workspace unavailable" detail="The latest data could not be loaded. This is not an empty result." action={<Button onClick={() => void refresh()}>Try again</Button>} /> : loading && !hasLoadedWorkspace ? page === "credit-notes" ? <><WorkspacePageHeader eyebrow="" title="Credit Notes" detail="Create and track Credit Notes." /><CreditNotesLoadingContent /></> : page === "messages" ? <><WorkspacePageHeader eyebrow="" title="Messages" detail="WhatsApp delivery status and audit history." /><MessagesLoadingContent /></> : page === "turnover-discount" ? <><WorkspacePageHeader title="Turnover Discount" /><TodPageSkeleton /></> : <Skeleton lines={7} /> : companyMismatch ? <TallyCompanyMismatchNotice health={tallyHealth} expectedCompanyName={company.tally_company_name} /> : <>{!tallyEvidenceCurrent && <WorkspaceAvailabilityNotice page={page} connected={Boolean(tallyHealth?.ready)} />}{page === "control-centre" ? <OverviewPage {...pageProps} /> : page === "cash-discount" || page === "turnover-discount" ? <DiscountPage scheme={page === "cash-discount" ? "cd" : "tod"} {...pageProps} /> : page === "credit-notes" ? <CreditNotesPage {...pageProps} /> : page === "debit-notes" ? <DebitNotesPage {...pageProps} /> : page === "messages" ? <MessagesWorkspace {...pageProps} /> : <RulebookWorkspace {...pageProps} />}</>}
     </div>
   </AppShell>;
 }
@@ -701,7 +701,41 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
   // `not_in_scheme` is an audit result from a rule version that no longer
   // covers the customer. Keep it in the durable calculation history, but do
   // not present it as a second current result beside the applicable rule.
-  const allSchemeRows = data.proposals.filter((proposal) => proposal.scheme_type === scheme);
+  // "View snapshot": what one past calculation found, read-only, from that run's own results.
+  function openSnapshot(run: EvaluationRun) {
+    void (async () => {
+      setNotice("Loading the saved calculation snapshot…");
+      try {
+        const token = await accessToken();
+        if (!token) return;
+        const response = await apiRequest<{ results: Array<{ id: string; customerId: string; customerName: string; schemeVersionId: string | null; periodStart: string | null; periodEnd: string | null; outcome: string; eligibleTonnes: string; calculatedDiscountAmount: string; completedAt: string | null; createdAt: string }> }>(token, `/api/companies/${company.id}/evaluations/runs/${run.id}/results`, { cache: "no-store" });
+        setHistoryTodRows(response.results.map((result) => ({
+          id: `history:${result.id}`, customer_id: result.customerId, customer_name: result.customerName, scheme_type: "tod", status: result.outcome,
+          period_start: result.periodStart ?? run.period_start ?? null, period_end: result.periodEnd ?? run.period_end ?? null, eligibility_deadline: result.periodEnd ?? run.period_end ?? null,
+          calculated_discount_amount: result.calculatedDiscountAmount, scheme_version_id: result.schemeVersionId ?? run.scheme_version_id,
+          source_sales_voucher_id: null, entitlement_key: `history:${run.id}:${result.customerId}`, eligible_product_taxable_value: null,
+          achieved_tier_id: Number(result.calculatedDiscountAmount) > 0 ? `history:${result.id}` : null, next_tier_tonnes: null, additional_tonnes_required: null,
+          invoice_amount_due: "0", amount_paid_by_deadline: "0", discounted_settlement_target: "0", discount_percentage: null,
+          eligible_tonnes: result.eligibleTonnes, shortfall_amount: "0", latest_evaluated_at: result.completedAt ?? result.createdAt,
+          reason_codes: [], latestEvaluation: null, creditNotePosting: null,
+        })));
+        setSelectedHistoryRun(run);
+        setSelectedTodPeriodKey(`${run.period_start}:${run.period_end}`);
+        setStatusFilter("all");
+        setQuery("");
+        setShowEvaluationQueue(false);
+        setNotice(`Showing the ${formatBusinessDate(run.period_start)} – ${formatBusinessDate(run.period_end)} calculation snapshot from ${formatDate(run.created_at)}.`);
+      } catch (cause) { setError(userFacingError(cause, "Could not load this calculation snapshot.")); }
+    })();
+  }
+  // Rows fetched for one period by "View results" (the page's initial list is
+  // capped at 250 recent rows). They fill the gaps; the page's own (refreshed) data wins.
+  const [periodRows, setPeriodRows] = useState<Proposal[]>([]);
+  const allSchemeRows = useMemo(() => {
+    const merged = new Map(periodRows.map((proposal) => [proposal.id, proposal]));
+    for (const proposal of data.proposals) merged.set(proposal.id, proposal);
+    return [...merged.values()].filter((proposal) => proposal.scheme_type === scheme);
+  }, [data.proposals, periodRows, scheme]);
   const allSavedRows = allSchemeRows.filter((proposal) => proposal.scheme_type === scheme
     && (scheme !== "tod" || (proposal.status !== "not_in_scheme" && (!localTodBootstrap || proposal.scheme_version_id === localTodBootstrap.activeSchemeVersionId))));
   const savedRows = scheme === "tod" && selectedTodPeriodKey
@@ -872,6 +906,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     calculated: allSavedRows.some((proposal) => proposal.scheme_version_id === localTodBootstrap?.activeSchemeVersionId && proposal.period_start === period.start && proposal.period_end === period.end),
   }));
   const todTierById = new Map<string, { minimumTonnes: number; amountPerTonne: number | null; percentage: number | null; index: number; count: number }>();
+  const todScaleByRule = new Map<string, TodSlabScale>();
   for (const batch of localTodBootstrap?.batches ?? []) {
     const tiers = Array.isArray(batch.rule.tiers) ? batch.rule.tiers as Array<Record<string, unknown>> : [];
     tiers.forEach((tier, index) => {
@@ -885,6 +920,12 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
         count: tiers.length,
       });
     });
+    // The full slab scale per rule version, for the tonnes bar's tick marks.
+    const ruleId = typeof batch.rule.id === "string" ? batch.rule.id : null;
+    if (ruleId) todScaleByRule.set(ruleId, tiers.map((tier) => ({
+      minimumTonnes: Number(tier.minimumTonnes ?? 0),
+      label: tier.amountPerTonne != null ? `₹${formatTonnes(Number(tier.amountPerTonne))}/MT` : tier.percentage != null ? `${formatTonnes(Number(tier.percentage))}%` : "",
+    })).sort((left, right) => left.minimumTonnes - right.minimumTonnes));
   }
   // Each customer belongs to exactly one card. An ended period is about issuing
   // Credit Notes; a period in progress is about watching progress.
@@ -950,7 +991,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
         created: { label: "Credit Note created", value: String(count), detail: "send from Credit Notes" },
         not_qualified: { label: "Not qualified", value: String(count), detail: "below the first tier" },
         qualified: { label: "Qualified so far", value: formatMoney(todAmount("qualified")), detail: `${count} customer${count === 1 ? "" : "s"} · projected` },
-        close: { label: "Close to next tier", value: String(count), detail: "fewest tonnes needed first" },
+        close: { label: "Close to next tier", value: String(count), detail: "fewest MT needed first" },
         no_activity: { label: "No purchases", value: String(count), detail: "this period" },
         review: { label: "Needs review", value: String(count), detail: count ? "your decision" : "nothing to decide" },
       }[bucket as "ready"]!;
@@ -960,40 +1001,49 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       // The newest completed calculation is the live result: open the normal
       // Customers view, where Credit Notes can be created, not a read-only copy.
       if (scheme === "tod" && isLatest && run.period_start && run.period_end) {
-        setSelectedHistoryRun(null);
-        setHistoryTodRows(null);
-        setSelectedTodPeriodKey(`${run.period_start}:${run.period_end}`);
-        setStatusFilter("all");
-        setQuery("");
-        setShowEvaluationQueue(false);
-        setNotice(null);
-        return;
-      }
-      if (scheme === "tod" && run.period_start && run.period_end) {
+        const periodStart = run.period_start;
+        const periodEnd = run.period_end;
         void (async () => {
-          setNotice("Loading the saved calculation snapshot…");
+          setNotice("Loading this period’s results…");
           try {
             const token = await accessToken();
             if (!token) return;
-            const response = await apiRequest<{ results: Array<{ id: string; customerId: string; customerName: string; schemeVersionId: string | null; periodStart: string | null; periodEnd: string | null; outcome: string; eligibleTonnes: string; calculatedDiscountAmount: string; completedAt: string | null; createdAt: string }> }>(token, `/api/companies/${company.id}/evaluations/runs/${run.id}/results`, { cache: "no-store" });
-            setHistoryTodRows(response.results.map((result) => ({
-              id: `history:${result.id}`, customer_id: result.customerId, customer_name: result.customerName, scheme_type: "tod", status: result.outcome,
-              period_start: result.periodStart ?? run.period_start ?? null, period_end: result.periodEnd ?? run.period_end ?? null, eligibility_deadline: result.periodEnd ?? run.period_end ?? null,
-              calculated_discount_amount: result.calculatedDiscountAmount, scheme_version_id: result.schemeVersionId ?? run.scheme_version_id,
-              source_sales_voucher_id: null, entitlement_key: `history:${run.id}:${result.customerId}`, eligible_product_taxable_value: null,
-              achieved_tier_id: Number(result.calculatedDiscountAmount) > 0 ? `history:${result.id}` : null, next_tier_tonnes: null, additional_tonnes_required: null,
-              invoice_amount_due: "0", amount_paid_by_deadline: "0", discounted_settlement_target: "0", discount_percentage: null,
-              eligible_tonnes: result.eligibleTonnes, shortfall_amount: "0", latest_evaluated_at: result.completedAt ?? result.createdAt,
-              reason_codes: [], latestEvaluation: null, creditNotePosting: null,
-            })));
-            setSelectedHistoryRun(run);
-            setSelectedTodPeriodKey(`${run.period_start}:${run.period_end}`);
+            // Load every saved result of this period and rule version (pages of 200 keep request URLs short).
+            const loaded: Proposal[] = [];
+            let cursor: string | null = null;
+            for (let page = 0; page < 20; page += 1) {
+              const params = new URLSearchParams({ schemeType: "tod", periodStart, periodEnd, limit: "200" });
+              if (run.scheme_version_id) params.set("schemeVersionId", run.scheme_version_id);
+              if (cursor) params.set("cursor", cursor);
+              const response: { proposals: Proposal[]; nextCursor: string | null; hasMore: boolean } = await apiRequest(token, `/api/companies/${company.id}/evaluations/proposals?${params}`, { cache: "no-store" });
+              loaded.push(...response.proposals.filter((proposal) => proposal.status !== "not_in_scheme"));
+              if (!response.hasMore || !response.nextCursor) break;
+              cursor = response.nextCursor;
+            }
+            if (!loaded.length) { openSnapshot(run); return; }
+            const isCurrentRule = !localTodBootstrap || !run.scheme_version_id || run.scheme_version_id === localTodBootstrap.activeSchemeVersionId;
+            setSelectedTodPeriodKey(`${periodStart}:${periodEnd}`);
             setStatusFilter("all");
             setQuery("");
             setShowEvaluationQueue(false);
-            setNotice(`Showing the ${formatBusinessDate(run.period_start)} – ${formatBusinessDate(run.period_end)} calculation snapshot from ${formatDate(run.created_at)}.`);
-          } catch (cause) { setError(userFacingError(cause, "Could not load this calculation snapshot.")); }
+            if (isCurrentRule) {
+              // Live view: Credit Notes can be created from here.
+              setPeriodRows(loaded);
+              setSelectedHistoryRun(null);
+              setHistoryTodRows(null);
+              setNotice(null);
+            } else {
+              // Calculated under an earlier rule version: read-only.
+              setHistoryTodRows(loaded);
+              setSelectedHistoryRun(run);
+              setNotice(`${formatBusinessDate(periodStart)} – ${formatBusinessDate(periodEnd)} was calculated under an earlier rule version. Showing it read-only.`);
+            }
+          } catch (cause) { setError(userFacingError(cause, "Could not load this period’s results.")); }
         })();
+        return;
+      }
+      if (scheme === "tod" && run.period_start && run.period_end) {
+        openSnapshot(run);
         return;
       }
       setShowEvaluationQueue(false);
@@ -1005,14 +1055,14 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
         setShowEvaluationQueue(false);
       }
     }} />}
-    {scheme === "tod" && isAdministrator && periodEnded && statusFilter === "ready" && !showEvaluationQueue && !selectedHistoryRun && <PostingSwitch launchControl={data.launchControl} onChanged={async (message) => { setNotice(message); await refresh(); }} onError={setError} />}
+    {scheme === "tod" && isAdministrator && periodEnded && statusFilter === "ready" && !showEvaluationQueue && !selectedHistoryRun && <PostingSwitch show="off" launchControl={data.launchControl} onChanged={async (message) => { setNotice(message); await refresh(); }} onError={setError} />}
     <div hidden={showEvaluationQueue}>
-    {scheme === "tod" && <TodResults reference={data.reference} rows={rows} allRows={allRows} query={query} setQuery={setQuery} filter={statusFilter} setFilter={setStatusFilter} customerNames={customerNames} tierById={todTierById} historical={Boolean(selectedHistoryRun)} defaultFilter={todBuckets[0]} onChanged={refresh} postingEnabled={data.launchControl?.mode === "posting_enabled"} onOpen={(proposal) => {
+    {scheme === "tod" && <TodResults scaleByRule={todScaleByRule} reference={data.reference} rows={rows} allRows={allRows} query={query} setQuery={setQuery} filter={statusFilter} setFilter={setStatusFilter} customerNames={customerNames} tierById={todTierById} historical={Boolean(selectedHistoryRun)} defaultFilter={todBuckets[0]} onChanged={refresh} postingEnabled={data.launchControl?.mode === "posting_enabled"} onOpen={(proposal) => {
       if (proposal.id.startsWith("local:")) setNotice("This current Tally result is being added to the audit history. Details will be available shortly.");
       else setSelected(proposal);
     }} />}
     <div hidden={scheme === "tod"}>
-    <Card><div className="card-title"><div><p className="eyebrow">Results</p><h2>{title} history</h2><p className="muted-copy">Filter results, then open one to see the calculation and the next step.</p></div><span className="table-count">{rows.length} shown</span></div><div className="queue-toolbar"><label className="queue-search"><span>Find customer or reference</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search customer" /></label><div className="segmented" aria-label={`${title} status filters`}><button className={statusFilter === "all" ? "selected" : ""} onClick={() => setStatusFilter("all")}>All</button>{statuses.map((status) => <button key={status} className={statusFilter === status ? "selected" : ""} onClick={() => setStatusFilter(status)}>{staffStatusLabel(status)}</button>)}</div></div>{rows.length ? <div className="data-table proposal-table"><div className="table-head"><span>Customer</span><span>Result</span><span>Last checked</span><span>Next step</span></div>{rows.map((proposal) => <article key={proposal.id}><div><strong>{customerNames.get(proposal.customer_id) ?? "Customer record"}</strong><small>{proposal.period_start && proposal.period_end ? `${proposal.period_start} to ${proposal.period_end}` : proposal.eligibility_deadline ? `Payment deadline ${proposal.eligibility_deadline}` : "Sales invoice result"}</small></div><div><strong>{formatMoney(proposal.calculated_discount_amount)}</strong><small>{scheme === "tod" ? `${formatTonnes(proposal.eligible_tonnes)} eligible tonnes${proposal.additional_tonnes_required ? ` · ${formatTonnes(proposal.additional_tonnes_required)} to next tier` : ""}` : proposal.shortfall_amount ? `Paid ${formatMoney(proposal.amount_paid_by_deadline)} · shortfall ${formatMoney(proposal.shortfall_amount)}` : "Calculated amount"}</small></div><div><StatusBadge status={proposal.status} /><small>{proposal.latestEvaluation?.freshForApproval ? "Up to date and ready to create" : proposal.latest_evaluated_at ? `Checked ${formatDate(proposal.latest_evaluated_at)}` : "Not checked yet"}</small></div><div className="queue-next"><small>{primaryAction(proposal)}</small><Button className="button-quiet" onClick={() => setSelected(proposal)}><Eye size={15} />Open</Button></div></article>)}</div> : <EmptyState title={allRows.length ? "No results match this view" : `No ${title} results yet`} detail={allRows.length ? "Clear or change the status filters to see every result." : `Start a ${scheme === "cd" ? "Sales invoice" : "customer period"} evaluation after Tally information is updated.`} action={allRows.length ? <Button className="button-secondary" onClick={() => { setQuery(""); setStatusFilter("all"); }}>Clear filters</Button> : <Button onClick={() => setEvaluationOpen(true)}>Start evaluation</Button>} />}</Card>
+    <Card><div className="card-title"><div><p className="eyebrow">Results</p><h2>{title} history</h2><p className="muted-copy">Filter results, then open one to see the calculation and the next step.</p></div><span className="table-count">{rows.length} shown</span></div><div className="queue-toolbar"><label className="queue-search"><span>Find customer or reference</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search customer" /></label><div className="segmented" aria-label={`${title} status filters`}><button className={statusFilter === "all" ? "selected" : ""} onClick={() => setStatusFilter("all")}>All</button>{statuses.map((status) => <button key={status} className={statusFilter === status ? "selected" : ""} onClick={() => setStatusFilter(status)}>{staffStatusLabel(status)}</button>)}</div></div>{rows.length ? <div className="data-table proposal-table"><div className="table-head"><span>Customer</span><span>Result</span><span>Last checked</span><span>Next step</span></div>{rows.map((proposal) => <article key={proposal.id}><div><strong>{customerNames.get(proposal.customer_id) ?? "Customer record"}</strong><small>{proposal.period_start && proposal.period_end ? `${proposal.period_start} to ${proposal.period_end}` : proposal.eligibility_deadline ? `Payment deadline ${proposal.eligibility_deadline}` : "Sales invoice result"}</small></div><div><strong>{formatMoney(proposal.calculated_discount_amount)}</strong><small>{scheme === "tod" ? `${formatTonnes(proposal.eligible_tonnes)} MT eligible${proposal.additional_tonnes_required ? ` · ${formatTonnes(proposal.additional_tonnes_required)} MT to next slab` : ""}` : proposal.shortfall_amount ? `Paid ${formatMoney(proposal.amount_paid_by_deadline)} · shortfall ${formatMoney(proposal.shortfall_amount)}` : "Calculated amount"}</small></div><div><StatusBadge status={proposal.status} /><small>{proposal.latestEvaluation?.freshForApproval ? "Up to date and ready to create" : proposal.latest_evaluated_at ? `Checked ${formatDate(proposal.latest_evaluated_at)}` : "Not checked yet"}</small></div><div className="queue-next"><small>{primaryAction(proposal)}</small><Button className="button-quiet" onClick={() => setSelected(proposal)}><Eye size={15} />Open</Button></div></article>)}</div> : <EmptyState title={allRows.length ? "No results match this view" : `No ${title} results yet`} detail={allRows.length ? "Clear or change the status filters to see every result." : `Start a ${scheme === "cd" ? "Sales invoice" : "customer period"} evaluation after Tally information is updated.`} action={allRows.length ? <Button className="button-secondary" onClick={() => { setQuery(""); setStatusFilter("all"); }}>Clear filters</Button> : <Button onClick={() => setEvaluationOpen(true)}>Start evaluation</Button>} />}</Card>
     </div>
     </div>
     <GuidedEvaluationDrawer open={evaluationOpen} onClose={() => setEvaluationOpen(false)} scheme={scheme} onComplete={async (message, run) => { setLatestRun(run); setShowEvaluationQueue(true); setNotice(message); setEvaluationOpen(false); await refresh(); }} onError={setError} onTurnoverDiscountSubmit={scheme === "tod" ? runLocalTodCalculation : undefined} onTurnoverDiscountBatchSubmit={scheme === "tod" ? runAllDueTodCalculations : undefined} turnoverPeriods={scheme === "tod" ? turnoverPeriods : undefined} />
@@ -1038,9 +1088,33 @@ function todRowState(proposal: Proposal): { label: string; tone: "ready" | "done
   return (Number(proposal.eligible_tonnes) || 0) > 0 ? { label: ended ? "Not qualified" : "Tracking", tone: "idle", rank: 4 } : { label: "No activity", tone: "idle", rank: 6 };
 }
 
+type TodSlabScale = Array<{ minimumTonnes: number; label: string }>;
+
+/**
+ * One continuous MT scale with a tick at each slab threshold. The scale is fixed
+ * per rule (0 → 15% past the top slab) so ticks line up on every row. Top-slab
+ * customers show a complete bar; beyond the scale end a ▸ cap marks the overflow.
+ */
+function TodSlabBar({ tonnes, scale, customerName }: { tonnes: number; scale: TodSlabScale; customerName: string }) {
+  const top = scale.at(-1)?.minimumTonnes ?? 0;
+  if (!scale.length || top <= 0) return null;
+  const max = top * 1.15;
+  const position = (value: number) => `${Math.min(100, Math.max(0, (value / max) * 100))}%`;
+  const reached = scale.filter((slab) => tonnes >= slab.minimumTonnes).length;
+  const onTopSlab = tonnes >= top;
+  const beyondScale = tonnes > max;
+  return <span className={`tod-slab-bar${onTopSlab ? " is-top" : ""}`} role="img" aria-label={`${customerName}: ${formatTonnes(tonnes)} MT; ${onTopSlab ? "top slab reached" : `${reached} of ${scale.length} slabs reached`}`}>
+    <span className="tod-slab-bar-fill" style={{ width: onTopSlab ? "100%" : position(tonnes) }} />
+    {onTopSlab && <span className="tod-slab-bar-top" style={{ left: position(top) }} />}
+    {scale.map((slab) => <span key={slab.minimumTonnes} className={`tod-slab-bar-tick${tonnes >= slab.minimumTonnes ? " is-reached" : ""}`} style={{ left: position(slab.minimumTonnes) }} title={`${slab.label} from ${formatTonnes(slab.minimumTonnes)} MT`} />)}
+    {beyondScale && <span className="tod-slab-bar-cap" title={`${formatTonnes(tonnes)} MT, beyond the scale`} aria-hidden="true" />}
+  </span>;
+}
+
 type GroupRule = { id: string; schemeType: "cd" | "tod"; name: string; versionNumber: number; discountPercentage: string | null; allowedWorkingDays: number | null; customerGroupIds: string[] };
 
-function TodResults({ reference, rows: filteredRows, allRows, query, setQuery, filter, setFilter, customerNames, tierById, historical, defaultFilter, onOpen, onChanged, postingEnabled }: {
+function TodResults({ scaleByRule, reference, rows: filteredRows, allRows, query, setQuery, filter, setFilter, customerNames, tierById, historical, defaultFilter, onOpen, onChanged, postingEnabled }: {
+  scaleByRule: Map<string, TodSlabScale>;
   reference: ReferenceData | null | undefined;
   onChanged: () => Promise<void>;
   postingEnabled: boolean;
@@ -1068,14 +1142,18 @@ function TodResults({ reference, rows: filteredRows, allRows, query, setQuery, f
   const [groupFilter, setGroupFilter] = useState<string | null>(null);
   useEffect(() => { setGroupFilter(null); }, [company.id, historical]);
   const [groupRules, setGroupRules] = useState<GroupRule[]>([]);
+  // Until the rules arrive the cards show placeholders, not "No active rule".
+  const [groupRulesLoaded, setGroupRulesLoaded] = useState(false);
   useEffect(() => {
     let cancelled = false;
+    setGroupRulesLoaded(false);
     void (async () => {
       const token = await accessToken(); if (!token) return;
       try {
         const response = await apiRequest<{ rules: GroupRule[] }>(token, `/api/companies/${company.id}/evaluations/rules-by-group`, { cache: "no-store" });
         if (!cancelled) setGroupRules(response.rules);
       } catch { if (!cancelled) setGroupRules([]); }
+      finally { if (!cancelled) setGroupRulesLoaded(true); }
     })();
     return () => { cancelled = true; };
   }, [company.id]);
@@ -1088,16 +1166,30 @@ function TodResults({ reference, rows: filteredRows, allRows, query, setQuery, f
     for (let current: string | null | undefined = groupId, guard = 0; current && guard < 20; current = groupsById.get(current)?.parent_group_id, guard += 1) lineage.add(current);
     return groupRules.filter((rule) => rule.customerGroupIds.some((id) => lineage.has(id)));
   };
+  // Each card describes the selected tab: "<tab> x / y" = this tab's customers
+  // out of all the group's customers in the period; MT and ₹ cover the tab's
+  // customers only. Groups with nobody in the tab are not listed.
+  const groupTotals = allRows.reduce((totals, proposal) => totals.set(groupOf(proposal), (totals.get(groupOf(proposal)) ?? 0) + 1), new Map<string, number>());
   const groupSummaries = [...filteredRows.reduce((groups, proposal) => {
     const id = groupOf(proposal);
-    const current = groups.get(id) ?? { id, name: id === "none" ? "No customer group" : groupsById.get(id) ? labelFor(groupsById.get(id)!) : "Customer group", customers: 0, qualified: 0, tonnes: 0, discount: 0 };
+    const current = groups.get(id) ?? { id, name: id === "none" ? "No customer group" : groupsById.get(id) ? labelFor(groupsById.get(id)!) : "Customer group", customers: 0, total: groupTotals.get(id) ?? 0, tonnes: 0, discount: 0 };
     current.customers += 1;
-    if (proposal.achieved_tier_id) current.qualified += 1;
     current.tonnes += Number(proposal.eligible_tonnes ?? "0") || 0;
     current.discount += Number(proposal.calculated_discount_amount ?? "0") || 0;
     groups.set(id, current);
     return groups;
-  }, new Map<string, { id: string; name: string; customers: number; qualified: number; tonnes: number; discount: number }>()).values()].sort((left, right) => right.discount - left.discount || left.name.localeCompare(right.name));
+  }, new Map<string, { id: string; name: string; customers: number; total: number; tonnes: number; discount: number }>()).values()]
+    .sort((left, right) => right.discount - left.discount || right.tonnes - left.tonnes || left.name.localeCompare(right.name));
+  const tabCopy: Record<string, { count: string; amount: string | null }> = {
+    ready: { count: "Ready", amount: "Ready to create" },
+    created: { count: "Created", amount: "Credit Notes created" },
+    review: { count: "Needs review", amount: "At stake" },
+    not_qualified: { count: "Not qualified", amount: null },
+    qualified: { count: "Qualified", amount: "Projected discount" },
+    close: { count: "Close to next slab", amount: "Projected discount" },
+    no_activity: { count: "No activity", amount: null },
+  };
+  const cardCopy = tabCopy[filter] ?? { count: "Customers", amount: "Projected discount" };
   const rows = groupFilter ? filteredRows.filter((proposal) => groupOf(proposal) === groupFilter) : filteredRows;
   // Cards only until a group is opened; a customer search jumps straight to the table.
   const showCards = !groupFilter && !query.trim() && groupSummaries.length > 0;
@@ -1117,33 +1209,69 @@ function TodResults({ reference, rows: filteredRows, allRows, query, setQuery, f
     } catch (cause) { setBulkMessage(userFacingError(cause, "Could not create the selected Credit Notes.")); }
     finally { setBulkCreating(false); }
   };
-  const [sortKey, setSortKey] = useState<"discount" | "tonnes" | "customer" | "status">("discount");
+  // Header click cycles: ascending → descending → no sort (original order).
+  type TodSortKey = "customer" | "slab" | "tonnes" | "invoices" | "discount" | "status";
+  const [sort, setSort] = useState<{ key: TodSortKey; direction: "asc" | "desc" } | null>(null);
+  const cycleSort = (key: TodSortKey) => setSort((current) => current?.key !== key ? { key, direction: "asc" } : current.direction === "asc" ? { key, direction: "desc" } : null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  useEffect(() => { setPage(1); setExpandedId(null); }, [filter, query, groupFilter, sortKey]);
+  useEffect(() => { setPage(1); setExpandedId(null); }, [filter, query, groupFilter, sort]);
   const nameOf = (proposal: Proposal) => proposal.customer_name ?? customerNames.get(proposal.customer_id) ?? "Customer record";
-  const sortedRows = [...rows].sort((left, right) => {
-    if (sortKey === "customer") return nameOf(left).localeCompare(nameOf(right));
-    if (sortKey === "tonnes") return (Number(right.eligible_tonnes) || 0) - (Number(left.eligible_tonnes) || 0);
-    if (sortKey === "status") return todRowState(left).rank - todRowState(right).rank || nameOf(left).localeCompare(nameOf(right));
-    return (Number(right.calculated_discount_amount) || 0) - (Number(left.calculated_discount_amount) || 0) || nameOf(left).localeCompare(nameOf(right));
+  const sortValue = (proposal: Proposal, key: TodSortKey): number | string => {
+    if (key === "customer") return nameOf(proposal).toLowerCase();
+    // Slabs are sequential: order by the slab's minimum tonnes; below the first slab sorts lowest.
+    if (key === "slab") return proposal.achieved_tier_id ? tierById.get(proposal.achieved_tier_id)?.minimumTonnes ?? 0 : -1;
+    if (key === "tonnes") return Number(proposal.eligible_tonnes) || 0;
+    if (key === "invoices") return proposal.paymentSummary?.total ? proposal.paymentSummary.counted / proposal.paymentSummary.total : -1;
+    if (key === "status") return todRowState(proposal).rank;
+    return Number(proposal.calculated_discount_amount) || 0;
+  };
+  const sortedRows = !sort ? rows : [...rows].sort((left, right) => {
+    const a = sortValue(left, sort.key);
+    const b = sortValue(right, sort.key);
+    const order = typeof a === "string" && typeof b === "string" ? a.localeCompare(b) : Number(a) - Number(b);
+    return (sort.direction === "asc" ? order : -order) || nameOf(left).localeCompare(nameOf(right));
   });
   const tierList = [...tierById.values()];
-  const periodRows = rows.filter((proposal) => proposal.period_start && proposal.period_end);
-  const tablePeriod = periodRows.length && periodRows.every((proposal) => proposal.period_start === periodRows[0].period_start && proposal.period_end === periodRows[0].period_end)
-    ? `${formatBusinessDate(periodRows[0].period_start)} – ${formatBusinessDate(periodRows[0].period_end)}` : null;
   const pageCount = Math.max(1, Math.ceil(sortedRows.length / pageSize));
   const currentPage = Math.min(page, pageCount);
   const visibleRows = sortedRows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
   const visibleReady = visibleRows.filter((row) => readyRows.some((ready) => ready.id === row.id));
   const allVisibleSelected = visibleReady.length > 0 && visibleReady.slice(0, 25).every((row) => selectedIds.includes(row.id));
   const showSelection = !showCards && !historical && filter === "ready" && readyRows.length > 0;
-  // One header row: title + count on the left, search on the right. On the
-  // Ready tab a slim selection bar sits below it and carries the action.
-  return <Card className="tod-results-card">
+  // The Invoices column appears only once some row has a 25-day payment check.
+  const anyPayment = rows.some((proposal) => proposal.paymentSummary);
+  // When every row has the same status (e.g. the Ready tab), the chip adds nothing.
+  const firstState = rows.length ? todRowState(rows[0]).label : null;
+  const uniformState = rows.length > 1 && rows.every((proposal) => todRowState(proposal).label === firstState);
+  const isCloseToNext = (proposal: Proposal) => {
+    const remaining = Number(proposal.additional_tonnes_required ?? "0") || 0;
+    const next = Number(proposal.next_tier_tonnes ?? "0") || 0;
+    return !periodHasEnded(proposal.period_end) && remaining > 0 && next > 0 && remaining <= next * 0.1;
+  };
+  const tableTotals = {
+    discount: rows.reduce((total, proposal) => total + (Number(proposal.calculated_discount_amount) || 0), 0),
+    ready: rows.filter((proposal) => readyRows.some((ready) => ready.id === proposal.id)).length,
+    close: rows.filter(isCloseToNext).length,
+  };
+  const bulkTotal = bulkReady.reduce((total, row) => total + Number(row.calculated_discount_amount || 0), 0);
+  const sortHeader = (key: TodSortKey, label: string) => {
+    const direction = sort?.key === key ? sort.direction : null;
+    return <button type="button" className={`tod-sort${direction ? " is-active" : ""}`} aria-label={`Sort by ${label}${direction === "asc" ? ", ascending" : direction === "desc" ? ", descending" : ""}`} title={direction === "asc" ? "Click for descending" : direction === "desc" ? "Click to clear sorting" : "Click to sort ascending"} onClick={() => cycleSort(key)}>
+      {label}{direction === "asc" ? <ChevronUp size={11} aria-hidden="true" /> : direction === "desc" ? <ChevronDown size={11} aria-hidden="true" /> : <ChevronsUpDown size={11} className="tod-sort-idle" aria-hidden="true" />}
+    </button>;
+  };
+  // One header row: back + group summary on the left, search on the right.
+  // Selection lives in the table header; the bulk action is a sticky bar.
+  // Group cards sit directly on the page; the table keeps its card.
+  return <Card className={`tod-results-card${showCards ? " is-plain" : ""}`}>
     <div className="tod-results-bar">
       {showCards
         ? <h2>Customer groups <span>{groupSummaries.length}</span></h2>
-        : <h2>{groupFilter && <button type="button" className="tod-group-back" onClick={() => setGroupFilter(null)} aria-label="Back to customer groups"><ChevronLeft size={16} />Groups</button>}{openGroup?.name ?? "Customer results"} <span>{rows.length}</span>{tablePeriod && <small className="tod-results-period">{tablePeriod}</small>}</h2>}
+        : <div className="tod-table-title">
+          {groupFilter && <button type="button" className="tod-group-back" onClick={() => setGroupFilter(null)} aria-label="Back to customer groups"><ChevronLeft size={16} />Groups</button>}
+          <h2>{openGroup?.name ?? "Customer results"}</h2>
+          <p className="tod-table-summary"><span>{rows.length} customer{rows.length === 1 ? "" : "s"}</span><span><strong>{formatMoney(tableTotals.discount)}</strong></span>{tableTotals.ready > 0 && <span>{tableTotals.ready} ready</span>}{tableTotals.close > 0 && <span className="is-close">{tableTotals.close} close to next slab</span>}</p>
+        </div>}
       <label className="tod-results-search"><span className="sr-only">Find customer</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search customer" /></label>
     </div>
     {showCards && <div className="tod-group-strip" role="list" aria-label="Customer groups">
@@ -1151,36 +1279,40 @@ function TodResults({ reference, rows: filteredRows, allRows, query, setQuery, f
         const rules = group.id === "none" ? [] : rulesFor(group.id);
         const todRules = rules.filter((rule) => rule.schemeType === "tod");
         const cdRules = rules.filter((rule) => rule.schemeType === "cd");
-        const qualifiedShare = group.customers ? Math.round((group.qualified / group.customers) * 100) : 0;
-        return <button type="button" role="listitem" className="tod-group-card" key={group.id} onClick={() => setGroupFilter(group.id)} aria-label={`Open ${group.name}: ${group.customers} customers`}>
+        const share = group.total ? Math.round((group.customers / group.total) * 100) : 0;
+        return <button type="button" role="listitem" className={`tod-group-card tod-group-card-${filter}`} key={group.id} onClick={() => setGroupFilter(group.id)} aria-label={`Open ${group.name}: ${group.customers} of ${group.total} customers ${cardCopy.count.toLowerCase()}`}>
           <span className="tod-group-card-head">
             <span className="tod-group-avatar" aria-hidden="true">{group.name.trim().charAt(0).toUpperCase() || "G"}</span>
-            <span className="tod-group-title"><strong title={group.name}>{group.name}</strong><small>{group.customers} customer{group.customers === 1 ? "" : "s"}</small></span>
+            <span className="tod-group-title"><strong title={group.name}>{group.name}</strong><small>{group.total} customer{group.total === 1 ? "" : "s"} in period</small></span>
             <ChevronRight className="tod-group-chevron" size={18} aria-hidden="true" />
           </span>
-          <span className="tod-group-amount"><small>{group.discount > 0 ? "Projected discount" : "No discount yet"}</small><strong>{formatMoney(group.discount)}</strong></span>
+          {cardCopy.amount
+            ? <span className="tod-group-amount"><small>{cardCopy.amount}</small><strong>{formatMoney(group.discount)}</strong></span>
+            : <span className="tod-group-amount"><small>MT counted</small><strong>{formatTonnes(group.tonnes)} MT</strong></span>}
           <span className="tod-group-stats">
-            <span><small>Tonnes counted</small><strong>{formatTonnes(group.tonnes)}</strong></span>
-            <span><small>Qualified</small><strong>{group.qualified}<em> / {group.customers}</em></strong></span>
+            <span><small>{cardCopy.count}</small><strong>{group.customers}<em> / {group.total}</em></strong></span>
+            {cardCopy.amount ? <span><small>MT counted</small><strong>{formatTonnes(group.tonnes)} MT</strong></span> : <span><small>Avg per customer</small><strong>{formatTonnes(group.customers ? group.tonnes / group.customers : 0)} MT</strong></span>}
           </span>
-          <span className="tod-group-meter" role="presentation"><span style={{ width: `${qualifiedShare}%` }} /></span>
-          <span className="tod-group-rules">
+          <span className="tod-group-meter" role="presentation" title={`${share}% of the group`}><span style={{ width: `${share}%` }} /></span>
+          {!groupRulesLoaded ? <span className="tod-group-rules" aria-hidden="true"><DrawerLoadingBlock className="sk sk-rule" /><DrawerLoadingBlock className="sk sk-rule short" /></span> : <span className="tod-group-rules">
             <span><em className="is-tod">TOD</em><span title={todRules.map(ruleLabel).join(", ")}>{todRules.length ? todRules.map(ruleLabel).join(", ") : <i>No active rule</i>}</span></span>
             <span><em className="is-cd">CD</em><span title={cdRules.map(ruleLabel).join(", ")}>{cdRules.length ? cdRules.map(ruleLabel).join(", ") : <i>No active rule</i>}</span></span>
-          </span>
+          </span>}
         </button>;
       })}
     </div>}
-    {showSelection && <div className={`tod-selection-bar${bulkReady.length ? " has-selection" : ""}`}>
-      <label title="Selects up to 25 ready customers on this page"><input type="checkbox" disabled={bulkCreating} checked={allVisibleSelected} onChange={(event) => setSelectedIds(event.target.checked ? visibleReady.map((row) => row.id).slice(0, 25) : [])} />{bulkReady.length ? `${bulkReady.length} selected · ${formatMoney(bulkReady.reduce((total, row) => total + Number(row.calculated_discount_amount || 0), 0))}` : "Select all on this page"}</label>
-      {bulkReady.length > 0
-        ? <div><button type="button" className="tod-selection-clear" disabled={bulkCreating} onClick={() => setSelectedIds([])}>Clear</button><Button disabled={bulkCreating || !postingEnabled} title={postingEnabled ? "Each one is checked against Tally before it is created" : "Turn on Credit Note creation above first"} onClick={() => setConfirmOpen(true)}>{bulkCreating ? "Working…" : `Create ${bulkReady.length} Credit Note${bulkReady.length === 1 ? "" : "s"}`}</Button></div>
-        : <small>Up to 25 at a time</small>}
-    </div>}
     <Dialog open={confirmOpen} onClose={() => setConfirmOpen(false)} title={`Create ${bulkReady.length} Credit Notes?`} description="Review the selected customers before queuing anything for Tally."><div className="cd-bulk-confirm"><strong>{formatMoney(bulkReady.reduce((total, row) => total + Number(row.calculated_discount_amount || 0), 0))} total</strong><div className="cd-bulk-confirm-list">{bulkReady.map((row) => <div key={row.id}><span>{row.customer_name ?? customerNames.get(row.customer_id)} · {formatBusinessDate(row.period_end)}</span><strong>{formatMoney(row.calculated_discount_amount)}</strong></div>)}</div><p>Each customer is checked against Tally first, then created. Keep Tally open — this takes about a minute per few customers. No WhatsApp is sent; send it from Credit Notes when you are ready.</p><div className="dialog-actions"><Button className="button-secondary" onClick={() => setConfirmOpen(false)}>Back</Button><Button disabled={bulkCreating || !bulkReady.length} onClick={() => { setConfirmOpen(false); void createReadyCreditNotes(); }}>Confirm and create</Button></div></div></Dialog>
     {bulkMessage && <InlineMessage tone="info">{bulkMessage}</InlineMessage>}
-    {showCards ? null : rows.length ? <><div className="tod-sortbar" role="group" aria-label="Sort customers"><span>Sort</span>{([["discount", "Discount"], ["tonnes", "Tonnes"], ["status", "Status"], ["customer", "Name"]] as const).map(([key, label]) => <button type="button" key={key} className={sortKey === key ? "selected" : ""} aria-pressed={sortKey === key} onClick={() => setSortKey(key)}>{label}</button>)}</div>
-    <div className="data-table tod-results-table tod-rows"><div className="table-head"><span>Customer</span><span>Slab</span><span>Tonnes counted</span><span>Invoices (25-day check)</span><span>Discount</span><span>Status</span></div>{visibleRows.map((proposal) => {
+    {!showCards && rows.length > 0 && !anyPayment && !historical && <p className="tod-payment-note"><CircleAlert size={14} aria-hidden="true" />The 25-day payment check hasn’t run for this period yet. Run <strong>Calculate period</strong> to count only invoices paid in full on time.</p>}
+    {showCards ? null : rows.length ? <>
+    <div className={`data-table tod-results-table tod-rows${anyPayment ? "" : " no-payment"}`}><div className="table-head">
+      <span className="tod-head-customer">{showSelection && <input type="checkbox" aria-label="Select all ready customers on this page (up to 25)" title="Select up to 25 on this page" disabled={bulkCreating || !visibleReady.length} checked={allVisibleSelected} onChange={(event) => setSelectedIds(event.target.checked ? visibleReady.map((row) => row.id).slice(0, 25) : [])} />}{sortHeader("customer", "Customer")}</span>
+      <span>{sortHeader("slab", "Slab")}</span>
+      <span>{sortHeader("tonnes", "MT counted")}</span>
+      {anyPayment && <span>{sortHeader("invoices", "Invoices · 25-day check")}</span>}
+      <span>{sortHeader("discount", "Discount")}</span>
+      <span className="tod-head-status">{uniformState ? "" : sortHeader("status", "Status")}</span>
+    </div>{visibleRows.map((proposal) => {
       const currentTonnes = Number(proposal.eligible_tonnes ?? "0") || 0;
       const remainingTonnes = Number(proposal.additional_tonnes_required ?? "0") || 0;
       const targetTonnes = remainingTonnes > 0 ? currentTonnes + remainingTonnes : Math.max(currentTonnes, 1);
@@ -1193,9 +1325,9 @@ function TodResults({ reference, rows: filteredRows, allRows, query, setQuery, f
       const tierPosition = tier && tier.count > 1 ? tier.index / (tier.count - 1) : 0;
       const tierTone = proposal.achieved_tier_id ? (tierPosition >= 0.75 ? "top" : tierPosition >= 0.35 ? "middle" : "entry") : "none";
       const nextTier = proposal.next_tier_tonnes ? tierList.find((item) => item.minimumTonnes === Number(proposal.next_tier_tonnes)) : null;
-      const nextLabel = remainingTonnes > 0 ? `${formatTonnes(remainingTonnes)} t to ${rateLabel(nextTier) ?? "next slab"}` : currentTonnes > 0 && proposal.achieved_tier_id ? "Top slab" : null;
+      const nextLabel = remainingTonnes > 0 ? `${formatTonnes(remainingTonnes)} MT to ${rateLabel(nextTier) ?? "next slab"}` : currentTonnes > 0 && proposal.achieved_tier_id ? "Top slab" : null;
       const usesPercentage = tier?.percentage != null;
-      const formula = !proposal.achieved_tier_id ? null : usesPercentage ? `${formatMoney(proposal.eligible_product_taxable_value)} × ${formatTonnes(tier!.percentage!)}%` : `${formatTonnes(currentTonnes)} t × ${tierValue.replace("/MT", "")}`;
+      const formula = !proposal.achieved_tier_id ? null : usesPercentage ? `${formatMoney(proposal.eligible_product_taxable_value)} × ${formatTonnes(tier!.percentage!)}%` : `${formatTonnes(currentTonnes)} MT × ${tierValue}`;
       const payment = proposal.paymentSummary;
       const excludedCount = payment ? payment.total - payment.counted : 0;
       const state = todRowState(proposal);
@@ -1208,18 +1340,18 @@ function TodResults({ reference, rows: filteredRows, allRows, query, setQuery, f
           {!historical && <input type="checkbox" aria-label={`Select ${customerName}`} onClick={(event) => event.stopPropagation()} disabled={bulkCreating || !isReady || (!selectedIds.includes(proposal.id) && selectedIds.length >= 25)} checked={selectedIds.includes(proposal.id)} onChange={(event) => setSelectedIds((ids) => event.target.checked ? [...ids, proposal.id] : ids.filter((id) => id !== proposal.id))} />}
           <strong title={customerName}>{customerName}</strong>
         </div>
-        <div className="tod-row-slab"><span className={`tod-tier-badge tod-tier-badge-${tierTone}`}>{proposal.achieved_tier_id ? tierValue : currentTonnes > 0 ? "Below slab" : "No purchases"}</span>{tier?.minimumTonnes ? <small>{formatTonnes(tier.minimumTonnes)} t+</small> : null}</div>
-        <div className="tod-row-tonnes"><strong>{formatTonnes(currentTonnes)} t</strong>{currentTonnes > 0 && <span className="tod-progress-track" role="progressbar" aria-label={`${formatTonnes(currentTonnes)} of ${formatTonnes(targetTonnes)} tonnes`} aria-valuemin={0} aria-valuemax={targetTonnes} aria-valuenow={currentTonnes}><span style={{ width: `${progress}%` }} /></span>}{nextLabel && <small>{nextLabel}</small>}</div>
-        <div className="tod-row-invoices">{payment ? <>
+        <div className="tod-row-slab"><span className={`tod-tier-badge tod-tier-badge-${tierTone}`} title={tier?.minimumTonnes ? `Slab from ${formatTonnes(tier.minimumTonnes)} MT` : undefined}>{proposal.achieved_tier_id ? tierValue : currentTonnes > 0 ? "Below slab" : "No purchases"}</span></div>
+        <div className="tod-row-tonnes"><strong>{formatTonnes(currentTonnes)} MT</strong>{scaleByRule.get(proposal.scheme_version_id ?? "")?.length ? <TodSlabBar tonnes={currentTonnes} scale={scaleByRule.get(proposal.scheme_version_id ?? "")!} customerName={customerName} /> : currentTonnes > 0 && <span className="tod-progress-track" role="progressbar" aria-label={`${formatTonnes(currentTonnes)} of ${formatTonnes(targetTonnes)} MT`} aria-valuemin={0} aria-valuemax={targetTonnes} aria-valuenow={currentTonnes}><span style={{ width: `${progress}%` }} /></span>}{nextLabel && <small>{isCloseToNext(proposal) && <b className="tod-close-tag">Close</b>}{nextLabel}</small>}</div>
+        {anyPayment && <div className="tod-row-invoices">{payment ? <>
           <strong>{payment.counted}<em> / {payment.total}</em> counted</strong>
           {excludedCount > 0
-            ? <button type="button" className="tod-row-excluded" aria-expanded={expanded} onClick={(event) => { event.stopPropagation(); setExpandedId(expanded ? null : proposal.id); }}><ChevronRight size={12} className="tod-row-caret" />{[payment.late && `${payment.late} late`, payment.partlyPaid && `${payment.partlyPaid} part-paid`, payment.unpaid && `${payment.unpaid} unpaid`].filter(Boolean).join(" · ")} · {formatTonnes(payment.excludedTonnes)} t out</button>
+            ? <button type="button" className="tod-row-excluded" aria-expanded={expanded} onClick={(event) => { event.stopPropagation(); setExpandedId(expanded ? null : proposal.id); }}><ChevronRight size={12} className="tod-row-caret" />{[payment.late && `${payment.late} late`, payment.partlyPaid && `${payment.partlyPaid} part-paid`, payment.unpaid && `${payment.unpaid} unpaid`].filter(Boolean).join(" · ")} · {formatTonnes(payment.excludedTonnes)} MT out</button>
             : <small className="tod-row-allpaid">All paid on time</small>}
-        </> : <small className="tod-row-muted">{savingDetails ? "Saving…" : "Recalculate to check"}</small>}</div>
-        <div className="tod-row-amount"><strong>{formatMoney(proposal.calculated_discount_amount)}</strong>{formula && <small>{formula}</small>}</div>
+        </> : <small className="tod-row-muted">{savingDetails ? "Saving…" : "Not checked"}</small>}</div>}
+        <div className="tod-row-amount"><strong>{formatMoney(proposal.calculated_discount_amount)}</strong>{formula && <small className="tod-row-formula">{formula}</small>}</div>
         <div className="tod-row-status">
-          <span className={`tod-state tod-state-${state.tone}`} title={state.hint}>{state.label}</span>
-          {historical ? <small>History</small> : isReady ? <Button className="tod-row-cta" disabled={savingDetails} onClick={(event) => { event.stopPropagation(); open(); }}>Create<ChevronRight size={14} /></Button> : <button type="button" className="tod-row-open" disabled={savingDetails} aria-label={`Open ${customerName}`} onClick={(event) => { event.stopPropagation(); open(); }}><ChevronRight size={16} /></button>}
+          {!uniformState && <span className={`tod-state tod-state-${state.tone}`} title={state.hint}>{state.label}</span>}
+          {historical ? <small>History</small> : isReady ? <button type="button" className="tod-row-cta" disabled={savingDetails} onClick={(event) => { event.stopPropagation(); open(); }}>Review<ChevronRight size={14} /></button> : <button type="button" className="tod-row-open" disabled={savingDetails} aria-label={`Open ${customerName}`} onClick={(event) => { event.stopPropagation(); open(); }}><ChevronRight size={16} /></button>}
         </div>
         {expanded && payment && <div className="tod-row-detail" onClick={(event) => event.stopPropagation()}>
           <p>Not counted: paid in full after the due date, or not fully paid.</p>
@@ -1227,11 +1359,16 @@ function TodResults({ reference, rows: filteredRows, allRows, query, setQuery, f
             <strong>{item.voucherNumber ?? "Invoice"}</strong>
             <span>{formatBusinessDate(item.invoiceDate)} · due {formatBusinessDate(item.dueDate)}</span>
             <span>{item.reason === "paid_after_due_date" ? `Paid ${formatBusinessDate(item.paidInFullOn)} · ${item.daysTaken} days` : `Paid ${formatMoney(item.paidTotal)} of ${formatMoney(item.invoiceAmount)}`}</span>
-            <span className="tod-row-detail-t">{formatTonnes(item.tonnes)} t</span>
+            <span className="tod-row-detail-t">{formatTonnes(item.tonnes)} MT</span>
           </li>)}</ul>
         </div>}
       </article>;
-    })}</div>{pageCount > 1 && <nav className="table-pagination" aria-label="Customer result pages"><span>Page {currentPage} of {pageCount} · {rows.length} results</span><div><Button className="button-secondary" disabled={currentPage === 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>Previous</Button>{Array.from({ length: pageCount }, (_, index) => index + 1).map((number) => <button key={number} className={number === currentPage ? "selected" : ""} aria-current={number === currentPage ? "page" : undefined} onClick={() => setPage(number)}>{number}</button>)}<Button className="button-secondary" disabled={currentPage === pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>Next</Button></div></nav>}</> : <EmptyState title={allRows.length ? "No customers match this view" : "No Turnover Discount results yet"} detail={allRows.length ? "Choose another filter or clear the customer search." : "Start a customer-period calculation after Tally information is ready."} action={allRows.length ? <Button className="button-secondary" onClick={() => { setQuery(""); setFilter(defaultFilter); }}>Clear filters</Button> : undefined} />}
+    })}</div>
+    {bulkReady.length > 0 && <div className="tod-bulk-bar" role="region" aria-label="Selected customers">
+      <span><strong>{bulkReady.length} selected</strong> · {formatMoney(bulkTotal)}</span>
+      <div><button type="button" className="tod-selection-clear" disabled={bulkCreating} onClick={() => setSelectedIds([])}>Clear</button><Button disabled={bulkCreating || !postingEnabled} title={postingEnabled ? "Each one is checked against Tally before it is created" : "Turn on Credit Note creation first"} onClick={() => setConfirmOpen(true)}>{bulkCreating ? "Working…" : `Create ${bulkReady.length} Credit Note${bulkReady.length === 1 ? "" : "s"}`}</Button></div>
+    </div>}
+    {pageCount > 1 && <nav className="table-pagination" aria-label="Customer result pages"><span>Page {currentPage} of {pageCount} · {rows.length} results</span><div><Button className="button-secondary" disabled={currentPage === 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>Previous</Button>{Array.from({ length: pageCount }, (_, index) => index + 1).map((number) => <button key={number} className={number === currentPage ? "selected" : ""} aria-current={number === currentPage ? "page" : undefined} onClick={() => setPage(number)}>{number}</button>)}<Button className="button-secondary" disabled={currentPage === pageCount} onClick={() => setPage((value) => Math.min(pageCount, value + 1))}>Next</Button></div></nav>}</> : <EmptyState title={allRows.length ? "No customers match this view" : "No Turnover Discount results yet"} detail={allRows.length ? "Choose another filter or clear the customer search." : "Start a customer-period calculation after Tally information is ready."} action={allRows.length ? <Button className="button-secondary" onClick={() => { setQuery(""); setFilter(defaultFilter); }}>Clear filters</Button> : undefined} />}
   </Card>;
 }
 
@@ -1242,17 +1379,18 @@ function DrawerLoadingBlock({ className = "" }: { className?: string }) {
   return <span aria-hidden="true" className={`workspace-loading-block ${className}`} />;
 }
 
+
 function TurnoverResultDrawerLoading() {
+  // Mirrors the loaded panel: compact top card (amount | calculation, status line, period + checked | Verify),
+  // the slab strip, then the three links (Tally evidence, Payment check, Audit).
   return <div className="drawer-stack tod-customer-drawer tod-drawer-loading" aria-label="Loading customer result">
-    <div className="tod-loading-hero">
-      <div><DrawerLoadingBlock className="tod-loading-chip" /><DrawerLoadingBlock className="tod-loading-amount-label" /><DrawerLoadingBlock className="tod-loading-amount" /></div>
-      <div><DrawerLoadingBlock className="tod-loading-state" /><DrawerLoadingBlock className="tod-loading-date" /></div>
+    <div className="tod-hero">
+      <div className="tod-hero-main"><div><DrawerLoadingBlock className="sk sk-label" /><DrawerLoadingBlock className="sk sk-amount" /></div><DrawerLoadingBlock className="sk sk-formula" /></div>
+      <div className="tod-hero-note"><DrawerLoadingBlock className="sk sk-status" /><DrawerLoadingBlock className="sk sk-button" /></div>
+      <div className="tod-hero-foot"><div><DrawerLoadingBlock className="sk sk-period" /><DrawerLoadingBlock className="sk sk-checked" /></div><DrawerLoadingBlock className="sk sk-verify" /></div>
     </div>
-    <div className="tod-loading-metrics">{Array.from({ length: 3 }, (_, index) => <div key={index}><DrawerLoadingBlock className="tod-loading-label" /><DrawerLoadingBlock className="tod-loading-value" /></div>)}</div>
-    <div className="tod-loading-section"><DrawerLoadingBlock className="tod-loading-label" /><DrawerLoadingBlock className="tod-loading-heading" /><div className="tod-loading-slabs">{Array.from({ length: 3 }, (_, index) => <DrawerLoadingBlock key={index} className="tod-loading-slab" />)}</div></div>
-    <div className="tod-loading-section"><DrawerLoadingBlock className="tod-loading-label" /><DrawerLoadingBlock className="tod-loading-equation" /><DrawerLoadingBlock className="tod-loading-copy" /></div>
-    <div className="tod-loading-action-row"><div><DrawerLoadingBlock className="tod-loading-label" /><DrawerLoadingBlock className="tod-loading-heading" /></div><DrawerLoadingBlock className="tod-loading-button" /></div>
-    <div className="tod-loading-destinations">{Array.from({ length: 2 }, (_, index) => <div key={index}><div><DrawerLoadingBlock className="tod-loading-heading" /><DrawerLoadingBlock className="tod-loading-copy short" /></div><DrawerLoadingBlock className="tod-loading-arrow" /></div>)}</div>
+    <div className="tod-loading-section"><DrawerLoadingBlock className="sk sk-label" /><div className="tod-loading-slabs">{Array.from({ length: 3 }, (_, index) => <DrawerLoadingBlock key={index} className="tod-loading-slab" />)}</div></div>
+    <div className="tod-loading-destinations">{Array.from({ length: 3 }, (_, index) => <div key={index}><div><DrawerLoadingBlock className="sk sk-link" /><DrawerLoadingBlock className="sk sk-link-sub" /></div><DrawerLoadingBlock className="tod-loading-arrow" /></div>)}</div>
   </div>;
 }
 
@@ -1433,7 +1571,7 @@ function ProposalDrawer({ proposal, onClose, onChanged, onError, customerName, l
     const creationAvailableOn = record.period_end ? formatBusinessDate(record.period_end) : "the end of the rule period";
     const nextStep = record.achieved_tier_id
       ? periodEnded ? "Check the latest Tally calculation, then create the Credit Note." : `Keep tracking this customer until ${formatBusinessDate(record.period_end)}. The discount is projected until then.`
-      : remainingTonnes > 0 ? `${remainingTonnes} more tonnes are needed to reach the next discount slab.` : "No discount slab has been reached for this period.";
+      : remainingTonnes > 0 ? `${formatTonnes(remainingTonnes)} MT more is needed to reach the next discount slab.` : "No discount slab has been reached for this period.";
     const tallyEvidence = detail?.tallyEvidence;
     const evidenceVouchers = tallyEvidence?.vouchers ?? [];
     const evidenceLines = tallyEvidence?.lines ?? [];
@@ -1452,6 +1590,17 @@ function ProposalDrawer({ proposal, onClose, onChanged, onError, customerName, l
       ? groupPath.map((group) => group && typeof group === "object" && "groupName" in group ? String(group.groupName) : "").filter(Boolean).reverse().join(" › ")
       : "Rule-covered customer group";
     const tierDropIssue = detail?.openIssues.find((issue) => issue.issue_type === "tod_tier_reduced_after_notification") ?? null;
+    // One plain Credit Note status for the top card.
+    const posting = detail?.creditNotePosting ?? null;
+    const whatsappSent = ["sent", "delivered", "read", "whatsapp_sent"].includes(message?.status ?? "");
+    const noteStatus: { label: string; tone: "muted" | "waiting" | "active" | "done" | "problem" } = !record.achieved_tier_id
+      ? { label: "No Credit Note · slab not reached", tone: "muted" }
+      : !periodEnded ? { label: `Credit Note after ${creationAvailableOn}`, tone: "waiting" }
+      : !posting ? { label: "Credit Note not created", tone: "waiting" }
+      : ["failed", "correction_required", "reconciliation_required"].includes(posting.status) ? { label: "Credit Note needs attention in Tally", tone: "problem" }
+      : posting.status !== "created_verified" ? { label: "Creating Credit Note in Tally…", tone: "active" }
+      : whatsappSent ? { label: `Created in Tally · No. ${posting.verified_voucher_number ?? "—"} · sent on WhatsApp`, tone: "done" }
+      : { label: `Created in Tally · No. ${posting.verified_voucher_number ?? "—"} · WhatsApp not sent`, tone: "active" };
     // Present on calculations made with the 25-day payment rule; older results have none.
     const paymentChecks = Array.isArray(formula.paymentChecks) ? formula.paymentChecks as TodPaymentCheckRow[] : null;
     const countedInvoices = paymentChecks?.filter((check) => check.counted).length ?? 0;
@@ -1459,15 +1608,15 @@ function ProposalDrawer({ proposal, onClose, onChanged, onError, customerName, l
     // Creating a Credit Note is a step inside the drawer (with Back), not a modal on top of it.
     return <><Drawer open={Boolean(proposal)} onClose={onClose} onBack={createOpen ? () => setCreateOpen(false) : drawerView === "summary" ? undefined : () => setDrawerView("summary")} title={createOpen ? "Create Credit Note" : drawerTitle} description=""><div className="drawer-stack tod-customer-drawer">
       {createOpen ? <CreditNoteCreationPanel customerName={customerName ?? record.customer_name ?? undefined} proposal={record} busy={busy} onBack={() => setCreateOpen(false)} onConfirm={() => void action("create")} /> : drawerView === "evidence" ? <div className="tod-drawer-subview">
-        <div className="tod-subview-summary"><span>{evidenceVouchers.length} voucher{evidenceVouchers.length === 1 ? "" : "s"}</span><span>{productSummary.length} product{productSummary.length === 1 ? "" : "s"}</span><span>{formatTonnes(record.eligible_tonnes)} tonnes</span></div>
-        <section><p className="eyebrow">Transactions</p>{evidenceVouchers.length ? <div className="tod-evidence-list">{evidenceVouchers.map((voucher) => <article key={`${voucher.tallyVoucherId}-${voucher.contributionType}`}><div><strong>{voucher.voucherNumber || voucher.voucherTypeName || "Tally voucher"}</strong><small>{formatBusinessDate(voucher.voucherDate)} · {userLabel(voucher.voucherKind)}</small></div><div><strong className={Number(voucher.tonneContribution) < 0 ? "is-negative" : ""}>{formatTonnes(voucher.tonneContribution)} tonnes</strong><small>{formatMoney(voucher.taxableValueContribution)}</small></div></article>)}</div> : <EmptyState title="No voucher breakdown" detail="Run the calculation again to capture transaction evidence." />}</section>
-        {productSummary.length ? <section><p className="eyebrow">Products counted</p><div className="tod-evidence-list">{productSummary.map((product) => <article key={product.name}><div><strong>{product.name}</strong><small>{product.group || "Tally stock item"}</small></div><div><strong>{formatTonnes(product.tonnes)} tonnes</strong><small>{formatMoney(product.value)}</small></div></article>)}</div></section> : null}
+        <div className="tod-subview-summary"><span>{evidenceVouchers.length} voucher{evidenceVouchers.length === 1 ? "" : "s"}</span><span>{productSummary.length} product{productSummary.length === 1 ? "" : "s"}</span><span>{formatTonnes(record.eligible_tonnes)} MT</span></div>
+        <section><p className="eyebrow">Transactions</p>{evidenceVouchers.length ? <div className="tod-evidence-list">{evidenceVouchers.map((voucher) => <article key={`${voucher.tallyVoucherId}-${voucher.contributionType}`}><div><strong>{voucher.voucherNumber || voucher.voucherTypeName || "Tally voucher"}</strong><small>{formatBusinessDate(voucher.voucherDate)} · {userLabel(voucher.voucherKind)}</small></div><div><strong className={Number(voucher.tonneContribution) < 0 ? "is-negative" : ""}>{formatTonnes(voucher.tonneContribution)} MT</strong><small>{formatMoney(voucher.taxableValueContribution)}</small></div></article>)}</div> : <EmptyState title="No voucher breakdown" detail="Run the calculation again to capture transaction evidence." />}</section>
+        {productSummary.length ? <section><p className="eyebrow">Products counted</p><div className="tod-evidence-list">{productSummary.map((product) => <article key={product.name}><div><strong>{product.name}</strong><small>{product.group || "Tally stock item"}</small></div><div><strong>{formatTonnes(product.tonnes)} MT</strong><small>{formatMoney(product.value)}</small></div></article>)}</div></section> : null}
         {blockedLines.length ? <InlineMessage tone="warning">{blockedLines.length} Tally item line{blockedLines.length === 1 ? " was" : "s were"} excluded because quantity or unit information needs attention.</InlineMessage> : null}
       </div> : drawerView === "payments" ? <div className="tod-drawer-subview">
         <div className="tod-subview-summary"><span>{countedInvoices} of {paymentChecks?.length ?? 0} invoices counted</span><span>Paid in full within 25 days</span></div>
-        <p className="muted-copy">Due date = invoice date + 25 days (holidays included). If that day is a Sunday or a holiday, the next working day. Only invoices paid 100% (with GST) by the due date add to the tonnes.</p>
+        <p className="muted-copy">Due date = invoice date + 25 days (holidays included). If that day is a Sunday or a holiday, the next working day. Only invoices paid 100% (with GST) by the due date add to the MT.</p>
         {paymentChecks?.length ? <div className="tod-payment-list">{paymentChecks.map((check) => <article key={check.tallyGuid} className={check.counted ? "is-counted" : "is-excluded"}>
-          <div><strong>{check.voucherNumber || "Sales invoice"}</strong><small>{formatBusinessDate(check.invoiceDate)} · {formatMoney(check.invoiceAmount)} · {formatTonnes(check.tonnes)} t</small></div>
+          <div><strong>{check.voucherNumber || "Sales invoice"}</strong><small>{formatBusinessDate(check.invoiceDate)} · {formatMoney(check.invoiceAmount)} · {formatTonnes(check.tonnes)} MT</small></div>
           <div className="tod-payment-days">
             <small>Day {check.dueDays}: {formatBusinessDate(check.nominalDueDate)}{check.shiftedFor.length ? ` → ${formatBusinessDate(check.dueDate)} (${check.shiftedFor.map((item) => `${formatBusinessDate(item.date)} ${item.reason === "holiday" ? "holiday" : "Sunday/off day"}`).join(", ")})` : ""}</small>
             <small>{check.paidInFullOn ? `Paid in full ${formatBusinessDate(check.paidInFullOn)} · ${check.daysTaken} days` : `Paid ${formatMoney(check.paidTotal)} of ${formatMoney(check.invoiceAmount)}`}</small>
@@ -1478,12 +1627,26 @@ function ProposalDrawer({ proposal, onClose, onChanged, onError, customerName, l
         <dl className="tod-audit-grid"><div><dt>Rule</dt><dd>{ruleVersion ? `Version ${ruleVersion}` : "Active Turnover Discount rule"}</dd></div><div><dt>Effective from</dt><dd>{formatBusinessDate(typeof detail?.latestEvaluation?.rule_snapshot?.effectiveFrom === "string" ? detail.latestEvaluation.rule_snapshot.effectiveFrom : null)}</dd></div><div><dt>Customer group</dt><dd>{groupLabel || "Rule-covered customer group"}</dd></div><div><dt>Last calculated</dt><dd>{formatDate(record.latest_evaluated_at)}</dd></div></dl>
         {detail?.reviews.length ? <section><p className="eyebrow">Action history</p><div>{detail.reviews.map((review) => <div className="history-row" key={review.id}><StatusBadge status={review.status} /><span>{review.review_reason || review.invalidation_reason || "Recorded using the latest Tally information"}</span><small>{formatDate(review.reviewed_at)}</small></div>)}</div></section> : <EmptyState title="No administrator actions" detail="Decisions and review notes will appear here." />}
       </div> : <>
-      <div className={`tod-drawer-hero tod-tier-${tierTone}`}><div><span className={`tod-tier-badge tod-tier-badge-${tierTone}`}>{record.achieved_tier_id ? `${achievedTierLabel} slab reached` : "Not yet qualified"}</span><p>{periodEnded ? "Calculated discount" : "Projected discount"}</p><strong>{formatMoney(record.calculated_discount_amount)}</strong></div><div className="tod-drawer-hero-meta"><span className="tod-drawer-state">{periodEnded ? "Period complete" : "Period in progress"}</span><small>Checked {formatDate(record.latest_evaluated_at)}</small>{canRefresh && <Button className="button-quiet" disabled={busy || refreshIsActive} onClick={() => void action("refresh")}><RefreshCw size={14} />{refreshIsActive ? "Verifying…" : "Verify before Credit Note"}</Button>}</div></div>
+      {/* Compact summary: amount + how it was reached, then period and freshness. The slab itself is shown once, in the slab strip below. */}
+      <div className="tod-hero">
+        <div className="tod-hero-main">
+          <div><small>{periodEnded ? "Discount" : "Projected discount"}</small><strong>{formatMoney(record.calculated_discount_amount)}</strong></div>
+          <span>{record.achieved_tier_id
+            ? usesAmountPerMt ? `${formatTonnes(eligibleTonnes)} MT × ₹${perMtRate ?? "0"}/MT` : `${formatMoney(record.eligible_product_taxable_value)} × ${record.discount_percentage ?? "0"}%`
+            : `${formatTonnes(eligibleTonnes)} MT counted${remainingTonnes > 0 ? ` · ${formatTonnes(remainingTonnes)} MT to first slab` : ""}`}</span>
+        </div>
+        {/* Credit Note status in plain words: not created → created in Tally → sent on WhatsApp. */}
+        <div className="tod-hero-note">
+          <span className={`tod-note-status is-${noteStatus.tone}`}>{noteStatus.label}</span>
+          {canManage && record.achieved_tier_id && !detail?.creditNotePosting && periodEnded && <Button className="tod-hero-create" disabled={busy || !createReady || refreshIsActive || createAfterRefresh || postingDisabled} title={postingDisabled ? "Credit Note creation is turned off" : freshForCreation ? undefined : "Checks Tally for the latest invoices first"} onClick={startCreate}>{createAfterRefresh ? "Checking Tally…" : "Create Credit Note"}</Button>}
+        </div>
+        <div className="tod-hero-foot">
+          <div><small>{formatBusinessDate(record.period_start)} – {formatBusinessDate(record.period_end)} · {periodEnded ? "complete" : "in progress"}</small><small className="tod-hero-checked">Checked {formatDate(record.latest_evaluated_at)}</small></div>
+          {canRefresh && <Button className="button-quiet" disabled={busy || refreshIsActive} onClick={() => void action("refresh")}><RefreshCw size={13} />{refreshIsActive ? "Verifying…" : "Verify"}</Button>}
+        </div>
+      </div>
       {refreshMessage && <InlineMessage tone={refreshRun?.status === "failed" || refreshRun?.status === "completed_with_issues" ? "error" : freshForCreation ? "success" : "info"}>{refreshRun?.error_summary ?? refreshMessage}</InlineMessage>}
-      <div className="tod-drawer-metrics"><div><span>Eligible quantity</span><strong>{formatTonnes(record.eligible_tonnes)} tonnes</strong></div><div><span>Eligible sales value</span><strong>{formatMoney(record.eligible_product_taxable_value)}</strong></div><div><span>Period</span><strong>{formatBusinessDate(record.period_start)} – {formatBusinessDate(record.period_end)}</strong></div></div>
-      {tallyEvidence?.tiers.length ? <section className="tod-slab-progress"><p className="eyebrow">Discount slab</p><div className="tod-slab-track">{tallyEvidence.tiers.map((tier) => { const minimum = Number(tier.minimum_tonnes); const reached = eligibleTonnes >= minimum; const active = tier.id === record.achieved_tier_id; const label = usesAmountPerMt ? `₹${tier.discount_amount_per_tonne ?? "—"}/MT` : `${tier.discount_percentage}%`; return <div className={`${reached ? "is-reached" : ""} ${active ? "is-active" : ""}`} key={tier.id}><span>{minimum}t</span><strong>{label}</strong></div>; })}</div></section> : null}
-      <section className="tod-calculation-summary"><p className="eyebrow">Calculation</p><h3>{usesAmountPerMt ? `${formatTonnes(eligibleTonnes)} tonnes × ₹${perMtRate ?? "0"}/MT = ${formatMoney(record.calculated_discount_amount)}` : `${formatMoney(record.eligible_product_taxable_value)} × ${record.discount_percentage ?? "0"}% = ${formatMoney(record.calculated_discount_amount)}`}</h3></section>
-      <section className={`tod-next-step ${record.achieved_tier_id ? "has-credit-note-step" : ""}`}><div><p className="eyebrow">Next action</p><h3>{detail?.creditNotePosting ? "Credit Note created" : record.achieved_tier_id ? periodEnded ? "Create Credit Note" : `Available after ${creationAvailableOn}` : "Not yet qualified"}</h3>{!periodEnded && record.achieved_tier_id && <p>{nextStep}</p>}</div>{!record.achieved_tier_id && remainingTonnes > 0 && <strong>{formatTonnes(remainingTonnes)}<small>tonnes to next slab</small></strong>}{canManage && record.achieved_tier_id && !detail?.creditNotePosting && <div className="tod-credit-note-action"><Button disabled={busy || !createReady || refreshIsActive || createAfterRefresh || postingDisabled} title={!periodEnded ? `Available after ${creationAvailableOn}` : postingDisabled ? "Turn on Credit Note creation on the Ready to create tab first" : freshForCreation ? undefined : "Checks Tally for the latest invoices first"} onClick={startCreate}>{createAfterRefresh ? "Checking Tally…" : "Create Credit Note"}</Button>{periodEnded && !freshForCreation && <small>Verify before Credit Note to unlock.</small>}</div>}</section>
+      {tallyEvidence?.tiers.length ? <section className="tod-slab-progress"><p className="eyebrow">Discount slab</p><div className="tod-slab-track">{tallyEvidence.tiers.map((tier) => { const minimum = Number(tier.minimum_tonnes); const reached = eligibleTonnes >= minimum; const active = tier.id === record.achieved_tier_id; const label = usesAmountPerMt ? `₹${tier.discount_amount_per_tonne ?? "—"}/MT` : `${tier.discount_percentage}%`; return <div className={`${reached ? "is-reached" : ""} ${active ? "is-active" : ""}`} key={tier.id}><span>{minimum} MT</span><strong>{label}</strong></div>; })}</div></section> : null}
       <div className="tod-drawer-destinations"><button onClick={() => setDrawerView("evidence")}><span><strong>Tally evidence</strong><small>{evidenceVouchers.length} {evidenceVouchers.length === 1 ? "voucher" : "vouchers"} · {productSummary.length} {productSummary.length === 1 ? "product" : "products"}</small></span><ChevronRight size={16} /></button><button onClick={() => setDrawerView("payments")}><span><strong>Payment check</strong><small>{paymentChecks ? `${countedInvoices} of ${paymentChecks.length} invoices paid within 25 days` : "Day calculation per invoice"}</small></span><ChevronRight size={16} /></button>{isAdministrator && <button onClick={() => setDrawerView("audit")}><span><strong>Audit information</strong><small>Rule, customer group and action history</small></span><ChevronRight size={16} /></button>}</div>
       {detail?.openIssues.length ? <section><h3>Needs attention</h3>{detail.openIssues.map((issue) => <OpenIssueSummary issue={issue} key={issue.id} />)}{tierDropIssue && canManage ? <div className="drawer-actions"><label>Finance review note<textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Why no correction message is needed" /></label><Button className="button-secondary" disabled={busy || reason.trim().length < 3} onClick={() => void action("resolve_tod_tier_review")}>Mark reviewed — no correction sent</Button><small>Closing this review never sends a WhatsApp. It only allows a future, genuinely new tier to be evaluated normally.</small></div> : null}</section> : null}
       {detail?.creditNotePosting && <section><h3>Credit Note progress</h3><CreditNoteLifecycle posting={detail.creditNotePosting} message={message} /><div className="tod-credit-note-summary"><div><span>Status</span><strong>{staffStatusLabel(detail.creditNotePosting.status)}</strong></div><div><span>Amount</span><strong>{formatMoney(detail.creditNotePosting.verified_amount ?? detail.creditNotePosting.discount_amount)}</strong></div><div><span>Tally number</span><strong>{detail.creditNotePosting.verified_voucher_number ?? "Waiting for confirmation"}</strong></div></div>{detail.creditNotePosting.document?.available && <Button className="button-secondary" onClick={() => void openDocument()}>Open Credit Note PDF</Button>}{canManage && detail.creditNotePosting.status === "created_verified" ? <Button className="button-quiet" disabled={busy || Boolean(noteReconciliationRunId)} onClick={() => void action("reconcile_credit_note")}><RefreshCw size={14} />{noteReconciliationRunId ? "Checking Tally…" : "Verify in Tally"}</Button> : null}{canManage && ["failed", "correction_required"].includes(detail.creditNotePosting.status) ? <div className="drawer-actions"><label>Reason for checking again<textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="What was checked or corrected before retrying" /></label><Button disabled={busy || reason.trim().length < 3 || postingDisabled} onClick={() => void action("retry")}>{busy ? "Checking existing voucher…" : "Check existing Tally voucher again"}</Button><small>The permanent reference is reused, so this cannot create a duplicate Credit Note.</small></div> : null}</section>}
@@ -1749,7 +1912,8 @@ async function verifyAndCreateCreditNotes(companyId: string, proposalIds: string
   }
 }
 
-function PostingSwitch({ launchControl, onChanged, onError }: { launchControl: LaunchControl | null; onChanged: (message: string) => Promise<void>; onError: (message: string | null) => void }) {
+/** "on" renders only when on (a small pill for the results header); "off" renders only the full banner when off; default renders either. */
+function PostingSwitch({ launchControl, onChanged, onError, show = "any" }: { launchControl: LaunchControl | null; onChanged: (message: string) => Promise<void>; onError: (message: string | null) => void; show?: "any" | "on" | "off" }) {
   const { company, isAdministrator } = useCompany();
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1759,6 +1923,7 @@ function PostingSwitch({ launchControl, onChanged, onError }: { launchControl: L
   const [reference, setReference] = useState("");
   const enabled = launchControl?.mode === "posting_enabled";
   if (!isAdministrator || !launchControl) return null;
+  if ((show === "on" && !enabled) || (show === "off" && enabled)) return null;
 
   async function change(mode: "posting_enabled" | "review_only") {
     const token = await accessToken(); if (!token) return;
@@ -1772,7 +1937,9 @@ function PostingSwitch({ launchControl, onChanged, onError }: { launchControl: L
   }
 
   return <>
-    {enabled
+    {enabled && show === "on"
+      ? <span className="posting-pill" title={launchControl.postingEnabledAt ? `On since ${formatBusinessDate(launchControl.postingEnabledAt)}` : undefined}><span className="posting-pill-dot" aria-hidden="true" />Credit Notes on<button type="button" disabled={busy} onClick={() => void change("review_only")}>{busy ? "…" : "Turn off"}</button></span>
+      : enabled
       ? <p className="posting-switch is-on"><CheckCircle2 size={15} /><span>Credit Note creation is <strong>on</strong>{launchControl.postingEnabledAt ? ` since ${formatBusinessDate(launchControl.postingEnabledAt)}` : ""}.</span><button type="button" disabled={busy} onClick={() => void change("review_only")}>{busy ? "Turning off…" : "Turn off"}</button></p>
       : <div className="posting-switch is-off"><CircleAlert size={17} /><div><strong>Credit Note creation is off</strong><span>Results can be reviewed, but nothing is created in Tally until you turn it on.</span></div><Button onClick={() => setOpen(true)}>Turn on</Button></div>}
     <Dialog open={open} onClose={() => !busy && setOpen(false)} title="Turn on Credit Note creation" description="Record the period you checked against Tally before Credit Notes start being created.">

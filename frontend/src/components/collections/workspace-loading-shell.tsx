@@ -4,7 +4,7 @@ import { usePathname } from "next/navigation";
 
 import styles from "./workspace-loading-shell.module.css";
 
-type LoadingPage = "overview" | "discount" | "credit-notes" | "messages" | "rulebook" | "tally";
+type LoadingPage = "overview" | "discount" | "tod" | "credit-notes" | "messages" | "rulebook" | "tally";
 
 function Block({ className = "" }: { className?: string }) {
   return <span aria-hidden="true" className={`workspace-loading-block ${className}`} />;
@@ -12,7 +12,8 @@ function Block({ className = "" }: { className?: string }) {
 
 function pageForPath(pathname: string): LoadingPage {
   if (pathname === "/tally") return "tally";
-  if (pathname === "/cash-discount" || pathname === "/turnover-discount") return "discount";
+  if (pathname === "/turnover-discount") return "tod";
+  if (pathname === "/cash-discount") return "discount";
   if (pathname === "/credit-notes" || pathname === "/debit-notes") return "credit-notes";
   if (pathname === "/messages") return "messages";
   if (pathname === "/rulebook") return "rulebook";
@@ -29,6 +30,29 @@ function Rows({ count = 4 }: { count?: number }) {
 
 function OverviewLoading() {
   return <><PageHeading action /><div className="workspace-loading-metrics">{Array.from({ length: 4 }, (_, index) => <div key={index}><Block className="loading-metric-icon" /><Block className="loading-metric-label" /><Block className="loading-metric-value" /><Block className="loading-metric-detail" /></div>)}</div><div className="workspace-loading-panel-grid"><div className="workspace-loading-panel"><Block className="loading-panel-title" /><Rows count={3} /></div><div className="workspace-loading-panel"><Block className="loading-panel-title" /><Rows count={3} /></div></div></>;
+}
+
+/** One TOD group card's shape: header, amount, two stats, share bar, TOD/CD rule lines. */
+function TodGroupCardSkeleton() {
+  return <div className="tod-group-card tod-group-card-skeleton" aria-hidden="true">
+    <span className="tod-group-card-head"><Block className="sk sk-avatar" /><span className="tod-group-title"><Block className="sk sk-link" /><Block className="sk sk-link-sub" /></span><span /></span>
+    <span className="tod-group-amount"><Block className="sk sk-label" /><Block className="sk sk-amount" /></span>
+    <span className="tod-group-stats"><span><Block className="sk sk-label" /><Block className="sk sk-link-sub" /></span><span><Block className="sk sk-label" /><Block className="sk sk-link-sub" /></span></span>
+    <Block className="sk sk-meter" />
+    <span className="tod-group-rules"><Block className="sk sk-rule" /><Block className="sk sk-rule short" /></span>
+  </div>;
+}
+
+/** Turnover Discount loading: the summary card (status line + 4 tabs) and the group cards. Used at app start and on the page. */
+export function TodPageSkeleton() {
+  return <div className="tod-page-skeleton" aria-label="Loading Turnover Discount" role="status">
+    <div className="tod-page-skeleton-summary">
+      <div className="tod-page-skeleton-bar"><Block className="sk sk-status" /><Block className="sk sk-verify" /></div>
+      <div className="tod-page-skeleton-tabs">{Array.from({ length: 4 }, (_, index) => <div key={index}><Block className="sk sk-label" /><Block className="sk sk-amount" /><Block className="sk sk-link-sub" /></div>)}</div>
+    </div>
+    <Block className="sk sk-heading" />
+    <div className="tod-group-strip">{Array.from({ length: 6 }, (_, index) => <TodGroupCardSkeleton key={index} />)}</div>
+  </div>;
 }
 
 function DiscountLoading() {
@@ -111,7 +135,7 @@ function TallyLoading() {
 
 export function WorkspaceLoadingShell() {
   const page = pageForPath(usePathname() ?? "/");
-  const content = page === "tally" ? <TallyLoading /> : page === "discount" ? <DiscountLoading /> : page === "credit-notes" ? <CreditNotesLoadingContent /> : page === "messages" ? <MessagesLoadingContent /> : page === "rulebook" ? <RulebookLoading /> : <OverviewLoading />;
+  const content = page === "tally" ? <TallyLoading /> : page === "tod" ? <TodPageSkeleton /> : page === "discount" ? <DiscountLoading /> : page === "credit-notes" ? <CreditNotesLoadingContent /> : page === "messages" ? <MessagesLoadingContent /> : page === "rulebook" ? <RulebookLoading /> : <OverviewLoading />;
 
   return <div className={`collections-shell workspace-loading-shell ${styles.shell}`} aria-busy="true" aria-label="Loading workspace">
     <aside className="collections-sidebar workspace-loading-sidebar">
@@ -120,7 +144,7 @@ export function WorkspaceLoadingShell() {
       <div className="workspace-loading-user"><Block className="loading-avatar" /><div><Block className="loading-nav-label" /><Block className="loading-nav-detail" /></div></div>
     </aside>
     <main className="collections-main">
-      <header className="workspace-topbar workspace-loading-topbar">{page === "credit-notes" || page === "messages" ? <><div className="loading-credit-page-title"><Block className="loading-credit-title" /><Block className="loading-credit-subtitle" /></div><div className="loading-credit-topbar-tools"><Block className="loading-credit-company" />{page === "messages" && <Block className="loading-message-test" />}<Block className="loading-credit-icon" /><Block className="loading-topbar-status" /></div></> : <><div><Block className="loading-topbar-label" /><Block className="loading-topbar-company" /></div><Block className="loading-topbar-status" /></>}</header>
+      <header className="workspace-topbar workspace-loading-topbar">{page === "tod" ? <><Block className="loading-tod-title" /><div className="loading-credit-topbar-tools"><Block className="loading-credit-company" /><Block className="loading-topbar-status" /></div></> : page === "credit-notes" || page === "messages" ? <><div className="loading-credit-page-title"><Block className="loading-credit-title" /><Block className="loading-credit-subtitle" /></div><div className="loading-credit-topbar-tools"><Block className="loading-credit-company" />{page === "messages" && <Block className="loading-message-test" />}<Block className="loading-credit-icon" /><Block className="loading-topbar-status" /></div></> : <><div><Block className="loading-topbar-label" /><Block className="loading-topbar-company" /></div><Block className="loading-topbar-status" /></>}</header>
       <section className={`workspace-content workspace-loading-content workspace-loading-${page}`}>{content}</section>
     </main>
   </div>;

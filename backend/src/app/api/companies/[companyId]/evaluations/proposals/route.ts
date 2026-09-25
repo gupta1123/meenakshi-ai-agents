@@ -49,10 +49,23 @@ export async function GET(request: Request, context: RouteContext) {
     const requestedLimit = Number(url.searchParams.get("limit") ?? 250);
     const limit = Number.isFinite(requestedLimit) ? Math.min(500, Math.max(1, Math.floor(requestedLimit))) : 250;
     const cursor = url.searchParams.get("cursor");
+    // Optional: one period (and rule version) — used by "View results" in TOD history.
+    const periodStart = url.searchParams.get("periodStart");
+    const periodEnd = url.searchParams.get("periodEnd");
+    const schemeVersionId = url.searchParams.get("schemeVersionId");
+    const isDate = (value: string | null) => Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value));
+    if ((periodStart || periodEnd) && !(isDate(periodStart) && isDate(periodEnd))) return jsonWithCors(request, { error: "periodStart and periodEnd must both be YYYY-MM-DD." }, { status: 400 });
+    if (schemeVersionId && !isUuid(schemeVersionId)) return jsonWithCors(request, { error: "Invalid schemeVersionId." }, { status: 400 });
+    const byPeriod = Boolean(periodStart && periodEnd);
     let query = createSupabaseAdminClient()
       .from("discount_proposals")
       .select("id, customer_id, scheme_version_id, scheme_type, source_sales_voucher_id, period_start, period_end, entitlement_key, status, source_fingerprint, last_live_refresh_at, eligibility_deadline, eligible_product_taxable_value, eligible_tonnes, achieved_tier_id, next_tier_tonnes, additional_tonnes_required, invoice_amount_due, amount_paid_by_deadline, discounted_settlement_target, shortfall_amount, discount_percentage, calculated_discount_amount, posted_discount_amount, reason_codes, latest_evaluated_at, updated_at")
-      .eq("company_id", company.id).order("updated_at", { ascending: false }).order("id", { ascending: false }).limit(limit + 1);
+      .eq("company_id", company.id);
+    // A period request pages by id so the id cursor is exact; the default list stays newest-updated first.
+    query = byPeriod ? query.order("id", { ascending: false }) : query.order("updated_at", { ascending: false }).order("id", { ascending: false });
+    query = query.limit(limit + 1);
+    if (byPeriod) query = query.eq("period_start", periodStart!).eq("period_end", periodEnd!);
+    if (schemeVersionId) query = query.eq("scheme_version_id", schemeVersionId);
     if (schemeType === "cd" || schemeType === "tod") query = query.eq("scheme_type", schemeType);
     if (activeOnly && (schemeType === "cd" || schemeType === "tod")) {
       const today = new Date().toISOString().slice(0, 10);

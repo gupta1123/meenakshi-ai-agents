@@ -96,7 +96,8 @@ export function AppShell({ children, email, tallyStatus, onSignOut }: { children
     <main className="collections-main">
       <header className={`workspace-topbar ${headerStyles.topbar} ${pageHeader ? "has-page-header" : ""}`}>
         <button className="mobile-wordmark" aria-label="Navigation"><Menu size={20} /></button>
-        {pageHeader && <div className={`workspace-page-header ${headerStyles.pageHeader}`}><div>{pageHeader.eyebrow && <p className="eyebrow">{pageHeader.eyebrow}</p>}<h1>{pageHeader.title}</h1>{pageHeader.detail && <p>{pageHeader.detail}</p>}</div></div>}
+        {/* Same bar on every page: the title only, left-aligned. Eyebrow and detail are no longer shown. */}
+        <div className={`workspace-page-header ${headerStyles.pageHeader}`}>{pageHeader && <h1>{pageHeader.title}</h1>}</div>
         <div className={`workspace-topbar-tools ${headerStyles.tools}`}>
         <div className="company-select-compact"><Building2 size={14} aria-hidden="true" /><select aria-label="Choose company to work with" onChange={(event) => selectCompany(event.target.value)} title="Choose company to work with" value={company.id}>{availableCompanies.map(({ company: option, organization: optionOrganization }) => <option key={option.id} value={option.id}>{availableCompanies.some((item) => item.organization.id !== optionOrganization.id) ? `${optionOrganization.name} — ` : ""}{option.tally_company_name}</option>)}</select></div>
         {pageHeader?.action}<GlobalTallyMonitor tallyStatus={tallyStatus} /></div>
