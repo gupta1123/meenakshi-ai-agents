@@ -28,7 +28,8 @@
     "next": "^15.5.10",
     "qrcode": "^1.5.4",
     "react": "^19.1.5",
-    "react-dom": "^19.1.5"
+    "react-dom": "^19.1.5",
+    "tsx": "^4.23.5"
   },
   "devDependencies": {
     "@types/node": "^20.17.6",
@@ -36,7 +37,6 @@
     "@types/react-dom": "^19.1.5",
     "eslint": "^9.39.4",
     "eslint-config-next": "^15.5.10",
-    "tsx": "^4.23.5",
     "typescript": "^5.8.2"
   }
 }
