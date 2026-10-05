@@ -7,8 +7,6 @@ import {
   readTodBenefitBasis,
   readOptionalText,
   readRequiredText,
-  readRequiredUuid,
-  requireAvailableReference,
   requireCurrentMasterSync,
   requireGlobalWorkingCalendar,
   requireRulebookCompanyAdmin,
@@ -33,7 +31,7 @@ export async function GET(request: Request, context: RouteContext) {
     const scope = await requireRulebookCompanyAdmin(request, companyId);
     const { data, error } = await createSupabaseAdminClient()
       .from("schemes")
-      .select("id, company_id, scheme_type, code, name, description, status, created_at, updated_at, scheme_versions(id)")
+      .select("id, company_id, scheme_type, code, name, description, status, created_at, updated_at, scheme_versions(status, effective_from, effective_to)")
       .eq("company_id", scope.company.id)
       .order("scheme_type")
       .order("name");
@@ -90,12 +88,6 @@ export async function POST(request: Request, context: RouteContext) {
     const initial = parseInitialRule(schemeType, initialRule);
     const calendar = await requireGlobalWorkingCalendar(scope.organization.id);
     await requireCurrentMasterSync(scope.company.id);
-    const creditNoteVoucherTypeId = schemeType === "tod" ? readRequiredUuid(initialRule.creditNoteVoucherTypeId, "initialRule.creditNoteVoucherTypeId") : null;
-    const discountLedgerId = schemeType === "tod" ? readRequiredUuid(initialRule.discountLedgerId, "initialRule.discountLedgerId") : null;
-    if (schemeType === "tod") {
-      await requireAvailableReference({ table: "tally_voucher_types", id: creditNoteVoucherTypeId!, companyId: scope.company.id, label: "Credit Note voucher type" });
-      await requireAvailableReference({ table: "tally_ledgers", id: discountLedgerId!, companyId: scope.company.id, label: "Discount ledger" });
-    }
     const supabase = createSupabaseAdminClient();
     const { data: schemeData, error: schemeError } = await supabase.from("schemes").insert({
       company_id: scope.company.id,
@@ -127,8 +119,8 @@ export async function POST(request: Request, context: RouteContext) {
       rounding_method: "half_up",
       rounding_scale: 2,
       gst_treatment: "commercial_no_gst",
-      credit_note_voucher_type_id: creditNoteVoucherTypeId,
-      discount_ledger_id: discountLedgerId,
+      credit_note_voucher_type_id: null,
+      discount_ledger_id: null,
       requires_approval: true,
       working_calendar_id: schemeType === "cd" ? calendar.id : null,
       allowed_working_days: compatibility?.allowed_working_days ?? null,

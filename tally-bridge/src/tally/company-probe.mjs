@@ -41,3 +41,28 @@ export async function probeActiveCompany(tallyUrl) {
   const { activeCompany } = await probeTallyCompanies(tallyUrl);
   return activeCompany;
 }
+
+/**
+ * Tally's master change counter (AltMstId) for the open company. It goes up
+ * whenever a customer, group, product or ledger is created or edited, so a
+ * master sync is needed only when it moved. A tiny read (about 0.25 s).
+ * Collection names must be plain words (no hyphen) or Tally shows an error dialog.
+ */
+export async function probeMasterChangeCounter(tallyUrl, companyName) {
+  const xml = [
+    "<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST>",
+    "<TYPE>Collection</TYPE><ID>Meenakshi Company Change Counter</ID></HEADER><BODY><DESC>",
+    "<STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>",
+    "<TDL><TDLMESSAGE><COLLECTION NAME=\"Meenakshi Company Change Counter\" ISMODIFY=\"No\">",
+    "<TYPE>Company</TYPE><FETCH>Name,AltMstId</FETCH>",
+    "</COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>",
+  ].join("");
+  const response = await postTallyXml(tallyUrl, xml, { timeoutMs: 10_000, operation: "Read the Tally change counter" });
+  const wanted = String(companyName ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+  for (const block of extractBlocks(response, "COMPANY")) {
+    const name = String(getAttribute(block, "NAME") ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+    const counter = Number(String(getTagText(block, "ALTMSTID") ?? "").trim());
+    if ((!wanted || name === wanted) && Number.isFinite(counter) && counter > 0) return counter;
+  }
+  return null;
+}

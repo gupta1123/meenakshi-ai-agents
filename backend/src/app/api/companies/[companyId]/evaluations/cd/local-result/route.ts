@@ -18,7 +18,7 @@ export async function POST(request: Request, context: RouteContext) {
     const { organization, company, userId } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
     const body = await request.json().catch(() => null) as { evaluatedOn?: unknown; evidence?: unknown } | null;
     if (!body || !isLiveCdBatch(body.evidence)) return jsonWithCors(request, { error: "Valid local Tally evidence is required." }, { status: 400 });
-    if (body.evidence.invoices.length > 10_000) return jsonWithCors(request, { error: "The local Tally result is too large." }, { status: 413 });
+    if (body.evidence.invoices.length > 25_000) return jsonWithCors(request, { error: "The local Tally result is too large." }, { status: 413 });
     const today = new Date().toISOString().slice(0, 10);
     const evaluatedOn = process.env.NODE_ENV === "development" && typeof body.evaluatedOn === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.evaluatedOn) ? body.evaluatedOn : today;
     const supabase = createSupabaseAdminClient();
@@ -26,7 +26,8 @@ export async function POST(request: Request, context: RouteContext) {
       p_organization_id: organization.id,
       p_company_id: company.id,
       p_actor_id: userId,
-      p_request_context: { schemeType: "cd", batch: true, evaluatedOn, localFirst: true },
+      // ruleVersionId lets the page show "last calculated" per Cash Discount rule.
+      p_request_context: { schemeType: "cd", batch: true, evaluatedOn, localFirst: true, ruleVersionId: body.evidence.ruleVersionId },
       p_idempotency_key: idempotencyKey,
     });
     if (error) throw error;

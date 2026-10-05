@@ -1,5 +1,6 @@
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
-import { appendRulebookAudit, readBoolean, readOptionalText, readRequiredUuid, requireRulebookCompanyAdmin, RulebookRequestError, rulebookErrorResponse } from "@/lib/rulebook/shared";
+import { appendRulebookAudit, readBoolean, readOptionalText, readRequiredUuid, RulebookRequestError, rulebookErrorResponse } from "@/lib/rulebook/shared";
+import { requireMeenakshiCompanyAccess } from "@/lib/authorization";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
@@ -17,7 +18,7 @@ async function requireCustomer(companyId: string, customerId: string) {
 export async function GET(request: Request, context: RouteContext) {
   try {
     const { companyId } = await context.params;
-    const scope = await requireRulebookCompanyAdmin(request, companyId);
+    const scope = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
     const customerId = new URL(request.url).searchParams.get("customerId");
     if (customerId) await requireCustomer(scope.company.id, customerId);
     const supabase = createSupabaseAdminClient();
@@ -34,6 +35,12 @@ export async function GET(request: Request, context: RouteContext) {
       ? await supabase.from("customers").select("id, ledger_name, source_payload, is_available").in("id", ids)
       : { data: [], error: null };
     if (customerError) throw customerError;
+    const contactIds = (contacts ?? []).map((contact) => String((contact as { id: string }).id));
+    const { data: optIns, error: optInError } = contactIds.length
+      ? await supabase.from("whatsapp_opt_ins").select("customer_contact_id").in("customer_contact_id", contactIds).eq("company_id", scope.company.id).eq("is_opted_in", true).is("revoked_at", null)
+      : { data: [], error: null };
+    if (optInError) throw optInError;
+    const consentedContactIds = new Set((optIns ?? []).map((row) => String((row as { customer_contact_id: string }).customer_contact_id)));
     const customerById = new Map((customers ?? []).map((customer) => [(customer as { id: string }).id, customer as { id: string; ledger_name: string; source_payload: Record<string, unknown> | null; is_available: boolean }]));
     return jsonWithCors(request, {
       contacts: (contacts ?? []).map((contact) => {
@@ -42,6 +49,7 @@ export async function GET(request: Request, context: RouteContext) {
         const payload = customer?.source_payload && typeof customer.source_payload === "object" ? customer.source_payload : {};
         return {
           ...row,
+          has_whatsapp_consent: consentedContactIds.has(String(row.id)),
           customer: customer ? {
             id: customer.id,
             ledgerName: customer.ledger_name,
@@ -62,7 +70,7 @@ export async function GET(request: Request, context: RouteContext) {
 export async function POST(request: Request, context: RouteContext) {
   try {
     const { companyId } = await context.params;
-    const scope = await requireRulebookCompanyAdmin(request, companyId);
+    const scope = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     const customerId = readRequiredUuid(body.customerId, "customerId");
     await requireCustomer(scope.company.id, customerId);
@@ -90,7 +98,7 @@ export async function POST(request: Request, context: RouteContext) {
 export async function PATCH(request: Request, context: RouteContext) {
   try {
     const { companyId } = await context.params;
-    const scope = await requireRulebookCompanyAdmin(request, companyId);
+    const scope = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     const contactId = readRequiredUuid(body.contactId, "contactId");
     const { data: existing, error: existingError } = await createSupabaseAdminClient().from("customer_contacts").select("id, customer_id, is_primary, is_active").eq("id", contactId).eq("company_id", scope.company.id).maybeSingle();

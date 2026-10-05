@@ -4,7 +4,10 @@ const SUPABASE_URL = (process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABA
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY;
 const WORKER_NAME = process.env.MEENAKSHI_OUTBOX_WORKER_NAME || `meenakshi-tally-outbox-${process.pid}`;
 const POLL_INTERVAL_MS = Math.max(1_000, Number(process.env.MEENAKSHI_OUTBOX_POLL_INTERVAL_MS ?? 5_000));
-const BATCH_SIZE = Math.max(1, Math.min(50, Number(process.env.MEENAKSHI_OUTBOX_BATCH_SIZE ?? 10)));
+// Tally exposes a single-company, single-threaded XML gateway. Claim one
+// financial write at a time so a bulk approval creates a durable queue
+// instead of flooding Tally with concurrent voucher imports.
+const BATCH_SIZE = Math.max(1, Math.min(10, Number(process.env.MEENAKSHI_OUTBOX_BATCH_SIZE ?? 1)));
 const RUN_ONCE = process.env.MEENAKSHI_OUTBOX_RUN_ONCE === "true";
 const MAX_RETRY_DELAY_MS = 60_000;
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("NEXT_PUBLIC_SUPABASE_URL/SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required.");
@@ -37,7 +40,36 @@ async function findBoundConnector(outbox) {
 }
 async function dispatch(outbox) {
   try {
+    if (outbox.event_type === "tally_credit_note_pdf") {
+      const { data: document, error: documentError } = await supabase.from("credit_note_documents")
+        .select("status,storage_path").eq("credit_note_posting_id", outbox.aggregate_id).maybeSingle();
+      if (documentError) throw documentError;
+      if (document?.status === "verified" && document.storage_path) {
+        const { error: completeError } = await supabase.from("integration_outbox").update({
+          status: "completed", completed_at: new Date().toISOString(), last_error: null,
+          locked_at: null, locked_by: null, lease_expires_at: null,
+        }).eq("id", outbox.id).eq("status", "processing");
+        if (completeError) throw completeError;
+        return;
+      }
+      // Older DB functions still enqueue this legacy event. Prepare the
+      // reference copy in the app; never ask Tally for a manual PDF export.
+      const { prepareCreditNoteDocument } = await import("../src/lib/notes/verified-note-document.mjs");
+      await prepareCreditNoteDocument(supabase, outbox.company_id, outbox.aggregate_id);
+      const { error: completeError } = await supabase.from("integration_outbox").update({
+        status: "completed", completed_at: new Date().toISOString(), last_error: null,
+        locked_at: null, locked_by: null, lease_expires_at: null,
+      }).eq("id", outbox.id).eq("status", "processing");
+      if (completeError) throw completeError;
+      return;
+    }
     const connectorId = await findBoundConnector(outbox);
+    // Debit Notes are posted in the client's GST style; attach the value/GST
+    // split, ledgers and narration before the connector command is built.
+    if (outbox.event_type === "tally_debit_note_create") {
+      const { attachDebitNoteGstPlan } = await import("../src/lib/notes/debit-note-gst.mjs");
+      await attachDebitNoteGstPlan(supabase, outbox.aggregate_id);
+    }
     const { data: commandId, error } = await supabase.rpc("dispatch_outbox_to_tally_command", { p_outbox_id: outbox.id, p_connector_id: connectorId });
     if (error) throw error;
     await appendAudit({ organization_id: outbox.organization_id, company_id: outbox.company_id, actor_type: "system", action: "tally_outbox_dispatched", entity_type: "integration_outbox", entity_id: outbox.id, correlation_id: outbox.correlation_id, new_value: { status: "completed", tallyCommandId: commandId }, metadata: { eventType: outbox.event_type, connectorId } });
@@ -46,7 +78,10 @@ async function dispatch(outbox) {
 async function processBatch() {
   const { data, error } = await supabase.rpc("claim_tally_integration_outbox", { p_worker_id: WORKER_NAME, p_limit: BATCH_SIZE, p_lease_seconds: 90 });
   if (error) throw error;
-  for (const outbox of data ?? []) await dispatch(outbox);
+  for (const outbox of data ?? []) {
+    await dispatch(outbox);
+    await sleep(250);
+  }
   return (data ?? []).length;
 }
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

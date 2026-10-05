@@ -39,7 +39,12 @@ export function evaluateLocalTurnoverDiscount(rule, evaluatedOn, periodStart, pe
     const nextTier = orderedTiers.find((tier) => decimal(tier.minimumTonnes).greaterThan(eligibleTonnes)) ?? null;
     const missingUnits = Array.isArray(aggregate.missingUnits) ? aggregate.missingUnits : [];
     const status = missingUnits.length || !reviewOpenDate ? "needs_review" : evaluatedOn < reviewOpenDate ? "tracking" : achievedTier ? "eligible" : "tracking";
-    const calculatedDiscount = achievedTier ? eligibleTaxableValue.mul(achievedTier.percentage).div(100) : decimal(0);
+    const usesAmountPerTonne = rule.todBenefitBasis === "amount_per_eligible_tonne";
+    const calculatedDiscount = !achievedTier
+      ? decimal(0)
+      : usesAmountPerTonne
+        ? eligibleTonnes.mul(achievedTier.amountPerTonne)
+        : eligibleTaxableValue.mul(achievedTier.percentage).div(100);
     return {
       customerId: aggregate.customerId,
       customerName: aggregate.customerLedgerName,
@@ -52,10 +57,12 @@ export function evaluateLocalTurnoverDiscount(rule, evaluatedOn, periodStart, pe
       achievedTierId: achievedTier?.id ?? null,
       nextTierTonnes: nextTier ? quantity(nextTier.minimumTonnes) : null,
       additionalTonnesRequired: nextTier ? quantity(nonNegative(decimal(nextTier.minimumTonnes).minus(eligibleTonnes))) : null,
-      discountPercentage: achievedTier?.percentage ?? null,
+      discountPercentage: usesAmountPerTonne ? null : achievedTier?.percentage ?? null,
       calculatedDiscountAmount: money(calculatedDiscount, rule.roundingScale, rule.roundingMethod),
       eligibilityDeadline: reviewOpenDate,
       status,
+      paymentChecks: Array.isArray(aggregate.paymentChecks) ? aggregate.paymentChecks : null,
+      excludedInvoices: aggregate.excludedInvoices ?? 0,
       reasonCodes: [...(missingUnits.length ? ["approved_conversion_missing"] : []), ...(!achievedTier ? ["tier_not_achieved"] : [])],
     };
   });

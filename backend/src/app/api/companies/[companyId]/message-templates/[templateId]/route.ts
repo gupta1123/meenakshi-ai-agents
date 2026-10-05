@@ -1,5 +1,6 @@
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { readTemplateComponentSchema } from "@/lib/notifications/template-renderer";
+import { liveProviderTemplateProblem } from "@/lib/notifications/provider-template";
 import { appendRulebookAudit, readBoolean, readOptionalText, readRequiredText, requireRulebookCompanyAdmin, RulebookRequestError, rulebookErrorResponse } from "@/lib/rulebook/shared";
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
@@ -9,9 +10,9 @@ export function OPTIONS(request: Request) { return optionsWithCors(request); }
 
 async function assertNoOpenTemplateMessages(templateId: string) {
   const { count, error } = await createSupabaseAdminClient().from("notification_messages")
-    .select("id", { count: "exact", head: true }).eq("whatsapp_template_id", templateId).in("status", ["queued", "failed", "sending"]);
+    .select("id", { count: "exact", head: true }).eq("whatsapp_template_id", templateId).in("status", ["queued", "sending"]);
   if (error) throw error;
-  if ((count ?? 0) > 0) throw new RulebookRequestError("This template has queued or retrying messages. It cannot be changed yet.", 409);
+  if ((count ?? 0) > 0) throw new RulebookRequestError("This template has queued or sending messages. It cannot be changed yet.", 409);
 }
 
 export async function PATCH(request: Request, context: RouteContext) {
@@ -21,9 +22,9 @@ export async function PATCH(request: Request, context: RouteContext) {
     if (!isUuid(templateId)) throw new RulebookRequestError("Invalid template id.");
     const supabase = createSupabaseAdminClient();
     const { data: existingData, error: existingError } = await supabase.from("whatsapp_templates")
-      .select("id, event_type, name, is_active").eq("id", templateId).eq("organization_id", scope.organization.id).maybeSingle();
+      .select("id, event_type, name, is_active, provider_template_id, language_code, component_schema").eq("id", templateId).eq("organization_id", scope.organization.id).maybeSingle();
     if (existingError) throw existingError;
-    const existing = existingData as { id: string; event_type: string; name: string; is_active: boolean } | null;
+    const existing = existingData as { id: string; event_type: string; name: string; is_active: boolean; provider_template_id: string; language_code: string; component_schema: unknown } | null;
     if (!existing) return jsonWithCors(request, { error: "Message template was not found." }, { status: 404 });
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     const update: Record<string, unknown> = {};
@@ -38,6 +39,10 @@ export async function PATCH(request: Request, context: RouteContext) {
     }
     if (body.isActive !== undefined) update.is_active = readBoolean(body.isActive, "isActive");
     if (!Object.keys(update).length) throw new RulebookRequestError("Provide one or more editable template fields.");
+    if (update.is_active === true || (existing.is_active && (update.component_schema || update.language_code))) {
+      const problem = await liveProviderTemplateProblem({ providerTemplateId: existing.provider_template_id, languageCode: String(update.language_code ?? existing.language_code), componentSchema: update.component_schema ?? existing.component_schema });
+      if (problem) throw new RulebookRequestError(problem, 422);
+    }
     if (Object.keys(update).some((key) => key !== "name") || update.is_active === false) await assertNoOpenTemplateMessages(existing.id);
     if (update.is_active === true && !existing.is_active) {
       const { data: active, error } = await supabase.from("whatsapp_templates").select("id")

@@ -1,5 +1,8 @@
-.topbar { }
-.pageHeader { }
+/* One consistent top bar: fixed height, small left-aligned title. */
+.topbar,
+.topbar:global(.has-page-header) { min-height: 52px; padding-block: 8px; }
+.pageHeader { justify-content: flex-start; text-align: left; }
+.pageHeader :global(h1) { overflow: hidden; margin: 0; color: var(--ink); font-size: .95rem; font-weight: 700; letter-spacing: -.01em; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
 .pageHeaderAction { }
 .tools { }
 
@@ -11,12 +14,16 @@
 
 @media (max-width: 760px) {
   .topbar { gap: 8px; padding: 10px 16px; }
-  .topbar:global(.has-page-header) { min-height: 60px; }
+  .topbar:global(.has-page-header) { min-height: 52px; }
   .pageHeader { gap: 8px; min-width: 0; }
   .pageHeader :global(.eyebrow), .pageHeader :global(p:last-child) { display: none; }
-  .pageHeader :global(h1) { overflow: hidden; font-size: 1rem; text-overflow: ellipsis; white-space: nowrap; }
+  .pageHeader :global(h1) { font-size: .92rem; }
   .pageHeaderAction { gap: 5px; }
   .pageHeaderAction :global(.button) { min-height: 32px; padding: 0 8px; font-size: .65rem; }
   .tools { gap: 3px; }
   .tools :global(.company-select), .tools :global(.company-select-compact) { display: none; }
+}
+
+@media (max-width: 440px) {
+  .pageHeader :global(h1) { font-size: .86rem; }
 }

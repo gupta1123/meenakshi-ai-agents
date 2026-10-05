@@ -1,3 +1,4 @@
+import { noteMasterSynced } from "@/lib/tally/auto-sync";
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
@@ -72,6 +73,8 @@ export async function applyMasterSyncResult(input: { syncRunId: string; companyI
     p_company_id: input.companyId,
   });
   if (relationshipError) throw relationshipError;
+  // The Tally change counter this sync read is now in the app (automatic sync).
+  await noteMasterSynced(supabase, input.companyId, (result as { changeCounter?: unknown }).changeCounter);
   return data as { syncRunId: string; recordsReceived: number; recordsApplied: number; fingerprint: string; alreadyApplied: boolean };
 }
 

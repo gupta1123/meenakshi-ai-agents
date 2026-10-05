@@ -1,7 +1,7 @@
 "use client";
 
 import type { ButtonHTMLAttributes, ReactNode } from "react";
-import { X } from "lucide-react";
+import { ArrowLeft, X } from "lucide-react";
 
 import { notificationStatusLabel, staffStatusLabel, toneForStaffStatus, type StatusTone } from "@/lib/staff-status";
 import { userFacingDetail } from "@/lib/user-copy";
@@ -64,12 +64,12 @@ export function InlineMessage({ tone = "info", children }: { tone?: "info" | "su
   return <div className={`inline-message message-${tone}`} role={tone === "error" ? "alert" : "status"}>{copy}</div>;
 }
 
-export function Drawer({ open, onClose, title, description, children, width = "normal" }: { open: boolean; onClose: () => void; title: string; description?: string; children: ReactNode; width?: "normal" | "wide" }) {
+export function Drawer({ open, onClose, onBack, title, description, children, width = "normal" }: { open: boolean; onClose: () => void; onBack?: () => void; title: string; description?: string; children: ReactNode; width?: "normal" | "wide" }) {
   if (!open) return null;
   return <div className="drawer-layer" role="presentation">
     <button className="drawer-backdrop" aria-label="Close panel" onClick={onClose} />
     <aside className={`drawer drawer-${width}`} role="dialog" aria-modal="true" aria-label={title}>
-      <header className="drawer-header"><div><h2>{title}</h2>{description && <p>{description}</p>}</div><IconButton label="Close panel" onClick={onClose}><X size={18} /></IconButton></header>
+      <header className="drawer-header"><div className="drawer-heading">{onBack && <IconButton label="Back" onClick={onBack}><ArrowLeft size={18} /></IconButton>}<div><h2>{title}</h2>{description && <p>{description}</p>}</div></div><IconButton label="Close panel" onClick={onClose}><X size={18} /></IconButton></header>
       <div className="drawer-body">{children}</div>
     </aside>
   </div>;
@@ -89,7 +89,7 @@ export function Dialog({ open, onClose, title, description, children, width = "n
 export function formatDate(value: string | null | undefined, fallback = "Not yet") {
   if (!value) return fallback;
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? fallback : date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  return Number.isNaN(date.getTime()) ? fallback : date.toLocaleString("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 export function formatMoney(value: string | number | null | undefined) {

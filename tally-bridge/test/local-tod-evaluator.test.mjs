@@ -33,3 +33,22 @@ test("local TOD calculation keeps an in-period result tracking and flags missing
   assert.equal(review.rows[0].status, "needs_review");
   assert.deepEqual(review.rows[0].reasonCodes, ["approved_conversion_missing"]);
 });
+
+test("local TOD calculation applies the reached per-tonne rate to the full eligible quantity", () => {
+  const perTonneRule = {
+    ...rule,
+    todBenefitBasis: "amount_per_eligible_tonne",
+    tiers: [
+      { id: "tier-30", minimumTonnes: "30", percentage: null, amountPerTonne: "250" },
+      { id: "tier-50", minimumTonnes: "50", percentage: null, amountPerTonne: "350" },
+    ],
+  };
+  const result = evaluateLocalTurnoverDiscount(perTonneRule, "2026-09-22", "2026-08-01", "2026-10-31", [{
+    customerId: "customer-1", customerLedgerName: "Demo Customer", eligibleTaxableValue: "99000", eligibleTonnes: "72",
+    missingUnits: [],
+  }]);
+  assert.equal(result.rows[0].achievedTierId, "tier-50");
+  assert.equal(result.rows[0].discountPercentage, null);
+  assert.equal(result.rows[0].calculatedDiscountAmount, "25200.00");
+  assert.equal(result.rows[0].status, "tracking");
+});

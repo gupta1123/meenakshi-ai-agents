@@ -65,6 +65,9 @@ export function collapseEvaluationRuns<T extends RunRecord & { scheme_type?: "cd
     const activeJobs = jobs.filter((run) => !terminalStatuses.has(run.status)).length;
     const qualifiedJobs = jobs.filter((run) => Number((run.summary as Record<string, unknown> | null | undefined)?.calculatedDiscountAmount ?? 0) > 0).length;
     const projectedDiscountAmount = jobs.reduce((total, run) => total + (Number((run.summary as Record<string, unknown> | null | undefined)?.calculatedDiscountAmount ?? 0) || 0), 0);
+    const periods = [...new Map(jobs.flatMap((run) => run.period_start && run.period_end
+      ? [[`${run.period_start}:${run.period_end}`, { start: String(run.period_start), end: String(run.period_end) }] as const]
+      : [])).values()];
     const lastUpdated = groupedRuns.map((run) => run.updated_at ?? run.created_at).sort().at(-1) ?? root.created_at;
     const completedAt = groupedRuns.map((run) => run.completed_at).filter((value): value is string => Boolean(value)).sort().at(-1) ?? null;
     const errorSummary = groupedRuns.find((run) => run.error_summary)?.error_summary ?? null;
@@ -86,6 +89,7 @@ export function collapseEvaluationRuns<T extends RunRecord & { scheme_type?: "cd
       qualified_jobs: qualifiedJobs,
       not_qualified_jobs: Math.max(0, completedJobs - qualifiedJobs),
       projected_discount_amount: projectedDiscountAmount,
+      periods,
     };
   }).sort((left, right) => right.created_at.localeCompare(left.created_at));
 }

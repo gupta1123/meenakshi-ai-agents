@@ -49,11 +49,16 @@ export async function POST(request: Request, context: RouteContext) {
       status: "queued",
       correlationId: input.correlationId,
       next: "tally_creation",
-      message: "Credit Note creation was queued for Tally. WhatsApp will be queued automatically after Tally verification.",
+      message: "Credit Note creation was queued for Tally. Once it is confirmed, send the customer a WhatsApp from Credit Notes.",
     }, { status: 202 });
   } catch (error) {
     if (error instanceof MeenakshiAccessError || error instanceof RulebookRequestError) return jsonWithCors(request, { error: error.message }, { status: error.status });
     console.error("Could not review proposal:", error);
-    return jsonWithCors(request, { error: error instanceof Error ? error.message : "Could not review proposal." }, { status: 500 });
+    const message = error instanceof Error
+      ? error.message
+      : error && typeof error === "object" && "message" in error && typeof error.message === "string"
+        ? error.message
+        : "Could not review proposal.";
+    return jsonWithCors(request, { error: message }, { status: 500 });
   }
 }

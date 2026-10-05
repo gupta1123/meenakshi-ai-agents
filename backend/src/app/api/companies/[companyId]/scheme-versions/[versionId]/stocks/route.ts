@@ -6,15 +6,17 @@ type RouteContext = { params: Promise<{ companyId: string; versionId: string }> 
 
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
 
-function requireTod(versionType: string) {
-  if (versionType !== "tod") throw new RulebookRequestError("Stock eligibility is available only for TOD rule versions.", 409);
+// TOD rules and per-MT Cash Discount rules both need eligible products.
+function requireTod(version: { scheme_type: string; cd_discount_basis?: string | null }) {
+  if (version.scheme_type === "tod" || (version.scheme_type === "cd" && version.cd_discount_basis === "amount_per_tonne")) return;
+  throw new RulebookRequestError("Stock eligibility is available only for TOD and per-MT Cash Discount rule versions.", 409);
 }
 
 export async function GET(request: Request, context: RouteContext) {
   try {
     const { companyId, versionId } = await context.params;
     const { version } = await requireRulebookVersionForCompany(request, companyId, versionId);
-    requireTod(version.scheme_type);
+    requireTod(version);
     const [items, groups, coverage] = await Promise.all([
       createSupabaseAdminClient().from("scheme_version_stock_items").select("stock_item_id").eq("scheme_version_id", version.id),
       createSupabaseAdminClient().from("scheme_version_stock_groups").select("stock_group_id").eq("scheme_version_id", version.id),
@@ -31,7 +33,7 @@ export async function POST(request: Request, context: RouteContext) {
   try {
     const { companyId, versionId } = await context.params;
     const { scope, version } = await requireRulebookVersionForCompany(request, companyId, versionId);
-    requireTod(version.scheme_type);
+    requireTod(version);
     requireDraftVersion(version);
     await requireCurrentMasterSync(scope.company.id);
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
@@ -55,7 +57,7 @@ export async function DELETE(request: Request, context: RouteContext) {
   try {
     const { companyId, versionId } = await context.params;
     const { scope, version } = await requireRulebookVersionForCompany(request, companyId, versionId);
-    requireTod(version.scheme_type);
+    requireTod(version);
     requireDraftVersion(version);
     const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
     const kind = body.kind;

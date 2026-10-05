@@ -27,13 +27,25 @@ function safeProviderResponse(value) {
   return value;
 }
 
-function documentUrlFromPayload(payload) {
-  const path = typeof payload?.documentStoragePath === "string" ? payload.documentStoragePath.trim() : "";
-  if (!path) return null;
-  if (/^https:\/\//i.test(path)) return path;
-  const base = String(process.env.MEENAKSHI_CREDIT_NOTE_DOCUMENT_URL_BASE ?? "").trim().replace(/\/+$/, "");
-  if (!base || path.includes("..")) return null;
-  return `${base}/${path.split("/").map(encodeURIComponent).join("/")}`;
+async function verifiedDocumentUrl(message) {
+  if (message.cash_discount_debit_note_posting_id) {
+    const { prepareDebitNoteDocument, signedNoteDocumentUrl } = await import("../src/lib/notes/verified-note-document.mjs");
+    const document = await prepareDebitNoteDocument(supabase, message.company_id, message.cash_discount_debit_note_posting_id);
+    return signedNoteDocumentUrl(supabase, document.path, 60 * 60);
+  }
+  if (!message.credit_note_posting_id) return null;
+  const { data: document, error } = await supabase.from("credit_note_documents")
+    .select("status,storage_path").eq("company_id", message.company_id)
+    .eq("credit_note_posting_id", message.credit_note_posting_id).maybeSingle();
+  if (error) throw error;
+  if (document?.status !== "verified" || !document.storage_path) return null;
+  const { CREDIT_NOTE_DOCUMENTS_BUCKET, hasSafeCreditNoteDocumentPath } = await import("../src/lib/credit-note-documents.ts");
+  if (!hasSafeCreditNoteDocumentPath(document.storage_path)) return null;
+  if (/^https:\/\//i.test(document.storage_path)) return document.storage_path;
+  const { data: signed, error: signedError } = await supabase.storage.from(CREDIT_NOTE_DOCUMENTS_BUCKET)
+    .createSignedUrl(document.storage_path, 60 * 60);
+  if (signedError) throw signedError;
+  return signed?.signedUrl ?? null;
 }
 
 async function organizationId(companyId) {
@@ -110,10 +122,14 @@ async function processOne(message) {
   try {
     attemptId = await insertAttempt(message);
     const { sendMsg91Notification } = await import("../src/lib/notifications/msg91-client.ts");
-    const documentUrl = documentUrlFromPayload(message.payload);
+    const { liveProviderTemplateProblem } = await import("../src/lib/notifications/provider-template.ts");
+    const { TemplateConfigurationError } = await import("../src/lib/notifications/template-renderer.ts");
+    const documentUrl = await verifiedDocumentUrl(message);
+    const templateProblem = await liveProviderTemplateProblem(message.template_snapshot ?? {}, Boolean(documentUrl));
+    if (templateProblem) throw new TemplateConfigurationError(templateProblem);
     const result = await sendMsg91Notification({
       eventType: message.event_type, recipientPhoneE164: message.recipient_phone_e164,
-      payload: { ...(message.payload ?? {}), ...(documentUrl ? { documentUrl, documentName: `${message.payload?.creditNoteNumber ?? "credit-note"}.pdf` } : {}) },
+      payload: { ...(message.payload ?? {}), ...(documentUrl ? { documentUrl, documentName: message.event_type === "cd_debit_note_created" ? `Debit-Note-${message.payload?.debitNoteNumber ?? "verified"}.pdf` : `Credit-Note-${message.payload?.creditNoteNumber ?? "verified"}.pdf` } : {}) },
       template: message.template_snapshot ?? {},
     });
     await markSent(message, attemptId, result);

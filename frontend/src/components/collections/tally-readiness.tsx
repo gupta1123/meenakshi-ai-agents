@@ -1,28 +1,21 @@
 "use client";
 
-import { Building2, Cable, CheckCircle2, CircleAlert, RefreshCw, ServerCog, ShieldCheck, Unplug, Wifi } from "lucide-react";
+import { Building2, Cable, CheckCircle2, ChevronDown, CircleAlert, LoaderCircle, Monitor, PlugZap, RefreshCw, ServerCog, ShieldCheck, Unplug } from "lucide-react";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiBaseUrl, apiRequest, jsonBody } from "@/lib/api";
+import { detectLocalTallyConnector } from "@/lib/local-tally";
 import { supabase } from "@/lib/supabase";
 import { userFacingDetail, userFacingError } from "@/lib/user-copy";
 
 import { useCompany } from "./company-context";
 import { WorkspacePageHeader } from "./app-shell";
 import type { TallyHealth } from "./types";
-import { Button, Card, InlineMessage, Skeleton, StatusBadge, formatDate } from "./ui";
+import { Button, InlineMessage, Skeleton } from "./ui";
+import s from "./tally-connection.module.css";
 
-type Connector = { id: string; displayName: string; status: string };
-type SetupCredential = { connector: { id: string; installationKey: string }; controlToken: string; tallyUrl: string };
-type SyncRun = {
-  id: string;
-  sync_kind: "masters" | "vouchers";
-  status: string;
-  records_applied: number | null;
-  records_failed: number | null;
-  error_summary: string | null;
-  started_at: string | null;
-};
+type Connector = { id: string; displayName: string; machineFingerprint: string; status: string };
+type SetupCredential = { connector: Connector & { installationKey: string }; controlToken: string; tallyUrl: string };
 type DetectedTallyCompany = { name: string; guid: string; isActive: boolean };
 type RegisteredCompany = { id: string; code: string; tallyCompanyGuid: string; tallyCompanyName: string };
 type ConnectorCompanySnapshot = {
@@ -44,10 +37,10 @@ type ConnectorCompanySnapshot = {
   activeCompany: DetectedTallyCompany | null;
 };
 type TallyTargetMode = "same_machine" | "lan_server";
+type Tone = "ready" | "working" | "attention" | "idle";
+type StepState = "done" | "current" | "problem" | "todo";
 
 const sameMachineTallyUrl = "http://localhost:9000";
-const requestKey = () => globalThis.crypto?.randomUUID?.() ?? `meenakshi-${Date.now()}`;
-const inProgress = (status: string) => status === "queued" || status === "running";
 
 function suggestedCompanyCode(name: string) {
   const value = name.toUpperCase().replace(/[^A-Z0-9]+/g, "_").replace(/^_+|_+$/g, "");
@@ -82,11 +75,17 @@ function normalizeTallyUrl(value: string) {
   return url.toString().replace(/\/$/, "");
 }
 
-function syncProgressCopy(run: SyncRun) {
-  if (run.status === "queued") return "Preparing your Tally data update.";
-  if (run.status === "running") return "Meenakshi is updating the selected Tally information.";
-  if (run.status === "completed") return "Tally data is up to date.";
-  return userFacingDetail(run.error_summary, "The update could not finish. Keep Tally Prime open and try again.");
+function sinceLabel(value: string | null | undefined) {
+  if (!value) return "Never";
+  const time = new Date(value).getTime();
+  if (Number.isNaN(time)) return "Unknown";
+  const minutes = Math.round((Date.now() - time) / 60_000);
+  if (minutes < 1) return "Just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
 }
 
 async function token() {
@@ -94,8 +93,16 @@ async function token() {
   return response.data.session?.access_token ?? null;
 }
 
+// A Tally sync counts as current for 30 days (same as the backend). Judged
+// from its completion date, not the health check's own shorter "stale" flag.
+export const TALLY_SYNC_CURRENT_DAYS = 30;
+export function syncIsCurrent(entry: { status?: string; completedAt?: string | null } | null | undefined) {
+  if (!entry?.completedAt || !["current", "stale", "completed"].includes(entry.status ?? "")) return false;
+  return Date.now() - new Date(entry.completedAt).getTime() <= TALLY_SYNC_CURRENT_DAYS * 24 * 60 * 60 * 1_000;
+}
+
 export function workspaceIsReady(health: TallyHealth | null) {
-  return Boolean(health?.ready && health.sync?.masters.status === "current" && health.sync?.vouchers.status === "current");
+  return Boolean(health?.ready && syncIsCurrent(health.sync?.masters) && syncIsCurrent(health.sync?.vouchers));
 }
 
 export function workspaceCanCalculateLive(health: TallyHealth | null) {
@@ -143,78 +150,72 @@ export function useTallyHealth(options: { enabled?: boolean } = {}) {
   return { health, error, loading, reload: load };
 }
 
-function ConnectionPipelineStepper({ targetMode, bridgeConnected, tallyReachable, companyLoaded }: { targetMode: TallyTargetMode; bridgeConnected: boolean; tallyReachable: boolean; companyLoaded: boolean }) {
-  const step1Complete = true;
-  const step2Complete = bridgeConnected && tallyReachable;
-  const step3Complete = companyLoaded;
+const PAGE_HEADER = <WorkspacePageHeader eyebrow="Tally connection" title="Tally Prime" detail="Meenakshi reads your customers, products and sales from Tally Prime." />;
 
-  return (
-    <div className="tally-pipeline-stepper" aria-label="Connection Progress">
-      <div className={`pipeline-step ${step1Complete ? "is-complete" : "is-active"}`}>
-        <div className="step-node"><Wifi size={14} /></div>
-        <div className="step-label">
-          <span>STEP 1</span>
-          <strong>{targetMode === "same_machine" ? "Same Machine" : "LAN Host"}</strong>
+function TallyReadinessSkeleton() {
+  return <div className="workspace-content">
+    {PAGE_HEADER}
+    <div className={s.page}>
+      <section className={s.hero} data-tone="idle">
+        <div className={s.heroMain}>
+          <Skeleton lines={1} style={{ width: 52, height: 52, borderRadius: 16 }} />
+          <div className={s.heroCopy}>
+            <Skeleton lines={1} style={{ width: 220, height: 20, marginBottom: 8 }} />
+            <Skeleton lines={1} style={{ width: 320, maxWidth: "100%", height: 12 }} />
+          </div>
         </div>
-      </div>
-      <div className={`pipeline-connector ${step2Complete ? "is-complete" : ""}`} />
-      <div className={`pipeline-step ${step2Complete ? "is-complete" : bridgeConnected ? "is-active" : ""}`}>
-        <div className="step-node"><Cable size={14} /></div>
-        <div className="step-label">
-          <span>STEP 2</span>
-          <strong>Connector Agent</strong>
-        </div>
-      </div>
-      <div className={`pipeline-connector ${step3Complete ? "is-complete" : ""}`} />
-      <div className={`pipeline-step ${step3Complete ? "is-complete" : step2Complete ? "is-active" : ""}`}>
-        <div className="step-node"><Building2 size={14} /></div>
-        <div className="step-label">
-          <span>STEP 3</span>
-          <strong>Tally Company</strong>
-        </div>
-      </div>
+        <div className={s.steps}>{[0, 1, 2].map((item) => <Skeleton key={item} lines={1} style={{ width: "100%", height: 44, borderRadius: 12 }} />)}</div>
+      </section>
     </div>
-  );
+  </div>;
 }
 
-function ConnectionStatusCard({ icon, label, value, detail, ready, attention = false }: { icon: ReactNode; label: string; value: string; detail: string; ready: boolean; attention?: boolean }) {
-  return (
-    <article className={`tally-status-card ${ready ? "is-ready" : attention ? "is-attention" : ""}`}>
-      <div className="tally-status-card-header">
-        <div className="tally-status-card-icon">{icon}</div>
-        <span className={`status-indicator-dot ${ready ? "ready" : attention ? "attention" : "offline"}`} />
-      </div>
-      <div>
-        <p className="status-node-label">{label}</p>
-        <strong className="status-node-value">{value}</strong>
-        <span className="status-node-detail">{detail}</span>
-      </div>
-    </article>
-  );
+function StepIcon({ state }: { state: StepState }) {
+  if (state === "done") return <CheckCircle2 size={18} />;
+  if (state === "problem") return <CircleAlert size={18} />;
+  if (state === "current") return <LoaderCircle size={18} className={s.spin} />;
+  return <span className={s.stepDot} />;
+}
+
+function Step({ state, label, detail }: { state: StepState; label: string; detail: string }) {
+  return <li className={s.step} data-state={state}>
+    <span className={s.stepIcon} aria-hidden="true"><StepIcon state={state} /></span>
+    <span className={s.stepCopy}><strong>{label}</strong><small>{detail}</small></span>
+    <span className="sr-only">{state === "done" ? "Done" : state === "problem" ? "Needs attention" : state === "current" ? "In progress" : "Not started"}</span>
+  </li>;
 }
 
 export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: TallyHealth | null; onRefresh?: () => Promise<void> }) {
   const { company, organization, companyKey, isAdministrator, availableCompanies } = useCompany();
   const health = initialHealth ?? null;
   const [connectors, setConnectors] = useState<Connector[]>([]);
+  const [selectedConnectorId, setSelectedConnectorId] = useState<string | null>(null);
+  const [localConnectorId, setLocalConnectorId] = useState<string | null>(null);
+  const [manualConnectorSelection, setManualConnectorSelection] = useState(false);
   const [connectorSnapshot, setConnectorSnapshot] = useState<ConnectorCompanySnapshot | null>(null);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
-  const [syncRun, setSyncRun] = useState<SyncRun | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+ const [notice, setNotice] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [launching, setLaunching] = useState(false);
+  const [addingComputer, setAddingComputer] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const [rechecking, setRechecking] = useState(false);
   const [targetMode, setTargetMode] = useState<TallyTargetMode>("same_machine");
   const [tallyUrlInput, setTallyUrlInput] = useState(sameMachineTallyUrl);
   const [companyCodeInput, setCompanyCodeInput] = useState("");
   const [registeringCompany, setRegisteringCompany] = useState(false);
+  const [assigningCompany, setAssigningCompany] = useState(false);
   const refreshInFlight = useRef(false);
 
   const selectedConnector = useMemo(
-    () => connectors.find((item) => item.id === health?.connector?.id) ?? connectors[0] ?? null,
-    [connectors, health?.connector?.id]
+    () => connectors.find((item) => item.id === selectedConnectorId)
+      ?? connectors.find((item) => item.id === health?.connector?.id)
+      ?? (connectors.length === 1 ? connectors[0] : null)
+      ?? null,
+    [connectors, health?.connector?.id, selectedConnectorId]
   );
-  const connectorId = health?.connector?.id ?? selectedConnector?.id ?? null;
+  const connectorId = selectedConnector?.id ?? null;
   const snapshotConnector = connectorSnapshot?.connector ?? null;
   const tallyCompanies = connectorSnapshot?.companies ?? [];
   const activeTallyCompany = connectorSnapshot?.activeCompany ?? tallyCompanies.find((item) => item.isActive) ?? null;
@@ -223,15 +224,19 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
   // detected company on the user's behalf.
   const selectedTallyCompany = activeTallyCompany;
   const selectedCompanyAlreadyRegistered = Boolean(selectedTallyCompany && availableCompanies.some((item) => item.company.tally_company_guid.toLowerCase() === selectedTallyCompany.guid.toLowerCase()));
+  const selectedConnectorCanTakeCompany = Boolean(
+    connectorId
+    && connectorId !== health?.connector?.id
+    && selectedTallyCompany?.guid.toLowerCase() === company.tally_company_guid.toLowerCase()
+  );
+  const selectedConnectorHasClaimedMachine = Boolean(selectedConnector && !selectedConnector.machineFingerprint.startsWith("pending:"));
   const bridgeConnected = Boolean(snapshotConnector?.bridgeConnected);
   const tallyReachable = Boolean(snapshotConnector?.tallyReachable);
   const companyLoaded = Boolean(snapshotConnector?.companyLoaded && activeTallyCompany);
   const connectorVerified = Boolean(bridgeConnected && tallyReachable && companyLoaded && health?.ready);
-  const workspaceReady = connectorVerified && workspaceIsReady(health);
-  const needsDataSync = health?.sync?.masters.status !== "current" || health?.sync?.vouchers.status !== "current";
-  const hasMismatch = health?.status === "company_mismatch";
-  const connectionStatus = connectorVerified ? "current" : snapshotConnector?.heartbeatStale ? "bridge_stale" : snapshotConnector?.status ?? health?.status ?? "not_bound";
-  const resolvedTallyUrl = targetMode === "same_machine" ? sameMachineTallyUrl : tallyUrlInput;
+ const hasMismatch = health?.status === "company_mismatch";
+  const heartbeatStale = Boolean(snapshotConnector?.heartbeatStale);
+ const resolvedTallyUrl = targetMode === "same_machine" ? sameMachineTallyUrl : tallyUrlInput;
   const feedback = actionError
     ? { tone: "error" as const, message: actionError }
     : snapshotError
@@ -239,6 +244,32 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
       : notice
         ? { tone: "success" as const, message: notice }
         : null;
+
+  useEffect(() => {
+    setSelectedConnectorId(null);
+    setManualConnectorSelection(false);
+    setConfirmDisconnect(false);
+  }, [companyKey]);
+  useEffect(() => {
+    if (!isAdministrator) return;
+    let cancelled = false;
+    const probe = async () => {
+      const id = await detectLocalTallyConnector();
+      if (!cancelled) setLocalConnectorId(id);
+    };
+    void probe();
+    const interval = window.setInterval(() => { if (document.visibilityState === "visible") void probe(); }, 15_000);
+    return () => { cancelled = true; window.clearInterval(interval); };
+  }, [isAdministrator]);
+  useEffect(() => {
+    const boundConnectorId = health?.connector?.id ?? null;
+    setSelectedConnectorId((current) => {
+      if (manualConnectorSelection && current && connectors.some((item) => item.id === current)) return current;
+      if (localConnectorId && connectors.some((item) => item.id === localConnectorId)) return localConnectorId;
+      if (boundConnectorId && connectors.some((item) => item.id === boundConnectorId)) return boundConnectorId;
+      return connectors.length === 1 ? connectors[0].id : null;
+    });
+  }, [connectors, health?.connector?.id, localConnectorId, manualConnectorSelection]);
 
   const loadConnectors = useCallback(async () => {
     if (!isAdministrator) return;
@@ -279,9 +310,14 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
     }
   }, [loadConnectorSnapshot, onRefresh]);
 
+  async function recheck() {
+    setRechecking(true);
+    setActionError(null);
+    try { await refresh(); } finally { setRechecking(false); }
+  }
+
   useEffect(() => {
-    setSyncRun(null);
-    setNotice(null);
+   setNotice(null);
     setActionError(null);
     setTargetMode("same_machine");
     setTallyUrlInput(sameMachineTallyUrl);
@@ -298,8 +334,16 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
     return () => window.clearTimeout(timeout);
   }, [launching]);
   useEffect(() => {
+    if (!addingComputer) return;
+    const timeout = window.setTimeout(() => setAddingComputer(false), 60_000);
+    return () => window.clearTimeout(timeout);
+  }, [addingComputer]);
+  useEffect(() => {
     if (bridgeConnected) setLaunching(false);
   }, [bridgeConnected]);
+  useEffect(() => {
+    if (addingComputer && bridgeConnected) setAddingComputer(false);
+  }, [addingComputer, bridgeConnected]);
   useEffect(() => {
     if (!snapshotConnector?.tallyUrl || bridgeConnected) return;
     setTargetMode(targetModeFor(snapshotConnector.tallyUrl));
@@ -308,51 +352,6 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
   useEffect(() => {
     setCompanyCodeInput(selectedTallyCompany ? suggestedCompanyCode(selectedTallyCompany.name) : "");
   }, [selectedTallyCompany?.guid, selectedTallyCompany?.name]);
-  useEffect(() => {
-    if (!syncRun || !inProgress(syncRun.status)) return;
-    let cancelled = false;
-    const check = async () => {
-      const accessToken = await token();
-      if (!accessToken) return;
-      try {
-        const result = await apiRequest<{ syncRun: SyncRun }>(accessToken, `/api/companies/${company.id}/sync/runs/${syncRun.id}`);
-        if (cancelled) return;
-        setSyncRun(result.syncRun);
-        if (result.syncRun.status === "completed") {
-          setNotice("Tally data is up to date.");
-          await refresh();
-        }
-      } catch {
-        setActionError("Could not check the update progress. Refresh to try again.");
-      }
-    };
-    void check();
-    const interval = window.setInterval(() => { void check(); }, 4_000);
-    return () => { cancelled = true; window.clearInterval(interval); };
-  }, [company.id, refresh, syncRun]);
-
-  const connectionTitle = launching
-    ? "Checking the Tally connection"
-    : connectorVerified
-      ? "Tally Prime connected"
-      : hasMismatch
-        ? "Open the expected Tally company"
-        : bridgeConnected && !tallyReachable
-          ? "Tally Prime is not reachable"
-          : bridgeConnected && !companyLoaded
-            ? "Waiting for an active Tally company"
-            : "Connect Tally Prime";
-  const connectionDescription = launching
-    ? "Meenakshi will confirm the connection after it reaches Tally and finds the company currently open."
-    : connectorVerified
-      ? "Tally Prime and the company currently open are confirmed. Meenakshi is ready to update your data."
-      : hasMismatch
-        ? `Open ${company.tally_company_name} in Tally Prime, then refresh this page.`
-        : bridgeConnected && !tallyReachable
-          ? "Keep Tally Prime open and make sure it is available from this computer."
-          : bridgeConnected && !companyLoaded
-            ? "Open a company in Tally Prime, then refresh the connection."
-            : "Choose where Tally is running, then open Meenakshi Tally Connector.";
 
   async function connect() {
     const activeConnectorId = connectorId;
@@ -371,7 +370,7 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
         method: "POST",
         body: jsonBody({ tallyUrl }),
       });
-      setNotice("Opening the Meenakshi Tally Connector. Keep Tally Prime open while it checks the active company.");
+      setNotice("Opening Meenakshi Tally Connector. If your browser asks, allow it to open.");
       window.location.assign(bridgeLaunchUrl(credential));
     } catch (cause) {
       setLaunching(false);
@@ -379,42 +378,45 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
     }
   }
 
-  async function syncTallyData(requestedKind?: "masters" | "vouchers") {
+  async function addComputer() {
     const accessToken = await token();
     if (!accessToken) return;
-    const kind = requestedKind ?? (health?.sync?.masters.status === "current" ? "vouchers" : "masters");
-    const body = kind === "vouchers" ? jsonBody({ dateFrom: new Date(Date.now() - 90 * 86_400_000).toISOString().slice(0, 10), dateTo: new Date().toISOString().slice(0, 10) }) : undefined;
+    setAddingComputer(true);
     setActionError(null);
     setNotice(null);
     try {
-      const result = await apiRequest<{ syncRun: SyncRun }>(accessToken, `/api/companies/${company.id}/sync/${kind}`, {
+      const displayName = `Tally computer ${connectors.length + 1}`;
+      const credential = await apiRequest<SetupCredential>(accessToken, "/api/connectors", {
         method: "POST",
-        headers: { "Idempotency-Key": requestKey() },
-        body,
+        body: jsonBody({ organizationId: organization.id, displayName }),
       });
-      setSyncRun(result.syncRun);
-      setNotice(kind === "masters" ? "Updating company lists and settings from Tally." : "Updating recent sales records from Tally.");
+      setConnectors((current) => [credential.connector, ...current.filter((item) => item.id !== credential.connector.id)]);
+      setSelectedConnectorId(credential.connector.id);
+      setConnectorSnapshot(null);
+      setNotice("Opening Meenakshi Tally Connector on this computer. If your browser asks, allow it to open.");
+      window.location.assign(bridgeLaunchUrl(credential));
     } catch (cause) {
-      setActionError(userFacingError(cause, "Could not start the Tally data update."));
+      setActionError(userFacingError(cause, "Could not add the Tally computer."));
+      setAddingComputer(false);
     }
   }
 
   async function registerSelectedTallyCompany() {
     if (!connectorId || !selectedTallyCompany) {
-      setActionError("Select an active Tally company first.");
+      setActionError("Open a company in Tally Prime first.");
       return;
     }
     if (!selectedTallyCompany.isActive) {
-      setActionError(`Open ${selectedTallyCompany.name} in Tally Prime before registering it.`);
+      setActionError(`Open ${selectedTallyCompany.name} in Tally Prime before adding it.`);
       return;
     }
     if (selectedCompanyAlreadyRegistered) {
-      setNotice("This Tally company is already registered. Refresh the workspace to select it.");
+      setNotice("This Tally company is already added. Refresh the page to switch to it.");
       return;
     }
     const code = companyCodeInput.trim().toUpperCase();
     if (!/^[A-Z][A-Z0-9_-]{1,79}$/.test(code)) {
-      setActionError("Enter a company code of at least two letters or numbers, starting with a letter.");
+      setActionError("Enter a short code of at least two letters or numbers, starting with a letter.");
       return;
     }
     const accessToken = await token();
@@ -436,12 +438,33 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
         method: "POST",
         body: jsonBody({ companyId: result.company.id }),
       });
-      setNotice(`${selectedTallyCompany.name} is registered and will open automatically because it is active in Tally Prime.`);
+      setNotice(`${selectedTallyCompany.name} is added. Opening it now…`);
       window.setTimeout(() => window.location.reload(), 750);
     } catch (cause) {
-      setActionError(userFacingError(cause, "Could not register and bind this Tally company."));
+      setActionError(userFacingError(cause, "Could not add this Tally company."));
     } finally {
       setRegisteringCompany(false);
+    }
+  }
+
+  async function assignCompanyToSelectedComputer() {
+    if (!connectorId || !selectedConnectorCanTakeCompany) return;
+    const accessToken = await token();
+    if (!accessToken) return;
+    setAssigningCompany(true);
+    setActionError(null);
+    setNotice(null);
+    try {
+      await apiRequest(accessToken, `/api/connectors/${connectorId}/bindings`, {
+        method: "POST",
+        body: jsonBody({ companyId: company.id }),
+      });
+      setNotice(`${company.tally_company_name} now uses ${selectedConnector?.displayName ?? "this computer"}.`);
+      window.setTimeout(() => window.location.reload(), 750);
+    } catch (cause) {
+      setActionError(userFacingError(cause, "Could not switch the company to this computer."));
+    } finally {
+      setAssigningCompany(false);
     }
   }
 
@@ -455,6 +478,7 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
     try {
       await apiRequest(accessToken, `/api/connectors/${connectorId}/disconnect`, { method: "POST" });
       setConnectorSnapshot(null);
+      setConfirmDisconnect(false);
       setNotice("Tally has been disconnected from Meenakshi.");
       await Promise.all([loadConnectors(), onRefresh?.()]);
     } catch (cause) {
@@ -464,255 +488,150 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
     }
   }
 
-function TallyReadinessSkeleton() {
-  return (
-    <div className="workspace-content">
-      <WorkspacePageHeader
-        eyebrow="Tally connection"
-        title="Connect Tally Prime"
-        detail="Check that Tally is connected and see the company currently open."
-      />
-      <div className="tally-connection-workspace">
-        <Card className="tally-unified-card">
-          <div className="tally-card-header-bar">
-            <div className="header-info">
-              <Skeleton lines={1} style={{ width: 36, height: 36, borderRadius: 10 }} />
-              <div>
-                <Skeleton lines={1} style={{ width: 160, height: 16, marginBottom: 6 }} />
-                <Skeleton lines={1} style={{ width: 240, height: 11 }} />
-              </div>
-            </div>
-            <Skeleton lines={1} style={{ width: 85, height: 22, borderRadius: 99 }} />
-          </div>
-
-          <div className="tally-location-segmented">
-            <Skeleton lines={1} style={{ width: 60, height: 12 }} />
-            <div style={{ display: "flex", gap: 6 }}>
-              <Skeleton lines={1} style={{ width: 140, height: 28, borderRadius: 7 }} />
-              <Skeleton lines={1} style={{ width: 100, height: 28, borderRadius: 7 }} />
-            </div>
-          </div>
-
-          <div className="tally-status-grid">
-            <div className="tally-status-card">
-              <Skeleton lines={1} style={{ width: 32, height: 32, borderRadius: 8, marginBottom: 8 }} />
-              <Skeleton lines={1} style={{ width: 100, height: 14, marginBottom: 4 }} />
-              <Skeleton lines={1} style={{ width: 130, height: 11 }} />
-            </div>
-            <div className="tally-status-card">
-              <Skeleton lines={1} style={{ width: 32, height: 32, borderRadius: 8, marginBottom: 8 }} />
-              <Skeleton lines={1} style={{ width: 100, height: 14, marginBottom: 4 }} />
-              <Skeleton lines={1} style={{ width: 130, height: 11 }} />
-            </div>
-            <div className="tally-status-card">
-              <Skeleton lines={1} style={{ width: 32, height: 32, borderRadius: 8, marginBottom: 8 }} />
-              <Skeleton lines={1} style={{ width: 100, height: 14, marginBottom: 4 }} />
-              <Skeleton lines={1} style={{ width: 130, height: 11 }} />
-            </div>
-          </div>
-
-          <div className="tally-connection-actions">
-            <Skeleton lines={1} style={{ width: 120, height: 36, borderRadius: 8 }} />
-            <Skeleton lines={1} style={{ width: 100, height: 36, borderRadius: 8 }} />
-          </div>
-        </Card>
-      </div>
-    </div>
-  );
-}
-
   if (!health) return <TallyReadinessSkeleton />;
 
+  // One headline, one sentence, one next action.
+  const waitingForConnector = launching || addingComputer;
+  const useNewComputer = !connectorId || selectedConnectorHasClaimedMachine;
+  const connectLabel = useNewComputer ? "Connect this computer" : "Connect Tally";
+  const recheckButton = (primary = false) => <Button type="button" className={primary ? "" : "button-secondary"} disabled={rechecking} onClick={() => void recheck()}><RefreshCw size={15} className={rechecking ? s.spin : undefined} />{rechecking ? "Checking…" : "Check again"}</Button>;
+
+  let tone: Tone;
+  let title: string;
+  let description: string;
+  let primary: ReactNode = null;
+  let primaryIsRecheck = false;
+  if (waitingForConnector) {
+    tone = "working";
+    title = "Waiting for the connector";
+    description = "Meenakshi Tally Connector is opening. Keep Tally Prime open — this page updates on its own once it connects.";
+  } else if (connectorVerified) {
+    tone = "ready";
+    title = "Connected";
+    description = `${company.tally_company_name} is connected to Meenakshi.`;
+  } else if (bridgeConnected && tallyReachable && selectedConnectorCanTakeCompany) {
+    tone = "attention";
+    title = "Use this computer for this company?";
+    description = `${company.tally_company_name} is open here, but it is saved to another computer. Switch it to this one to continue.`;
+    primary = isAdministrator ? <Button type="button" disabled={assigningCompany} onClick={() => void assignCompanyToSelectedComputer()}><Monitor size={15} />{assigningCompany ? "Switching…" : "Use this computer"}</Button> : null;
+  } else if (hasMismatch) {
+    tone = "attention";
+    title = `Open ${company.tally_company_name} in Tally`;
+    description = `A different company is open in Tally Prime. Open ${company.tally_company_name}, then check again.`;
+    primary = recheckButton(true); primaryIsRecheck = true;
+  } else if (bridgeConnected && !tallyReachable) {
+    tone = "attention";
+    title = "Tally Prime isn't responding";
+    description = "Open Tally Prime on the computer running it, then check again.";
+    primary = recheckButton(true); primaryIsRecheck = true;
+  } else if (bridgeConnected && !companyLoaded) {
+    tone = "attention";
+    title = "Open a company in Tally Prime";
+    description = `Open ${company.tally_company_name} in Tally Prime, then check again.`;
+    primary = recheckButton(true); primaryIsRecheck = true;
+  } else if (heartbeatStale) {
+    tone = "attention";
+    title = "The connector stopped responding";
+    description = "Make sure the computer running Tally is on and Meenakshi Tally Connector is open.";
+    primary = isAdministrator ? <Button type="button" onClick={() => void (useNewComputer ? addComputer() : connect())}><PlugZap size={15} />Reconnect</Button> : recheckButton(true);
+  } else {
+    tone = "idle";
+    title = "Connect Tally Prime";
+    description = isAdministrator ? "Follow the three steps below. It takes about a minute." : "An Administrator needs to connect Tally Prime from this page.";
+    primary = isAdministrator ? <Button type="button" onClick={() => void (useNewComputer ? addComputer() : connect())}><PlugZap size={15} />{connectLabel}</Button> : null;
+  }
+
+  const stepConnector: StepState = bridgeConnected ? "done" : heartbeatStale ? "problem" : waitingForConnector ? "current" : "todo";
+  const stepTally: StepState = tallyReachable ? "done" : bridgeConnected ? "problem" : "todo";
+  const stepCompany: StepState = companyLoaded && health.ready ? "done" : hasMismatch || (tallyReachable && !companyLoaded) ? "problem" : "todo";
+  const heroIcon = tone === "ready" ? <CheckCircle2 size={26} /> : tone === "working" ? <LoaderCircle size={26} className={s.spin} /> : tone === "attention" ? <CircleAlert size={26} /> : <Cable size={24} />;
+  const unregisteredActive = isAdministrator && bridgeConnected && tallyReachable && selectedTallyCompany?.isActive && !selectedCompanyAlreadyRegistered;
+  const lastError = !connectorVerified && snapshotConnector?.lastError ? userFacingDetail(snapshotConnector.lastError, "The Tally connection needs attention. Check again to retry.") : null;
+
   return (
     <div className="workspace-content">
-      <WorkspacePageHeader
-        eyebrow="Tally connection"
-        title="Connect Tally Prime"
-        detail="Check that Tally is connected and see the company currently open."
-      />
-      <div className="tally-connection-workspace">
+      {PAGE_HEADER}
+      <div className={s.page}>
         {feedback && <InlineMessage tone={feedback.tone}>{feedback.message}</InlineMessage>}
 
-        <Card className={`tally-unified-card ${connectorVerified ? "is-ready" : ""}`}>
-          <div className="tally-card-header-bar">
-            <div className="header-info">
-              <div className="header-icon">
-                <Cable size={18} />
-              </div>
-              <div>
-                <h2>{connectionTitle}</h2>
-                <p>{connectionDescription}</p>
-              </div>
+        <section className={s.hero} data-tone={tone} aria-live="polite">
+          <div className={s.heroMain}>
+            <span className={s.heroIcon}>{heroIcon}</span>
+            <div className={s.heroCopy}>
+              <h2>{title}</h2>
+              <p>{description}</p>
+              {lastError && <p className={s.heroError}><CircleAlert size={14} />{lastError}</p>}
             </div>
-            <StatusBadge status={connectionStatus} />
+            <div className={s.heroActions}>
+              {primary}
+              {(tone === "ready" || (primary && !primaryIsRecheck)) && <button type="button" className={s.textAction} disabled={rechecking} onClick={() => void recheck()}>{rechecking ? "Checking…" : "Check again"}</button>}
+              {!primary && tone !== "ready" && recheckButton()}
+            </div>
           </div>
+          {tone !== "ready" && <ol className={s.steps} aria-label="Connection progress">
+            <Step state={stepConnector} label="Connector" detail={bridgeConnected ? "Running" : waitingForConnector ? "Opening…" : heartbeatStale ? "Not responding" : "Not connected"} />
+            <Step state={stepTally} label="Tally Prime" detail={tallyReachable ? "Responding" : bridgeConnected ? "Not responding" : "Waiting"} />
+            <Step state={stepCompany} label="Company" detail={companyLoaded && activeTallyCompany ? activeTallyCompany.name : hasMismatch ? "Different company open" : "Not open"} />
+          </ol>}
+        </section>
 
-          {isAdministrator && !bridgeConnected && (
-            <div className="tally-location-segmented">
-              <span className="segmented-label">Tally runs on:</span>
-              <div className="segmented-buttons">
-                <button
-                  type="button"
-                  className={targetMode === "same_machine" ? "active" : ""}
-                  onClick={() => {
-                    setTargetMode("same_machine");
-                    setTallyUrlInput(sameMachineTallyUrl);
-                  }}
-                >
-                  <Wifi size={13} /> This computer
-                </button>
-                <button
-                  type="button"
-                  className={targetMode === "lan_server" ? "active" : ""}
-                  onClick={() => setTargetMode("lan_server")}
-                >
-                  <ServerCog size={13} /> Another computer
-                </button>
+        {isAdministrator && !bridgeConnected && !waitingForConnector && <section className={s.card}>
+          <header className={s.cardHeader}><h3>Before you connect</h3></header>
+          <ol className={s.guide}>
+            <li><span>1</span><div><strong>Open Tally Prime</strong><p>Open <b>{company.tally_company_name}</b> and leave Tally running.</p></div></li>
+            <li><span>2</span><div>
+              <strong>Where is Tally running?</strong>
+              <div className={s.choice} role="radiogroup" aria-label="Where Tally runs">
+                <button type="button" role="radio" aria-checked={targetMode === "same_machine"} onClick={() => { setTargetMode("same_machine"); setTallyUrlInput(sameMachineTallyUrl); }}><Monitor size={16} /><span><b>This computer</b><small>Most common</small></span></button>
+                <button type="button" role="radio" aria-checked={targetMode === "lan_server"} onClick={() => setTargetMode("lan_server")}><ServerCog size={16} /><span><b>Another computer</b><small>On your office network</small></span></button>
               </div>
-              {targetMode === "lan_server" && (
-                <input
-                  className="compact-url-input"
-                  value={tallyUrlInput}
-                  onChange={(event) => setTallyUrlInput(event.target.value)}
-                  placeholder="http://192.168.1.20:9000"
-                />
-              )}
-            </div>
-          )}
+              {targetMode === "lan_server" && <label className={s.urlField}><span>Tally address</span><input value={tallyUrlInput} onChange={(event) => setTallyUrlInput(event.target.value)} placeholder="http://192.168.1.20:9000" inputMode="url" autoComplete="off" /><small>Usually that computer’s network address followed by :9000.</small></label>}
+            </div></li>
+            <li><span>3</span><div><strong>Click “{connectLabel}”</strong><p>Your browser will ask to open Meenakshi Tally Connector — choose <b>Open</b>.</p></div></li>
+          </ol>
+        </section>}
 
-          <div className="tally-status-grid">
-            <ConnectionStatusCard
-              icon={<Cable size={16} />}
-              label="1. Meenakshi connection"
-              value={bridgeConnected ? "Connected" : launching ? "Pairing..." : "Waiting"}
-              detail={bridgeConnected ? "Recently checked" : "Open Meenakshi Tally Connector"}
-              ready={bridgeConnected}
-              attention={launching || Boolean(snapshotConnector?.heartbeatStale)}
-            />
-            <ConnectionStatusCard
-              icon={<Wifi size={16} />}
-              label="2. Tally Prime"
-              value={tallyReachable ? "Available" : "Not available"}
-              detail={tallyReachable ? "Tally Prime is responding" : "Open Tally Prime, then try again"}
-              ready={tallyReachable}
-              attention={bridgeConnected && !tallyReachable}
-            />
-            <ConnectionStatusCard
-              icon={<Building2 size={16} />}
-              label="3. Active Company"
-              value={companyLoaded ? activeTallyCompany?.name ?? "Loaded" : "Not Detected"}
-              detail={companyLoaded ? "Confirmed in Tally Prime" : "Open a company in Tally Prime"}
-              ready={companyLoaded && Boolean(health?.ready)}
-              attention={bridgeConnected && tallyReachable && !companyLoaded}
-            />
+        {unregisteredActive && selectedTallyCompany && selectedTallyCompany.guid.toLowerCase() !== company.tally_company_guid.toLowerCase() && <section className={s.callout}>
+          <Building2 size={18} />
+          <div>
+            <strong>{selectedTallyCompany.name} is open in Tally but not added to Meenakshi</strong>
+            <p>Add it to manage its discounts separately, or open {company.tally_company_name} in Tally instead.</p>
+            <div className={s.calloutForm}>
+              <label><span>Short code</span><input value={companyCodeInput} onChange={(event) => setCompanyCodeInput(event.target.value.toUpperCase())} maxLength={80} /></label>
+              <Button type="button" disabled={registeringCompany} onClick={() => void registerSelectedTallyCompany()}>{registeringCompany ? "Adding…" : "Add company"}</Button>
+            </div>
           </div>
+        </section>}
 
-          {snapshotConnector?.lastError && (
-            <p className="tally-bridge-error">
-              <CircleAlert size={14} />
-              {userFacingDetail(snapshotConnector.lastError, "The Tally connection needs attention. Refresh to try again.")}
-            </p>
-          )}
+        {isAdministrator && (connectors.length > 0 || tallyCompanies.length > 0) && <details className={s.advanced}>
+          <summary><span>Advanced</span><small>Computers, companies in Tally, disconnect</small><ChevronDown size={16} /></summary>
+          <div className={s.advancedBody}>
+            <dl className={s.facts}>
+              <div><dt>Computer</dt><dd>{selectedConnector?.displayName ?? "None"}{connectorId && connectorId === localConnectorId ? <em>This computer</em> : null}</dd></div>
+              <div><dt>Tally address</dt><dd>{snapshotConnector?.tallyUrl ?? resolvedTallyUrl}</dd></div>
+              <div><dt>Last contact</dt><dd>{sinceLabel(snapshotConnector?.lastHeartbeatAt)}</dd></div>
+            </dl>
 
-          <div className="tally-connection-actions">
-            {isAdministrator && !bridgeConnected && (
-              <Button type="button" disabled={launching} onClick={() => void connect()}>
-                <Cable size={15} />
-                {launching ? "Checking..." : "Connect Tally"}
-              </Button>
-            )}
-            {isAdministrator && connectorVerified && needsDataSync && (
-              <Button type="button" disabled={Boolean(syncRun && inProgress(syncRun.status))} onClick={() => void syncTallyData()}>
-                {syncRun && inProgress(syncRun.status) ? "Updating..." : "Update Tally data"}
-              </Button>
-            )}
-            {isAdministrator && connectorVerified && (
-              <Button type="button" className="button-secondary" disabled={Boolean(syncRun && inProgress(syncRun.status))} onClick={() => void syncTallyData("masters")}>
-                {syncRun?.sync_kind === "masters" && inProgress(syncRun.status) ? "Updating masters..." : "Refresh Tally masters"}
-              </Button>
-            )}
-            <Button type="button" className="button-secondary" disabled={disconnecting} onClick={() => void refresh()}>
-              <RefreshCw size={14} />
-              {bridgeConnected ? "Recheck connection" : "Refresh"}
-            </Button>
-            {isAdministrator && bridgeConnected && (
-              <Button type="button" className="button-danger" disabled={disconnecting} onClick={() => void disconnect()}>
-                <Unplug size={15} />
-                {disconnecting ? "Disconnecting..." : "Disconnect"}
-              </Button>
-            )}
+            {connectors.length > 1 && <label className={s.select}><span>Switch computer</span><select value={connectorId ?? ""} onChange={(event) => { setManualConnectorSelection(true); setSelectedConnectorId(event.target.value || null); setConnectorSnapshot(null); setSnapshotError(null); }}>
+              {!connectorId && <option value="">Choose a computer</option>}
+              {connectors.map((connector) => <option key={connector.id} value={connector.id}>{connector.displayName}{connector.id === localConnectorId ? " (this computer)" : ""}</option>)}
+            </select></label>}
+
+            {tallyCompanies.length > 0 && <div className={s.companies}>
+              <span>Companies in Tally Prime</span>
+              <ul>{tallyCompanies.map((item) => <li key={item.guid} data-active={item.isActive}><Building2 size={14} />{item.name}{item.isActive && <em>Open</em>}</li>)}</ul>
+            </div>}
+
+            <div className={s.advancedActions}>
+              <Button type="button" className="button-secondary" disabled={addingComputer} onClick={() => void addComputer()}><ServerCog size={15} />{addingComputer ? "Opening connector…" : "Add another computer"}</Button>
+              {bridgeConnected && (confirmDisconnect
+                ? <span className={s.confirm}><span>Disconnect Tally from Meenakshi?</span><Button type="button" className="button-danger" disabled={disconnecting} onClick={() => void disconnect()}>{disconnecting ? "Disconnecting…" : "Disconnect"}</Button><Button type="button" className="button-quiet" onClick={() => setConfirmDisconnect(false)}>Cancel</Button></span>
+                : <Button type="button" className="button-quiet" onClick={() => setConfirmDisconnect(true)}><Unplug size={15} />Disconnect</Button>)}
+            </div>
           </div>
-          {!isAdministrator && !connectorVerified && (
-            <p className="tally-admin-note">An Administrator can set up the Tally connection from this page.</p>
-          )}
-        </Card>
+        </details>}
 
-        {bridgeConnected && tallyReachable && (
-          <Card className="tally-company-panel">
-            <div className="tally-company-panel-heading">
-              <div>
-                <p className="eyebrow">Detected companies</p>
-                <h2>{tallyCompanies.length} {tallyCompanies.length === 1 ? "company" : "companies"} available in Tally</h2>
-              </div>
-              {activeTallyCompany && <StatusBadge status="current">Active: {activeTallyCompany.name}</StatusBadge>}
-            </div>
-            {tallyCompanies.length > 0 ? (
-              <>
-                <div className="tally-company-grid">
-                  {tallyCompanies.map((tallyCompany) => (
-                    <article
-                      key={tallyCompany.guid}
-                      className={`tally-company-option ${tallyCompany.isActive ? "is-active" : ""}`}
-                    >
-                      <Building2 size={16} />
-                      <span>
-                        <strong>{tallyCompany.name}</strong>
-                        <small>{tallyCompany.isActive ? "Active in Tally Prime" : "Available in Tally Prime"}</small>
-                      </span>
-                      {tallyCompany.isActive && <CheckCircle2 size={16} />}
-                    </article>
-                  ))}
-                </div>
-                {isAdministrator && selectedTallyCompany?.isActive && !selectedCompanyAlreadyRegistered && (
-                  <div className="tally-connection-actions">
-                    <label className="tally-company-code-field">
-                      <span>Separate company code</span>
-                      <input value={companyCodeInput} onChange={(event) => setCompanyCodeInput(event.target.value)} maxLength={80} aria-label="Separate company code" />
-                    </label>
-                    <Button type="button" disabled={registeringCompany} onClick={() => void registerSelectedTallyCompany()}>
-                      <Building2 size={15} />
-                      {registeringCompany ? "Registering..." : "Register as a separate company"}
-                    </Button>
-                  </div>
-                )}
-                {selectedTallyCompany && selectedCompanyAlreadyRegistered && selectedTallyCompany.guid.toLowerCase() !== company.tally_company_guid.toLowerCase() && (
-                  <p className="tally-company-selection-note"><CheckCircle2 size={14} />{selectedTallyCompany.name} is registered. Meenakshi will open it automatically while it remains active in Tally Prime.</p>
-                )}
-              </>
-            ) : (
-              <p className="tally-company-empty">Meenakshi can reach Tally Prime, but no company is currently open.</p>
-            )}
-          </Card>
-        )}
-
-        {syncRun && (
-          <Card className="tally-sync-status">
-            <div>
-              <p className="eyebrow">Updating Tally data</p>
-              <strong>{syncRun.sync_kind === "masters" ? "Company lists and settings" : "Recent sales records"}</strong>
-              <p>{syncProgressCopy(syncRun)}</p>
-            </div>
-            <StatusBadge status={syncRun.status} />
-            <small>
-              Started {formatDate(syncRun.started_at)} · {syncRun.records_applied ?? 0} applied · {syncRun.records_failed ?? 0} failed
-            </small>
-          </Card>
-        )}
-
-        <div className="tally-compact-footer-note">
-          <ShieldCheck size={14} />
-          <span>Meenakshi checks Tally from this computer. Your connection details stay private.</span>
-        </div>
+        <p className={s.footnote}><ShieldCheck size={14} />Meenakshi checks Tally from this computer. Your connection details stay private.</p>
       </div>
     </div>
   );

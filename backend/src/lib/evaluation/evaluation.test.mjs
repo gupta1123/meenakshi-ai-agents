@@ -154,7 +154,7 @@ test("live CD lists every open invoice before the final deadline as a reminder c
     slabs: [{ id: "slab-1", allowedWorkingDays: 7, percentage: "1.5" }],
   }, "2026-08-06", [{
     customerId: "customer-1", customerLedgerName: "Demo customer", sourceSalesLedgerName: "Sales", tallyGuid: "invoice-open", voucherNumber: "CD-OPEN",
-    billReferences: ["CD-OPEN"], voucherDate: "2026-08-05", grossAmount: "1000", eligibleValue: "1000", narration: "",
+    billReferences: ["CD-OPEN"], voucherDate: "2026-08-05", grossAmount: "1000", eligibleValue: "1000", narration: "CD 1.5% within 7 working days",
     inventoryLineCount: 1, payments: [], debitNotes: [],
   }]);
   assert.equal(result.reminders.length, 1);
@@ -172,7 +172,7 @@ test("live CD shows the remaining lower discount window while payment can still 
     slabs: [{ id: "slab-1", allowedWorkingDays: 7, percentage: "1.5" }, { id: "slab-2", allowedWorkingDays: 15, percentage: "1" }],
   }, "2026-08-14", [{
     customerId: "customer-1", customerLedgerName: "Demo customer", sourceSalesLedgerName: "Sales", tallyGuid: "invoice-guid", voucherNumber: "CD-1",
-    billReferences: ["CD-1"], voucherDate: "2026-08-05", grossAmount: "985", eligibleValue: "985", narration: "",
+    billReferences: ["CD-1"], voucherDate: "2026-08-05", grossAmount: "985", eligibleValue: "985", narration: "CD 1.5% within 7 working days",
     inventoryLineCount: 1, payments: [], debitNotes: [],
   }]);
   assert.equal(result.rows[0]?.missedWindowWorkingDays, 7);
@@ -190,7 +190,7 @@ test("live CD derives a one-percent recovery from an already-discounted 99000 bi
   }, "2026-08-25", [{
     customerId: "customer-1", customerLedgerName: "Demo customer", sourceSalesLedgerName: "Sales",
     tallyGuid: "invoice-guid-99000", voucherNumber: "CD-99000", billReferences: ["CD-99000"],
-    voucherDate: "2026-08-05", grossAmount: "99000", eligibleValue: "99000", narration: "",
+    voucherDate: "2026-08-05", grossAmount: "99000", eligibleValue: "99000", narration: "CD 1.5% within 7 working days",
     inventoryLineCount: 0, payments: [], debitNotes: [],
   }]);
   assert.equal(result.rows[0]?.impliedGrossAmount, "100000.0000");
@@ -206,7 +206,7 @@ test("live CD sends an over-recovered invoice to review instead of posting anoth
     slabs: [{ id: "slab-1", allowedWorkingDays: 7, percentage: "1.5" }, { id: "slab-2", allowedWorkingDays: 15, percentage: "1" }],
   }, "2026-08-25", [{
     customerId: "customer-1", customerLedgerName: "Demo customer", sourceSalesLedgerName: "Sales", tallyGuid: "invoice-guid", voucherNumber: "CD-1",
-    billReferences: ["CD-1"], voucherDate: "2026-08-05", grossAmount: "985", eligibleValue: "985", narration: "",
+    billReferences: ["CD-1"], voucherDate: "2026-08-05", grossAmount: "985", eligibleValue: "985", narration: "CD 1.5% within 7 working days",
     inventoryLineCount: 1,
     payments: [{ receiptGuid: "receipt-1", receiptNumber: "R-1", receiptDate: "2026-08-10", billReference: "CD-1", targetVoucherGuid: null, allocationType: "agst_ref", allocatedAmount: "985" }],
     debitNotes: [{ tallyGuid: "dn-1", voucherNumber: "DN-1", voucherDate: "2026-08-20", customerLedgerName: "Demo customer", status: "posted", billReference: "CD-1", targetVoucherGuid: null, amount: "5", narration: "recovery" }],
@@ -226,7 +226,7 @@ test("live CD requires the original Sales ledger before allowing a Debit Note", 
   }, "2026-08-25", [{
     customerId: "customer-1", customerLedgerName: "Demo customer", sourceSalesLedgerName: null,
     tallyGuid: "invoice-guid", voucherNumber: "CD-1", billReferences: ["CD-1"], voucherDate: "2026-08-05",
-    grossAmount: "985", eligibleValue: "985", narration: "", inventoryLineCount: 1, payments: [], debitNotes: [],
+    grossAmount: "985", eligibleValue: "985", narration: "CD 1.5% within 7 working days", inventoryLineCount: 1, payments: [], debitNotes: [],
   }]);
   assert.equal(result.rows[0]?.status, "review_required");
   assert.equal(result.rows[0]?.reasonCode, "source_sales_ledger_unavailable");

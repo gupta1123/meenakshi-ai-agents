@@ -20,6 +20,7 @@ export function canQueueNotification(eventType: NotificationEventType, proposal:
   eligibility_deadline?: string | null;
   achieved_tier_id?: string | null;
 }, posting?: { status?: string | null } | null) {
+  if (eventType === "cd_debit_note_created") return posting?.status === "created_verified";
   if (eventType === "cd_shortfall") {
     // Product decision confirmed on 25 Aug 2026: an open Cash Discount
     // invoice may receive a reminder even before it reaches 80% payment.
@@ -48,6 +49,7 @@ export function messageBlockedReason(eventType: NotificationEventType, proposal:
   if (canQueueNotification(eventType, proposal, posting)) return null;
   if (eventType === "cd_shortfall") return "Cash Discount reminder is blocked because the invoice is not currently open with a positive amount still to settle.";
   if (eventType === "tod_tier_reached") return "Turnover Discount update is blocked because the customer has not currently reached a tier in a valid evaluation.";
+  if (eventType === "cd_debit_note_created") return "Debit Note is not yet verified in Tally. No WhatsApp message can be queued.";
   return "Credit Note is not yet verified in Tally. No WhatsApp message can be queued.";
 }
 
@@ -70,6 +72,7 @@ export function previewValues(payload: NotificationPayload) {
     benefitAmountDisplay: `₹${decimal(payload.benefitAmount)}`,
     shortfallAmountDisplay: `₹${decimal(payload.shortfallAmount)}`,
     creditNoteAmountDisplay: `₹${decimal(payload.creditNoteAmount)}`,
+    debitNoteAmountDisplay: `₹${decimal(payload.debitNoteAmount)}`,
     todTonnesDisplay: payload.todTonnes === null || payload.todTonnes === undefined ? "" : decimal(payload.todTonnes, 3),
     todPeriodDisplay: period,
   } as Record<string, unknown>;

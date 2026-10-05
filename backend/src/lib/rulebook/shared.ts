@@ -34,6 +34,8 @@ export type RulebookVersionRow = {
   period_anchor_date: string | null;
   tod_review_calendar_id: string | null;
   tod_benefit_basis: "percentage_of_eligible_value" | "amount_per_eligible_tonne" | null;
+  /** Cash Discount: "amount_per_tonne" = segments with ₹/MT (docs/CD_LOGIC.md); "percentage_of_bill" = legacy. */
+  cd_discount_basis?: "percentage_of_bill" | "amount_per_tonne" | null;
   created_at: string;
   updated_at: string;
 };
@@ -48,6 +50,7 @@ export type RulebookSchemeRow = {
   status: "draft" | "active" | "paused" | "expired" | "retired";
   created_at: string;
   updated_at: string;
+  scheme_versions?: Array<{ status: string; effective_from: string; effective_to: string | null }>;
 };
 
 export class RulebookRequestError extends Error {
@@ -189,6 +192,37 @@ export function readCashDiscountSlabs(value: unknown) {
   return slabs;
 }
 
+/** Discount rules may cover only Sundry Debtors or one of its customer sub-groups. */
+type CustomerGroupNode = { id: string; name: string; parent_group_id: string | null; is_available: boolean };
+
+/** The company's customer group tree, keyed by id. */
+export async function loadCustomerGroupTree(companyId: string) {
+  const { data, error } = await createSupabaseAdminClient()
+    .from("customer_groups")
+    .select("id, name, parent_group_id, is_available")
+    .eq("company_id", companyId);
+  if (error) throw error;
+  return new Map(((data ?? []) as CustomerGroupNode[]).map((group) => [group.id, group]));
+}
+
+export async function requireSundryDebtorsGroup(companyId: string, customerGroupId: string) {
+  return assertUnderSundryDebtors(await loadCustomerGroupTree(companyId), customerGroupId);
+}
+
+/** Checks one group against an already-loaded group tree. */
+export function assertUnderSundryDebtors(byId: Map<string, CustomerGroupNode>, customerGroupId: string) {
+  const selected = byId.get(customerGroupId);
+  if (!selected || selected.is_available !== true) throw new RulebookRequestError("Customer group is unavailable for this company.", 409);
+  const visited = new Set<string>();
+  let current: typeof selected | undefined = selected;
+  while (current && !visited.has(current.id)) {
+    if (current.name.trim().toLowerCase() === "sundry debtors") return byId;
+    visited.add(current.id);
+    current = current.parent_group_id ? byId.get(current.parent_group_id) : undefined;
+  }
+  throw new RulebookRequestError("Discount rules can include only Sundry Debtors or one of its customer subgroups.", 409);
+}
+
 export async function requireRulebookCompanyAdmin(request: Request, companyId: string): Promise<CompanyScope> {
   if (!isUuid(companyId)) throw new RulebookRequestError("Invalid company id.");
   return requireMeenakshiCompanyAccess(request, companyId, ["administrator"]);
@@ -237,7 +271,7 @@ export async function findRulebookVersion(versionId: string) {
   if (!isUuid(versionId)) throw new RulebookRequestError("Invalid scheme version id.");
   const { data, error } = await createSupabaseAdminClient()
     .from("scheme_versions")
-    .select("id, company_id, scheme_id, scheme_type, version_number, status, effective_from, effective_to, discount_percentage, calculation_base, rounding_method, rounding_scale, gst_treatment, credit_note_voucher_type_id, discount_ledger_id, requires_approval, working_calendar_id, allowed_working_days, near_eligibility_percent, cd_invoice_treatment, cd_narration_mode, cd_check_narration, period_months, period_anchor_date, tod_review_calendar_id, tod_benefit_basis, created_at, updated_at")
+    .select("id, company_id, scheme_id, scheme_type, version_number, status, effective_from, effective_to, discount_percentage, calculation_base, rounding_method, rounding_scale, gst_treatment, credit_note_voucher_type_id, discount_ledger_id, requires_approval, working_calendar_id, allowed_working_days, near_eligibility_percent, cd_invoice_treatment, cd_narration_mode, cd_check_narration, period_months, period_anchor_date, tod_review_calendar_id, tod_benefit_basis, cd_discount_basis, created_at, updated_at")
     .eq("id", versionId)
     .maybeSingle();
   if (error) throw error;
@@ -252,8 +286,8 @@ export async function requireRulebookVersionAdmin(request: Request, versionId: s
 }
 
 export async function requireRulebookVersionForCompany(request: Request, companyId: string, versionId: string) {
-  const scope = await requireRulebookCompanyAdmin(request, companyId);
-  const version = await findRulebookVersion(versionId);
+  // Independent lookups: run them together (one round trip of waiting, not two).
+  const [scope, version] = await Promise.all([requireRulebookCompanyAdmin(request, companyId), findRulebookVersion(versionId)]);
   if (version.company_id !== scope.company.id) throw new RulebookRequestError("Scheme version was not found for this company.", 404);
   return { scope, version };
 }
@@ -265,16 +299,25 @@ export function requireDraftVersion(version: RulebookVersionRow) {
 }
 
 export async function getMasterSyncReadiness(companyId: string) {
-  const { data, error } = await createSupabaseAdminClient()
+  const runs = () => createSupabaseAdminClient()
     .from("tally_sync_runs")
     .select("id, status, completed_at, error_summary, source_fingerprint")
     .eq("company_id", companyId)
-    .eq("sync_kind", "masters")
+    .eq("sync_kind", "masters");
+  // A stopped or failed update changes nothing, so the last successful one
+  // still decides whether the company data is current.
+  const { data: completed, error } = await runs()
+    .eq("status", "completed")
     .order("completed_at", { ascending: false, nullsFirst: false })
-    .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
   if (error) throw error;
+  let data = completed;
+  if (!data) {
+    const latest = await runs().order("created_at", { ascending: false }).limit(1).maybeSingle();
+    if (latest.error) throw latest.error;
+    data = latest.data;
+  }
   const row = data as { id: string; status: string; completed_at: string | null; error_summary: string | null; source_fingerprint: string | null } | null;
   const completedAt = row?.completed_at ?? null;
   const stale = !completedAt || Date.now() - new Date(completedAt).getTime() > TALLY_SYNC_STALE_MS;
@@ -288,11 +331,21 @@ export async function getMasterSyncReadiness(companyId: string) {
   };
 }
 
+// A rule save makes several requests in a row; asking the database each time
+// whether Tally data is current adds up. A "current" answer is reused for 30s
+// (the data goes stale only after hours); any other answer is never cached.
+const CURRENT_SYNC_CACHE_MS = 30_000;
+const currentSyncCache = new Map<string, { expiresAt: number; readiness: Awaited<ReturnType<typeof getMasterSyncReadiness>> }>();
+
 export async function requireCurrentMasterSync(companyId: string) {
+  const cached = currentSyncCache.get(companyId);
+  if (cached && cached.expiresAt > Date.now()) return cached.readiness;
   const readiness = await getMasterSyncReadiness(companyId);
   if (readiness.status !== "current") {
+    currentSyncCache.delete(companyId);
     throw new RulebookRequestError("A current successful Tally master synchronization is required for this action.", 409);
   }
+  currentSyncCache.set(companyId, { expiresAt: Date.now() + CURRENT_SYNC_CACHE_MS, readiness });
   return readiness;
 }
 
@@ -341,6 +394,20 @@ export async function appendRulebookAudit(input: {
 }
 
 export function toSchemeResponse(scheme: RulebookSchemeRow) {
+  const today = new Date().toISOString().slice(0, 10);
+  const versions = scheme.scheme_versions ?? [];
+  const applied = versions.filter((version) => version.status === "active");
+  const current = applied.find((version) => version.effective_from <= today && (!version.effective_to || version.effective_to >= today));
+  const latestApplied = [...applied].sort((a, b) => (b.effective_to ?? "9999-12-31").localeCompare(a.effective_to ?? "9999-12-31"))[0] ?? null;
+  const operationalStatus = scheme.status !== "active"
+    ? scheme.status
+    : current
+      ? "active"
+      : applied.some((version) => version.effective_from > today)
+        ? "scheduled"
+        : applied.length
+          ? "expired"
+          : "setup_incomplete";
   return {
     id: scheme.id,
     companyId: scheme.company_id,
@@ -349,6 +416,10 @@ export function toSchemeResponse(scheme: RulebookSchemeRow) {
     name: scheme.name,
     description: scheme.description,
     status: scheme.status,
+    operationalStatus,
+    appliedEffectiveFrom: (current ?? latestApplied)?.effective_from ?? null,
+    appliedEffectiveTo: (current ?? latestApplied)?.effective_to ?? null,
+    draftCount: versions.filter((version) => version.status === "draft").length,
     createdAt: scheme.created_at,
     updatedAt: scheme.updated_at,
   };
@@ -382,6 +453,7 @@ export function toVersionResponse(version: RulebookVersionRow) {
     periodAnchorDate: version.period_anchor_date,
     todReviewCalendarId: version.tod_review_calendar_id,
     todBenefitBasis: version.tod_benefit_basis,
+    cdDiscountBasis: version.scheme_type === "cd" ? version.cd_discount_basis ?? "percentage_of_bill" : null,
     createdAt: version.created_at,
     updatedAt: version.updated_at,
   };

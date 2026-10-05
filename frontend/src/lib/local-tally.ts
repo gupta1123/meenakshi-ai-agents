@@ -1,5 +1,21 @@
 const LOCAL_TALLY_BASE = "http://127.0.0.1:3219";
 
+export async function detectLocalTallyConnector(signal?: AbortSignal): Promise<string | null> {
+  try {
+    const response = await fetch(`${LOCAL_TALLY_BASE}/v1/identity`, {
+      cache: "no-store",
+      signal: signal ?? AbortSignal.timeout(2_000),
+    });
+    if (!response.ok) return null;
+    const payload = await response.json() as { connectorId?: unknown };
+    return typeof payload.connectorId === "string" && /^[0-9a-f-]{36}$/i.test(payload.connectorId)
+      ? payload.connectorId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export type LocalCdBootstrap = {
   evaluatedOn: string;
   expectedCompany: { name: string; guid: string };
@@ -23,7 +39,7 @@ export type LocalCdInvoiceCheck = {
   customerName: string; invoiceGuid: string; invoiceNumber: string | null; invoiceDate: string;
   invoiceAmount: string; amountPaid: string; outstandingAmount: string;
   discountPercentage: string; earnedDiscountPercentage: string; eligibilityDeadline: string;
-  status: "retained" | "payment_due" | "recovery_due" | "needs_review";
+  status: "retained" | "payment_due" | "recovery_due" | "recovered" | "needs_review";
   paymentCount: number; latestPaymentDate: string | null; reviewMessage: string | null;
 };
 
@@ -41,7 +57,10 @@ export async function runLocalCashDiscount(bootstrap: LocalCdBootstrap, signal?:
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(bootstrap),
     cache: "no-store",
-    signal: signal ?? AbortSignal.timeout(60_000),
+    // A per-MT rule reads every invoice since its effective date: 18 months is
+    // about 55 batches and 10 minutes. The page shows batch progress meanwhile;
+    // aborting early leaves the export running anyway.
+    signal: signal ?? AbortSignal.timeout(1_800_000),
   });
   const payload = await response.json().catch(() => ({})) as LocalCdResult & { error?: string };
   if (!response.ok) throw new Error(payload.error || "The local Tally connector could not complete the Cash Discount check.");
@@ -51,7 +70,16 @@ export async function runLocalCashDiscount(bootstrap: LocalCdBootstrap, signal?:
 export type LocalTodBootstrap = {
   evaluatedOn: string;
   expectedCompany: { name: string; guid: string };
+  activeSchemeVersionId: string;
+  periods: LocalTodPeriod[];
   batches: LocalTodBatchBootstrap[];
+};
+
+export type LocalTodPeriod = {
+  key: string;
+  start: string;
+  end: string;
+  state: "completed" | "current" | "upcoming";
 };
 
 export type LocalTodBatchBootstrap = {
@@ -89,7 +117,10 @@ async function runLocalTurnoverDiscountBatch(bootstrap: LocalTodBootstrap, batch
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ ...batch, evaluatedOn: bootstrap.evaluatedOn, expectedCompany: bootstrap.expectedCompany }),
     cache: "no-store",
-    signal: signal ?? AbortSignal.timeout(60_000),
+    // A completed quarter can contain materially more vouchers than the live
+    // projection. Give Tally enough time to finish its chunked read instead of
+    // turning a healthy, long-running calculation into a false failure.
+    signal: signal ?? AbortSignal.timeout(180_000),
   });
   const payload = await response.json().catch(() => ({})) as LocalTodResult & { error?: string };
   if (!response.ok) throw new Error(payload.error || "The local Tally connector could not complete the Turnover Discount calculation.");
@@ -132,4 +163,46 @@ export async function runLocalTurnoverDiscount(bootstrap: LocalTodBootstrap, sig
     },
     durationMs: results.reduce((total, result) => total + result.durationMs, 0),
   };
+}
+
+export type LocalProgress = {
+  task: "cash_discount" | "turnover_discount";
+  stage: "reading" | "calculating";
+  done: number;
+  total: number | null;
+  from: string | null;
+  to: string | null;
+  nextDate?: string | null;
+  vouchersScanned?: number;
+  startedAt: string;
+};
+
+/** Progress of the calculation the local connector is running; null if none or unsupported. */
+export async function readLocalProgress(signal?: AbortSignal): Promise<LocalProgress | null> {
+  try {
+    const response = await fetch(`${LOCAL_TALLY_BASE}/v1/progress`, { cache: "no-store", signal: signal ?? AbortSignal.timeout(3_000) });
+    if (!response.ok) return null;
+    const payload = await response.json() as { progress?: LocalProgress | null };
+    return payload.progress ?? null;
+  } catch { return null; }
+}
+
+export type LocalNoteEInvoice = { irn: string; ackNo: string; ackDate: string | null; signedQr: string };
+
+/**
+ * IRN / Ack No. / Ack Date / signed QR of one Credit or Debit Note, read from
+ * Tally by the connector on this PC (one company, one day). Returns null when
+ * the note is not e-invoiced yet; throws when the connector or Tally is not ready.
+ */
+export async function readLocalNoteEInvoice(input: { expectedCompany: { guid?: string | null; name?: string | null }; date: string; voucherNumber: string; kind: "credit" | "debit" }): Promise<LocalNoteEInvoice | null> {
+  const response = await fetch(`${LOCAL_TALLY_BASE}/v1/einvoice`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+    cache: "no-store",
+    signal: AbortSignal.timeout(40_000),
+  });
+  const payload = await response.json().catch(() => ({})) as { einvoice?: LocalNoteEInvoice | null; error?: string };
+  if (!response.ok) throw new Error(payload.error || "The local Tally connector could not read the e-Invoice.");
+  return payload.einvoice ?? null;
 }

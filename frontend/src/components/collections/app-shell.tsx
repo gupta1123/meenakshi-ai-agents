@@ -10,12 +10,16 @@ import { useCompany } from "./company-context";
 import { GlobalTallyMonitor } from "./global-tally-monitor";
 import { useTallyCompanySelection } from "./tally-company-selection";
 import headerStyles from "./app-shell-header.module.css";
+import { TallySyncPill } from "./tally-sync-pill";
 
 const navigation = [
   { href: "/", label: "Overview", description: "What needs attention", icon: CircleGauge },
   { href: "/cash-discount", label: "Cash Discount", description: "Check a Sales invoice", icon: ReceiptIndianRupee },
   { href: "/turnover-discount", label: "Turnover Discount", description: "Check a customer period", icon: Layers2 },
   { href: "/credit-notes", label: "Credit Notes", description: "Posting and verification history", icon: FileCheck2 },
+  // Hidden: the active per-MT Cash Discount rule gives discounts by Credit Note and never
+  // creates Debit Notes. The page still works at /debit-notes for the few created earlier.
+  // { href: "/debit-notes", label: "Debit Notes", description: "Cash Discount recoveries", icon: FileMinus2 }, (import FileMinus2 from lucide-react to restore)
   { href: "/messages", label: "Messages", description: "WhatsApp delivery history", icon: Bell },
   { href: "/rulebook", label: "Rulebook", description: "Administrator settings", icon: BookOpen, administratorOnly: true },
 ];
@@ -69,11 +73,7 @@ export function AppShell({ children, email, tallyStatus, onSignOut }: { children
         })}
       </nav>
       <div className="sidebar-bottom">
-        <Link href="/tally" prefetch={false} className="sidebar-tally-pill" title="View Tally connection status">
-          <span className={`tally-dot ${tallyStatus.includes("ready") ? "ready" : "stale"}`} />
-          <span className="tally-label">Tally: {tallyStatus.replaceAll("bridge_stale", "connection needs attention").replaceAll("not_bound", "not connected").replaceAll("awaiting_pairing", "connecting").replaceAll("_", " ")}</span>
-          <span className="tally-arrow">→</span>
-        </Link>
+        <TallySyncPill tallyStatus={tallyStatus} />
         <button className="user-menu-trigger" onClick={() => setMenuOpen((open) => !open)} aria-expanded={menuOpen}>
           <span className="avatar">{initials}</span>
           <span className="user-name">{email || "Signed in"}</span>
@@ -95,13 +95,14 @@ export function AppShell({ children, email, tallyStatus, onSignOut }: { children
     <main className="collections-main">
       <header className={`workspace-topbar ${headerStyles.topbar} ${pageHeader ? "has-page-header" : ""}`}>
         <button className="mobile-wordmark" aria-label="Navigation"><Menu size={20} /></button>
-        {pageHeader && <div className={`workspace-page-header ${headerStyles.pageHeader}`}><div>{pageHeader.eyebrow && <p className="eyebrow">{pageHeader.eyebrow}</p>}<h1>{pageHeader.title}</h1>{pageHeader.detail && <p>{pageHeader.detail}</p>}</div></div>}
+        {/* Same bar on every page: the title only, left-aligned. Eyebrow and detail are no longer shown. */}
+        <div className={`workspace-page-header ${headerStyles.pageHeader}`}>{pageHeader && <h1>{pageHeader.title}</h1>}</div>
         <div className={`workspace-topbar-tools ${headerStyles.tools}`}>
-        <div className="company-select-compact"><Building2 size={14} aria-hidden="true" /><select aria-label="Choose company to work with" onChange={(event) => selectCompany(event.target.value)} title="Choose company to work with" value={company.id}>{availableCompanies.map(({ company: option }) => <option key={option.id} value={option.id}>{option.tally_company_name}</option>)}</select></div>
+        <div className="company-select-compact"><Building2 size={14} aria-hidden="true" /><select aria-label="Choose company to work with" onChange={(event) => selectCompany(event.target.value)} title="Choose company to work with" value={company.id}>{availableCompanies.map(({ company: option, organization: optionOrganization }) => <option key={option.id} value={option.id}>{availableCompanies.some((item) => item.organization.id !== optionOrganization.id) ? `${optionOrganization.name} — ` : ""}{option.tally_company_name}</option>)}</select></div>
         {pageHeader?.action}<GlobalTallyMonitor tallyStatus={tallyStatus} /></div>
       </header>
       {children}
     </main>
-    <nav className="mobile-nav" aria-label="Mobile navigation">{navigation.filter((item) => !item.administratorOnly || isAdministrator).slice(0, 6).map((item) => { const Icon = item.icon; const active = item.href === "/" ? activePathname === "/" : activePathname.startsWith(item.href); return <Link href={item.href} prefetch={false} key={item.href} className={active ? "active" : ""}><Icon size={18} /><span>{item.label}</span></Link>; })}</nav>
+    <nav className="mobile-nav" aria-label="Mobile navigation">{navigation.filter((item) => !item.administratorOnly || isAdministrator).map((item) => { const Icon = item.icon; const active = item.href === "/" ? activePathname === "/" : activePathname.startsWith(item.href); return <Link href={item.href} prefetch={false} key={item.href} className={active ? "active" : ""}><Icon size={18} /><span>{item.label}</span></Link>; })}</nav>
   </div></WorkspacePageHeaderContext.Provider>;
 }

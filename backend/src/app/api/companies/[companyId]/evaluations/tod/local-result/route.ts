@@ -28,8 +28,8 @@ export async function POST(request: Request, context: RouteContext) {
       return jsonWithCors(request, { error: "The local Tally result has an invalid customer count." }, { status: 413 });
     }
     const today = new Date().toISOString().slice(0, 10);
-    const asOfDate = process.env.NODE_ENV === "development" && validDate(body.asOfDate) ? body.asOfDate : today;
-    const evaluatedOn = process.env.NODE_ENV === "development" && validDate(body.evaluatedOn) ? body.evaluatedOn : today;
+    const asOfDate = validDate(body.asOfDate) ? body.asOfDate : today;
+    const evaluatedOn = validDate(body.evaluatedOn) ? body.evaluatedOn : today;
     const supabase = createSupabaseAdminClient();
     const requestContext = { schemeType: "tod", batch: true, asOfDate, evaluatedOn, localFirst: true };
     type CreatedRun = EvaluationRunRecord & { status: string; created_at: string; idempotency_key: string };

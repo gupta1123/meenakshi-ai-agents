@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { claimNextCommand, pairBridge, renewCommandLease, reportCommandResult, sendDisconnect, sendHeartbeat } from "./api-client.mjs";
 import { configurePdfCapture, displayConfigPath, getPdfExportDirectory, loadConfig, parseArguments, saveConfig, stableMachineFingerprint } from "./config.mjs";
 import { executeCommand } from "./commands/dispatch.mjs";
-import { probeActiveCompany, probeCurrentCompanyName, probeTallyCompanies } from "./tally/company-probe.mjs";
+import { probeActiveCompany, probeCurrentCompanyName, probeTallyCompanies, probeMasterChangeCounter } from "./tally/company-probe.mjs";
 import { startLocalApi } from "./local-api.mjs";
 
 const BRIDGE_VERSION = "0.2.3";
@@ -94,8 +94,21 @@ async function readTallySnapshot(config, cachedCompanies = null) {
   }
 }
 
+// Tally's master change counter, read at most every 3 minutes while idle and
+// sent with the heartbeat so the cloud can start a master sync when Tally changed.
+const CHANGE_COUNTER_INTERVAL_MS = 3 * 60 * 1000;
+let changeCounter = { value: null, readAt: 0, company: null };
+
 async function heartbeat(config, cachedCompanies = null) {
   const snapshot = await readTallySnapshot(config, cachedCompanies);
+  if (snapshot.companyLoaded && snapshot.activeCompany?.name) {
+    const company = snapshot.activeCompany.name;
+    if (company !== changeCounter.company || Date.now() - changeCounter.readAt > CHANGE_COUNTER_INTERVAL_MS) {
+      const value = await probeMasterChangeCounter(config.tallyUrl, company).catch(() => null);
+      changeCounter = { value: value ?? (company === changeCounter.company ? changeCounter.value : null), readAt: Date.now(), company };
+    }
+    snapshot.masterChangeCounter = changeCounter.company === company ? changeCounter.value : null;
+  }
   const cloud = await sendHeartbeat(config, BRIDGE_VERSION, snapshot);
   console.log(`MEENAKSHI_STATUS ${JSON.stringify({ ...snapshot, cloudConnected: true, bindings: cloud.bindings ?? [] })}`);
   return snapshot;

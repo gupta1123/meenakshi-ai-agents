@@ -24,8 +24,8 @@ export async function POST(request: Request, context: RouteContext) {
       .select("id, candidate_id, debit_note_date, verified_tally_guid, status")
       .eq("id", postingId).eq("company_id", company.id).maybeSingle();
     if (postingError) throw postingError;
-    if (!posting || posting.status !== "created_verified" || !posting.verified_tally_guid) {
-      return jsonWithCors(request, { error: "Only a verified Debit Note can be reconciled against Tally." }, { status: 409 });
+    if (!posting || !["created_verified", "reconciliation_required"].includes(posting.status) || !posting.verified_tally_guid) {
+      return jsonWithCors(request, { error: "Only a previously verified Debit Note can be checked against Tally." }, { status: 409 });
     }
     const { data: candidate, error: candidateError } = await supabase
       .from("cash_discount_recovery_candidates")

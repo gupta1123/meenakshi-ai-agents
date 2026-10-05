@@ -18,6 +18,7 @@ const staffStatuses: Record<string, { label: string; tone: StatusTone }> = {
   queued: { label: "Queued", tone: "info" },
   refreshing_tally: { label: "Reading Tally", tone: "info" },
   evaluating: { label: "Calculating", tone: "info" },
+  saving: { label: "Checking Tally", tone: "info" },
   sending: { label: "Sending", tone: "info" },
   verification_pending: { label: "Sending to Tally", tone: "info" },
   sending_to_tally: { label: "Sending to Tally", tone: "info" },
@@ -31,6 +32,7 @@ const staffStatuses: Record<string, { label: string; tone: StatusTone }> = {
   correction_required: { label: "Failed", tone: "danger" },
   dead_letter: { label: "Failed", tone: "danger" },
   already_credited: { label: "Already credited", tone: "neutral" },
+  historical: { label: "Historical", tone: "neutral" },
   current: { label: "Current", tone: "good" },
   ready: { label: "Ready", tone: "good" },
   stale: { label: "Sync required", tone: "attention" },
@@ -41,6 +43,9 @@ const staffStatuses: Record<string, { label: string; tone: StatusTone }> = {
   company_mismatch: { label: "Open the selected company", tone: "danger" },
   review_only: { label: "Review mode", tone: "info" },
   posting_enabled: { label: "Posting enabled", tone: "good" },
+  expired: { label: "Expired", tone: "danger" },
+  scheduled: { label: "Scheduled", tone: "info" },
+  setup_incomplete: { label: "Setup incomplete", tone: "attention" },
 };
 
 export function staffStatusLabel(status: string) {

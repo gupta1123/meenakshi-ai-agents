@@ -14,6 +14,18 @@ import type {
 import { resolveRuleCoverage } from "./groups";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
+// TOD payment qualification (docs/TOD_LOGIC.md): an invoice counts only when
+// paid in full within 25 calendar days; receipts are read up to 45 days after
+// the period end (never beyond the evaluation date).
+export const TOD_PAYMENT_DUE_DAYS = 25;
+const TOD_PAYMENT_READ_BEYOND_DAYS = 45;
+function addCalendarDays(date: string, days: number) {
+  const value = new Date(`${date}T00:00:00.000Z`);
+  value.setUTCDate(value.getUTCDate() + days);
+  return value.toISOString().slice(0, 10);
+}
+function minDate(left: string, right: string) { return left < right ? left : right; }
+
 type SchemeType = "cd" | "tod";
 type RuleRow = {
   id: string; company_id: string; scheme_id: string; scheme_type: SchemeType; version_number: number; status: string;
@@ -25,7 +37,7 @@ type RuleRow = {
   tod_benefit_basis: "percentage_of_eligible_value" | "amount_per_eligible_tonne" | null;
 };
 
-type RunContext = { schemeType?: unknown; salesVoucherId?: unknown; customerId?: unknown; batch?: unknown; asOfDate?: unknown; evaluatedOn?: unknown };
+type RunContext = { schemeType?: unknown; ruleVersionId?: unknown; schemeVersionId?: unknown; salesVoucherId?: unknown; customerId?: unknown; batch?: unknown; periodStart?: unknown; periodEnd?: unknown; asOfDate?: unknown; evaluatedOn?: unknown; reviewRefreshForProposal?: unknown };
 
 export type EvaluationRunRecord = {
   id: string;
@@ -253,11 +265,38 @@ async function loadRule(companyId: string, versionId: string): Promise<FrozenCdR
       }
       throw cashDiscountSettingsError;
     }
+    // Per-MT rules (docs/CD_LOGIC.md). Before the 20260926090000 migration the
+    // column does not exist; the rule is then a legacy percentage rule.
+    const basis = await supabase.from("scheme_versions").select("cd_discount_basis").eq("id", row.id).maybeSingle();
+    if (basis.error && basis.error.code !== "42703") throw basis.error;
+    if (!basis.error && basis.data?.cd_discount_basis === "amount_per_tonne") {
+      const [segments, members] = await Promise.all([
+        supabase.from("scheme_version_cd_segments").select("id, label, allowed_working_days, amount_per_tonne, sort_order").eq("scheme_version_id", row.id).order("sort_order"),
+        supabase.from("scheme_version_cd_segment_groups").select("segment_id, customer_group_id").eq("scheme_version_id", row.id),
+      ]);
+      if (segments.error || members.error) throw segments.error ?? members.error;
+      if (!row.working_calendar_id || !segments.data?.length) throw new Error("The active Cash Discount rule has no segments.");
+      return {
+        ...base, schemeType: "cd", cdDiscountBasis: "amount_per_tonne",
+        slabs: [],
+        nearEligibilityPercent: row.near_eligibility_percent ?? "80",
+        checkNarration: false,
+        narrationMode: "disabled",
+        calendar: await loadCalendar(row.working_calendar_id),
+        segments: segments.data.map((segment) => ({
+          id: segment.id, label: segment.label, allowedWorkingDays: Number(segment.allowed_working_days), amountPerTonne: String(segment.amount_per_tonne),
+          customerGroupIds: (members.data ?? []).filter((member) => member.segment_id === segment.id).map((member) => member.customer_group_id),
+        })),
+        selectedStockItemIds: (stockItems.data ?? []).map((item) => item.stock_item_id),
+        selectedStockGroupIds: (stockGroups.data ?? []).map((item) => item.stock_group_id),
+        unitConversions: (conversions.data ?? []).map((item) => ({ id: `${row.id}:${item.source_uom_id}`, sourceUomId: item.source_uom_id, tonnesPerUnit: String(item.tonnes_per_source_unit) })),
+      };
+    }
     if (!row.working_calendar_id || !row.near_eligibility_percent || !cdSlabs.data?.length) {
       throw new Error("The active Cash Discount rule is incomplete.");
     }
     return {
-      ...base, schemeType: "cd",
+      ...base, schemeType: "cd", cdDiscountBasis: "percentage_of_bill",
       slabs: cdSlabs.data.map((slab) => ({ id: slab.id, allowedWorkingDays: Number(slab.allowed_working_days), percentage: String(slab.discount_percentage) })),
       nearEligibilityPercent: row.near_eligibility_percent,
       checkNarration: cashDiscountSettings?.cd_check_narration !== false,
@@ -415,39 +454,62 @@ export async function loadLiveTodContext(run: EvaluationRunRecord) {
   const customerId = run.request_context.customerId;
   if (typeof customerId !== "string") throw new Error("A TOD evaluation requires customerId.");
   const customer = await loadCustomer(run.company_id, customerId);
+  const exactVersionId = run.request_context.schemeVersionId;
+  const exactPeriodStart = run.request_context.periodStart;
+  const exactPeriodEnd = run.request_context.periodEnd;
+  if (typeof run.request_context.reviewRefreshForProposal === "string"
+    && typeof exactVersionId === "string"
+    && typeof exactPeriodStart === "string"
+    && typeof exactPeriodEnd === "string") {
+    const rule = await loadRule(run.company_id, exactVersionId) as FrozenTodRule;
+    if (rule.schemeType !== "tod") throw new Error("The saved proposal no longer references a Turnover Discount rule.");
+    return { rule, periodStart: exactPeriodStart, periodEnd: exactPeriodEnd, locked: true, customer, evaluatedOn: dateText(run.request_context.evaluatedOn, utcToday()) };
+  }
   const asOfDate = dateText(run.request_context.asOfDate, utcToday());
   const candidate = await chooseTodRule(run.company_id, customer, asOfDate);
   if (!candidate) throw new Error("No active Turnover Discount rule covers this customer and date.");
   return { ...candidate, customer, evaluatedOn: dateText(run.request_context.evaluatedOn, utcToday()) };
 }
 
-async function buildLiveTodVoucherScope(
-  run: EvaluationRunRecord,
-  context: { rule: FrozenTodRule; periodStart: string; periodEnd: string; customers?: Array<CustomerEvidence & { ledgerName: string }>; customer?: CustomerEvidence & { ledgerName: string } },
-) {
+/** Eligible products and MT conversions of a rule, as the connector matches them (TOD and per-MT Cash Discount). */
+async function eligibleProductScope(companyId: string, ruleId: string, selectedItemIds: string[], selectedGroupIds: string[], unitConversions: Array<{ sourceUomId: string; tonnesPerUnit: string }>) {
   const supabase = createSupabaseAdminClient();
-  const selectedItemIds = context.rule.selectedStockItemIds;
-  const selectedGroupIds = context.rule.selectedStockGroupIds;
   const [{ data: coveredGroups, error: coveredGroupsError }, { data: units, error: unitsError }] = await Promise.all([
     selectedGroupIds.length
-      ? supabase.from("scheme_version_stock_group_coverage").select("stock_group_id").eq("scheme_version_id", context.rule.id)
+      ? supabase.from("scheme_version_stock_group_coverage").select("stock_group_id").eq("scheme_version_id", ruleId)
       : Promise.resolve({ data: [], error: null }),
-    supabase.from("tally_units").select("id, code, name").eq("company_id", run.company_id).eq("is_available", true),
+    supabase.from("tally_units").select("id, code, name").eq("company_id", companyId).eq("is_available", true),
   ]);
   if (coveredGroupsError || unitsError) throw coveredGroupsError ?? unitsError;
   const coveredGroupIds = (coveredGroups ?? []).map((row) => row.stock_group_id);
   const stockQueries = [
     selectedItemIds.length
-      ? supabase.from("stock_items").select("tally_stock_item_guid, name").eq("company_id", run.company_id).eq("is_available", true).in("id", selectedItemIds)
+      ? supabase.from("stock_items").select("tally_stock_item_guid, name").eq("company_id", companyId).eq("is_available", true).in("id", selectedItemIds)
       : Promise.resolve({ data: [], error: null }),
     coveredGroupIds.length
-      ? supabase.from("stock_items").select("tally_stock_item_guid, name").eq("company_id", run.company_id).eq("is_available", true).in("current_stock_group_id", coveredGroupIds)
+      ? supabase.from("stock_items").select("tally_stock_item_guid, name").eq("company_id", companyId).eq("is_available", true).in("current_stock_group_id", coveredGroupIds)
       : Promise.resolve({ data: [], error: null }),
   ];
   const [selectedItems, coveredItems] = await Promise.all(stockQueries);
   if (selectedItems.error || coveredItems.error) throw selectedItems.error ?? coveredItems.error;
   const itemRows = [...(selectedItems.data ?? []), ...(coveredItems.data ?? [])];
   const unitById = new Map((units ?? []).map((unit) => [unit.id, unit]));
+  return {
+    eligibleStockItemGuids: [...new Set(itemRows.map((item) => item.tally_stock_item_guid).filter(Boolean))],
+    eligibleStockItemNames: [...new Set(itemRows.map((item) => item.name).filter(Boolean))],
+    unitConversions: unitConversions.flatMap((conversion) => {
+      const unit = unitById.get(conversion.sourceUomId);
+      if (!unit) return [];
+      return [{ uomCode: unit.code || unit.name, tonnesPerUnit: conversion.tonnesPerUnit }];
+    }),
+  };
+}
+
+async function buildLiveTodVoucherScope(
+  run: EvaluationRunRecord,
+  context: { rule: FrozenTodRule; periodStart: string; periodEnd: string; customers?: Array<CustomerEvidence & { ledgerName: string }>; customer?: CustomerEvidence & { ledgerName: string } },
+) {
+  const products = await eligibleProductScope(run.company_id, context.rule.id, context.rule.selectedStockItemIds, context.rule.selectedStockGroupIds, context.rule.unitConversions);
   const batchCustomers = context.customers;
   const singleCustomer = context.customer;
   if (!batchCustomers && !singleCustomer) throw new Error("A Turnover Discount Tally scope needs at least one customer.");
@@ -461,13 +523,17 @@ async function buildLiveTodVoucherScope(
       : { customerId: singleCustomer!.id, customerLedgerName: singleCustomer!.ledgerName }),
     dateFrom: context.periodStart,
     dateTo: context.periodEnd,
-    eligibleStockItemGuids: [...new Set(itemRows.map((item) => item.tally_stock_item_guid).filter(Boolean))],
-    eligibleStockItemNames: [...new Set(itemRows.map((item) => item.name).filter(Boolean))],
-    unitConversions: context.rule.unitConversions.flatMap((conversion) => {
-      const unit = unitById.get(conversion.sourceUomId);
-      if (!unit) return [];
-      return [{ uomCode: unit.code || unit.name, tonnesPerUnit: conversion.tonnesPerUnit }];
-    }),
+    // TOD counts an invoice only when it is paid in full (GST-inclusive) within
+    // 25 calendar days of the invoice date; a due date on a Sunday or holiday
+    // moves to the next working day. Receipts are read beyond the period end
+    // so late-period invoices can still be checked. See docs/TOD_LOGIC.md.
+    paymentCheck: {
+      dueDays: TOD_PAYMENT_DUE_DAYS,
+      readTo: minDate(addCalendarDays(context.periodEnd, TOD_PAYMENT_READ_BEYOND_DAYS), dateText(run.request_context.evaluatedOn, utcToday())),
+      holidays: context.rule.reviewCalendar?.activeHolidayDates ?? [],
+      nonWorkingIsoWeekdays: context.rule.reviewCalendar?.nonWorkingIsoWeekdays?.length ? context.rule.reviewCalendar.nonWorkingIsoWeekdays : [7],
+    },
+    ...products,
   };
 }
 
@@ -496,9 +562,11 @@ export async function loadLiveTodLocalBootstrap(run: EvaluationRunRecord) {
 
 export async function loadLiveCdContext(run: EvaluationRunRecord, customerId: string, invoiceDate: string) {
   const customer = await loadCustomer(run.company_id, customerId);
-  const ruleIds = await activeRuleIds(run.company_id, "cd", invoiceDate);
-  if (ruleIds.length !== 1) throw new Error(ruleIds.length ? "More than one active Cash Discount rule is available." : "No active Cash Discount rule is available.");
-  const rule = await loadRule(run.company_id, ruleIds[0]) as FrozenCdRule;
+  // Several Cash Discount rules may be active; a run can name one, otherwise
+  // the first active rule covering this customer applies.
+  const requested = typeof run.request_context.ruleVersionId === "string" ? run.request_context.ruleVersionId : null;
+  const rule = requested ? await loadRule(run.company_id, requested) as FrozenCdRule : await chooseCdRule(run.company_id, customer, invoiceDate);
+  if (!rule) throw new Error("No active Cash Discount rule is available.");
   if (resolveRuleCoverage(rule, customer, invoiceDate).state === "not_in_scheme") throw new Error("The customer is not covered by the active Cash Discount rule.");
   return { rule, customer, evaluatedOn: dateText(run.request_context.evaluatedOn, utcToday()) };
 }
@@ -509,17 +577,129 @@ export async function loadLiveCdBatchRule(run: EvaluationRunRecord, ruleVersionI
   return { rule, evaluatedOn: dateText(run.request_context.evaluatedOn, utcToday()) };
 }
 
-export async function loadLiveCdLocalBootstrap(run: EvaluationRunRecord) {
+/** Active Cash Discount rules on a date, for the rule selector on the Cash Discount page. */
+/**
+ * Active Cash Discount rules that have started by onDate. A rule's end date
+ * only limits which invoices count (see invoiceDateTo); a rule that has ended
+ * is still checked so its last invoices get their windows and Credit Notes.
+ */
+async function startedCdRuleIds(companyId: string, onDate: string) {
+  const { data, error } = await createSupabaseAdminClient()
+    .from("scheme_versions").select("id")
+    .eq("company_id", companyId).eq("scheme_type", "cd").eq("status", "active")
+    .lte("effective_from", onDate)
+    .order("version_number", { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map((row) => row.id);
+}
+
+export async function listActiveCdRules(companyId: string, onDate: string) {
+  const ids = await startedCdRuleIds(companyId, onDate);
+  if (!ids.length) return [];
+  const { data, error } = await createSupabaseAdminClient().from("scheme_versions")
+    .select("id, scheme_id, version_number, discount_percentage, allowed_working_days, effective_from, effective_to, schemes(name)")
+    .in("id", ids);
+  if (error) throw error;
+  // Before the 20260926090000 migration the basis column is missing: all rules are percentage rules.
+  const basis = await createSupabaseAdminClient().from("scheme_versions").select("id, cd_discount_basis").in("id", ids);
+  if (basis.error && basis.error.code !== "42703") throw basis.error;
+  const basisById = new Map((basis.error ? [] : basis.data ?? []).map((row) => [row.id as string, row.cd_discount_basis as string]));
+  return (data ?? []).map((row) => ({
+    id: row.id, schemeId: row.scheme_id, versionNumber: row.version_number,
+    name: String((row.schemes as { name?: string } | null)?.name ?? "Cash Discount rule"),
+    discountPercentage: String(row.discount_percentage ?? ""), allowedWorkingDays: row.allowed_working_days,
+    effectiveFrom: row.effective_from, effectiveTo: row.effective_to,
+    cdDiscountBasis: basisById.get(row.id) === "amount_per_tonne" ? "amount_per_tonne" as const : "percentage_of_bill" as const,
+  })).sort((left, right) => left.name.localeCompare(right.name));
+}
+
+/** Active Cash Discount and Turnover Discount rules on a date with the customer groups each covers, for the per-group view on the Turnover Discount page. */
+export async function listActiveRulesByGroup(companyId: string, onDate: string) {
+  const [cdIds, todIds] = await Promise.all([activeRuleIds(companyId, "cd", onDate), activeRuleIds(companyId, "tod", onDate)]);
+  const ids = [...cdIds, ...todIds];
+  if (!ids.length) return [];
+  const supabase = createSupabaseAdminClient();
+  const [versions, coverage] = await Promise.all([
+    supabase.from("scheme_versions").select("id, scheme_type, version_number, discount_percentage, allowed_working_days, schemes(name)").in("id", ids),
+    supabase.from("scheme_version_group_coverage").select("scheme_version_id, customer_group_id").in("scheme_version_id", ids),
+  ]);
+  if (versions.error) throw versions.error;
+  if (coverage.error) throw coverage.error;
+  return (versions.data ?? []).map((row) => ({
+    id: row.id, schemeType: row.scheme_type as "cd" | "tod", versionNumber: row.version_number,
+    name: String((row.schemes as { name?: string } | null)?.name ?? (row.scheme_type === "cd" ? "Cash Discount rule" : "Turnover Discount rule")),
+    discountPercentage: row.discount_percentage == null ? null : String(row.discount_percentage), allowedWorkingDays: row.allowed_working_days,
+    customerGroupIds: (coverage.data ?? []).filter((item) => item.scheme_version_id === row.id).map((item) => item.customer_group_id),
+  })).sort((left, right) => left.name.localeCompare(right.name));
+}
+
+export async function loadLiveCdLocalBootstrap(run: EvaluationRunRecord, requestedRuleVersionId?: string | null) {
   const evaluatedOn = dateText(run.request_context.evaluatedOn, utcToday());
-  const ruleIds = await activeRuleIds(run.company_id, "cd", evaluatedOn);
-  if (ruleIds.length !== 1) throw new Error(ruleIds.length ? "More than one active Cash Discount rule is available." : "No active Cash Discount rule is available.");
-  const rule = await loadRule(run.company_id, ruleIds[0]) as FrozenCdRule;
+  const ruleIds = await startedCdRuleIds(run.company_id, evaluatedOn);
+  // Several Cash Discount rules may be active; the page asks for one of them.
+  let ruleId: string;
+  if (requestedRuleVersionId) {
+    if (!ruleIds.includes(requestedRuleVersionId)) throw new Error("The selected Cash Discount rule is not active on this date.");
+    ruleId = requestedRuleVersionId;
+  } else {
+    if (ruleIds.length !== 1) throw new Error(ruleIds.length ? "More than one active Cash Discount rule is available. Choose the rule to check." : "No active Cash Discount rule is available.");
+    ruleId = ruleIds[0];
+  }
+  const rule = await loadRule(run.company_id, ruleId) as FrozenCdRule;
   const supabase = createSupabaseAdminClient();
   const { data: groups, error: groupError } = await supabase
     .from("customer_groups")
     .select("id, tally_group_guid, name, parent_group_id")
     .eq("company_id", run.company_id);
   if (groupError) throw groupError;
+  if (rule.cdDiscountBasis === "amount_per_tonne") {
+    // Each customer belongs to the one segment covering its group (segments are
+    // mutually exclusive); the connector evaluator reads customerSegments.
+    const descendantsOf = (roots: string[]) => {
+      const covered = new Set(roots);
+      let grew = true;
+      while (grew) {
+        grew = false;
+        for (const group of groups ?? []) if (group.parent_group_id && covered.has(group.parent_group_id) && !covered.has(group.id)) { covered.add(group.id); grew = true; }
+      }
+      return covered;
+    };
+    const segmentGroups = (rule.segments ?? []).map((segment) => descendantsOf(segment.customerGroupIds));
+    const allCovered = [...new Set(segmentGroups.flatMap((set) => [...set]))];
+    const customers = await loadAvailableCustomers(run.company_id, allCovered);
+    const customerSegments: Record<string, number> = {};
+    const eligibleCustomers: Array<{ customerId: string; ledgerName: string }> = [];
+    for (const customer of customers ?? []) {
+      const index = segmentGroups.findIndex((set) => customer.current_customer_group_id && set.has(customer.current_customer_group_id));
+      if (index < 0) continue;
+      const customerId = customer.tally_ledger_guid || customer.id;
+      customerSegments[customerId] = index;
+      eligibleCustomers.push({ customerId, ledgerName: customer.ledger_name });
+    }
+    if (!eligibleCustomers.length) throw new Error("The Cash Discount segments do not contain any available customers.");
+    const products = await eligibleProductScope(run.company_id, rule.id, rule.selectedStockItemIds ?? [], rule.selectedStockGroupIds ?? [], rule.unitConversions ?? []);
+    const maxWorkingDays = Math.max(...(rule.segments ?? []).map((segment) => segment.allowedWorkingDays));
+    return {
+      rule: { ...rule, customerSegments },
+      evaluatedOn,
+      voucherScope: {
+        purpose: "live_cd_evaluation",
+        liveAggregation: "cd",
+        schemeType: "cd",
+        cdDiscountBasis: "amount_per_tonne",
+        evaluationRunId: run.id,
+        ruleVersionId: rule.id,
+        customers: eligibleCustomers,
+        dateFrom: rule.effectiveFrom,
+        // Payments are read up to today so an invoice near the rule's end
+        // still gets its full window; only invoices stop at the end date.
+        dateTo: evaluatedOn,
+        invoiceDateTo: rule.effectiveTo && rule.effectiveTo < evaluatedOn ? rule.effectiveTo : evaluatedOn,
+        maxWorkingDays,
+        ...products,
+      },
+    };
+  }
   const selectedGroupIds = new Set(rule.selectedCustomerGroupIds);
   const coveredGroupIds = new Set(selectedGroupIds);
   let changed = true;

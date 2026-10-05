@@ -4,7 +4,10 @@ const SUPABASE_URL = (process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABA
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY;
 const WORKER_NAME = process.env.MEENAKSHI_EVALUATION_WORKER_NAME || `meenakshi-evaluator-${process.pid}`;
 const POLL_INTERVAL_MS = Math.max(1_000, Number(process.env.MEENAKSHI_EVALUATION_POLL_INTERVAL_MS ?? 2_000));
-const BATCH_SIZE = Math.max(1, Math.min(20, Number(process.env.MEENAKSHI_EVALUATION_BATCH_SIZE ?? 10)));
+// A TOD calculation saves one run per customer (hundreds). Those are pure
+// database work processed concurrently, so claim more per cycle; runs that
+// still need Tally are processed one at a time below regardless.
+const BATCH_SIZE = Math.max(1, Math.min(25, Number(process.env.MEENAKSHI_EVALUATION_BATCH_SIZE ?? 10)));
 const LEASE_SECONDS = Math.max(30, Number(process.env.MEENAKSHI_EVALUATION_LEASE_SECONDS ?? 120));
 const RUN_ONCE = process.env.MEENAKSHI_EVALUATION_RUN_ONCE === "true";
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) throw new Error("NEXT_PUBLIC_SUPABASE_URL/SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required.");
@@ -36,12 +39,28 @@ async function processOne(run) {
   // The domain implementation stays in TypeScript beside the API. Dynamic
   // import lets this small Node worker use the same source under Node 24.
   const { processEvaluationRun, failEvaluationRun } = await import("../src/lib/evaluation/run-service.ts");
+  let renewing = false;
+  const renewal = setInterval(async () => {
+    if (renewing) return;
+    renewing = true;
+    try {
+      const { error } = await supabase.from("evaluation_runs")
+        .update({ lease_expires_at: new Date(Date.now() + LEASE_SECONDS * 1000).toISOString() })
+        .eq("id", run.id).eq("locked_by", WORKER_NAME)
+        .gt("lease_expires_at", new Date().toISOString());
+      if (error) console.warn("Could not renew evaluation lease:", errorText(error));
+    } catch (error) {
+      console.warn("Could not renew evaluation lease:", errorText(error));
+    } finally { renewing = false; }
+  }, Math.max(5000, Math.floor(LEASE_SECONDS * 1000 / 3)));
   try {
     const state = await processEvaluationRun(run);
     console.info("Meenakshi evaluation run processed", { evaluationRunId: run.id, state });
   } catch (error) {
     console.error("Meenakshi evaluation run failed", { evaluationRunId: run.id, error: errorText(error) });
     try { await failEvaluationRun(run, error); } catch (failure) { console.error("Could not release failed evaluation run", failure); }
+  } finally {
+    clearInterval(renewal);
   }
 }
 

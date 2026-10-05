@@ -3,6 +3,7 @@ import { appendMeenakshiAuditEvent } from "@/lib/audit";
 import { authenticateMeenakshiBridge, bridgeVersionIsOlder, MINIMUM_BRIDGE_VERSION, tallyCompanyMatches } from "@/lib/bridge";
 import { isUuid, readBridgeToken, readText, requestIpHash } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { noteMasterCounter } from "@/lib/tally/auto-sync";
 
 type BindingRow = { id: string; company_id: string; expected_tally_company_guid: string; expected_tally_company_name: string };
 type TallyCompany = { name: string; guid: string; isActive: boolean };
@@ -154,6 +155,15 @@ export async function POST(request: Request) {
         expectedCompany: { guid: binding.expected_tally_company_guid, name: binding.expected_tally_company_name },
       };
     }));
+    // Tally's master change counter: queue a master sync when Tally changed.
+    // Never let this fail the heartbeat itself.
+    const masterCounter = Number(body.masterChangeCounter);
+    if (companyLoaded && Number.isFinite(masterCounter) && masterCounter > 0) {
+      for (const binding of bindingStates.filter((item) => item.matches)) {
+        await noteMasterCounter(supabase, { organizationId: connector.organization_id, companyId: binding.companyId, counter: masterCounter })
+          .catch((error) => console.error("Automatic master sync check failed:", error));
+      }
+    }
     if (stateChanged) {
       await appendMeenakshiAuditEvent({
         organizationId: connector.organization_id,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createConnectorControlToken, hashConnectorSecret, isUuid, safeBridgeResult, secretsMatch } from "./security.ts";
+import { createConnectorControlToken, createPendingConnectorIdentity, hashConnectorSecret, isUuid, safeBridgeResult, secretsMatch } from "./security.ts";
 
 test("connector tokens are random and only validate against their own hash", () => {
   const first = createConnectorControlToken();
@@ -9,6 +9,14 @@ test("connector tokens are random and only validate against their own hash", () 
   assert.equal(secretsMatch(first, hashConnectorSecret(first)), true);
   assert.equal(secretsMatch(second, hashConnectorSecret(first)), false);
   assert.equal(secretsMatch("", hashConnectorSecret(first)), false);
+});
+test("new connector setup uses unique pending installation identities", () => {
+  const first = createPendingConnectorIdentity();
+  const second = createPendingConnectorIdentity();
+  assert.match(first.installationKey, /^meenakshi-[0-9a-f-]{36}$/);
+  assert.match(first.machineFingerprint, /^pending:[0-9a-f-]{36}$/);
+  assert.notEqual(first.installationKey, second.installationKey);
+  assert.notEqual(first.machineFingerprint, second.machineFingerprint);
 });
 test("bridge results remove credentials and raw XML before persistence", () => {
   assert.deepEqual(safeBridgeResult({ voucherGuid: "guid-1", accessToken: "must-not-persist", nested: { rawXml: "<ENVELOPE />", amount: 25 } }), { voucherGuid: "guid-1", nested: { amount: 25 } });

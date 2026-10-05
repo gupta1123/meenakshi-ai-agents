@@ -3,7 +3,24 @@ import test from "node:test";
 
 import { canQueueNotification, msg91Recipient, normalizeStoredE164 } from "./eligibility.ts";
 import { Msg91DeliveryError, providerMessageId, sendMsg91Notification } from "./msg91-client.ts";
-import { renderMsg91Template, templatePreview } from "./template-renderer.ts";
+import { renderMsg91Template, templatePreview, TemplateConfigurationError } from "./template-renderer.ts";
+import { providerTemplateProblem } from "./provider-template.ts";
+
+test("live template validation rejects local placeholders and missing required PDFs", () => {
+  const catalog = [{ name: "share_credit_memo", languages: [{ language: "en", status: "approved", variables: ["header_1", "body_1"], variable_type: { header_1: { type: "document" }, body_1: { type: "text" } } }] }];
+  assert.match(providerTemplateProblem({ providerTemplateId: "LOCAL_TOD_CREDIT_NOTE_V1", languageCode: "en" }, catalog), /not approved/);
+  const template = { providerTemplateId: "share_credit_memo", languageCode: "en", componentSchema: { components: [{ component: "header_1", type: "document", value: "documentUrl" }, { component: "body_1", value: "customerName" }] } };
+  assert.match(providerTemplateProblem(template, catalog, false), /requires a Credit Note PDF/);
+  assert.equal(providerTemplateProblem(template, catalog, true), null);
+});
+
+test("missing frozen template is a permanent configuration failure, not a retry loop", () => {
+  assert.throws(() => renderMsg91Template({ eventType: "tod_credit_note_created", recipient: "917977925397", payload: {}, template: {} }), (error) => error instanceof TemplateConfigurationError && error.retryable === false);
+});
+
+test("missing approved template variable fails before provider delivery", () => {
+  assert.throws(() => renderMsg91Template({ eventType: "tod_credit_note_created", recipient: "917977925397", payload: {}, template: { providerTemplateId: "approved", languageCode: "en" } }), (error) => error instanceof TemplateConfigurationError && error.retryable === false);
+});
 
 const template = {
   providerTemplateId: "credit_note_created",
@@ -70,10 +87,8 @@ test("TOD tier-reached preview uses the reached tier and projected amount, not a
 test("mock MSG91 delivery has no network dependency and records a provider correlation id", async () => {
   const previousTransport = process.env.MEENAKSHI_MSG91_TRANSPORT;
   const previousResult = process.env.MEENAKSHI_MSG91_MOCK_RESULT;
-  const previousTestRecipient = process.env.MEENAKSHI_MSG91_TEST_RECIPIENT_E164;
   process.env.MEENAKSHI_MSG91_TRANSPORT = "mock";
   delete process.env.MEENAKSHI_MSG91_MOCK_RESULT;
-  delete process.env.MEENAKSHI_MSG91_TEST_RECIPIENT_E164;
   try {
     const result = await sendMsg91Notification({
       eventType: "cd_credit_note_created", recipientPhoneE164: "+919876543210",
@@ -82,17 +97,12 @@ test("mock MSG91 delivery has no network dependency and records a provider corre
     assert.equal(result.mocked, true);
     assert.match(result.providerMessageId, /^mock-/);
 
-    process.env.MEENAKSHI_MSG91_TEST_RECIPIENT_E164 = "+919876543210";
-    await assert.rejects(
-      () => sendMsg91Notification({ eventType: "cd_credit_note_created", recipientPhoneE164: "+919876543211", payload: { customerName: "Asha", creditNoteNumber: "CN-12" }, template }),
-      (error) => error instanceof Msg91DeliveryError && error.statusCode === 403 && error.retryable === false
-    );
-    const allowlisted = await sendMsg91Notification({
-      eventType: "cd_credit_note_created", recipientPhoneE164: "+919876543210",
+    // Any entered customer number is delivered; there is no test-recipient gate.
+    const anyNumber = await sendMsg91Notification({
+      eventType: "cd_credit_note_created", recipientPhoneE164: "+919876543211",
       payload: { customerName: "Asha", creditNoteNumber: "CN-12" }, template,
     });
-    assert.equal(allowlisted.mocked, true);
-    delete process.env.MEENAKSHI_MSG91_TEST_RECIPIENT_E164;
+    assert.equal(anyNumber.mocked, true);
 
     process.env.MEENAKSHI_MSG91_MOCK_RESULT = "permanent_failure";
     await assert.rejects(
@@ -104,8 +114,6 @@ test("mock MSG91 delivery has no network dependency and records a provider corre
     else process.env.MEENAKSHI_MSG91_TRANSPORT = previousTransport;
     if (previousResult === undefined) delete process.env.MEENAKSHI_MSG91_MOCK_RESULT;
     else process.env.MEENAKSHI_MSG91_MOCK_RESULT = previousResult;
-    if (previousTestRecipient === undefined) delete process.env.MEENAKSHI_MSG91_TEST_RECIPIENT_E164;
-    else process.env.MEENAKSHI_MSG91_TEST_RECIPIENT_E164 = previousTestRecipient;
   }
 });
 

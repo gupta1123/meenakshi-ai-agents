@@ -1,0 +1,121 @@
+.panel { display: grid; gap: 22px; padding-bottom: 20px; }
+
+.hero { display: grid; justify-items: start; gap: 6px; padding: 18px 20px; border: 1px solid #d9e8dd; border-radius: 13px; background: #f7fbf8; }
+.heroMeta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 9px; }
+.group { color: var(--ink-soft); font-size: .7rem; }
+.eyebrow { color: var(--ink-soft); font-size: .67rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.heroValue { color: var(--ink); font-size: 1.8rem; line-height: 1.15; letter-spacing: -.035em; font-variant-numeric: tabular-nums; }
+.heroContext { max-width: 50ch; margin: 6px 0 0; color: var(--ink-soft); font-size: .76rem; line-height: 1.5; }
+
+.section { display: grid; gap: 11px; }
+.section + .section { padding-top: 19px; border-top: 1px solid var(--line); }
+.section h3 { margin: 0; color: var(--ink); font-size: .84rem; }
+.sectionHeading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 10px; }
+.sectionHeading > span { color: var(--muted); font-size: .7rem; }
+
+.ledger, .taxRows { display: grid; gap: 0; margin: 0; }
+.ledger > div, .taxRows > div { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; padding: 9px 0; border-bottom: 1px solid #eee9e0; }
+.ledger dt, .taxRows dt { color: var(--ink-soft); font-size: .75rem; }
+.ledger dt small { display: block; margin-top: 2px; color: var(--muted); font-size: .67rem; }
+.ledger dd, .taxRows dd { flex-shrink: 0; margin: 0; color: var(--ink); font-size: .78rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+.ledger .ledgerTotal { border-bottom: 0; }
+.ledgerTotal dt, .ledgerTotal dd { color: var(--ink); font-weight: 750; }
+.ledgerTotal dd { font-size: .93rem; }
+
+.paymentSummary { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; padding: 13px 15px; border: 1px solid var(--line); border-radius: 10px; background: #fcfbf9; }
+.paymentSummary > div { display: grid; gap: 3px; }
+.paymentSummary > div span { color: var(--muted); font-size: .69rem; }
+.paymentSummary strong { color: var(--ink); font-size: 1rem; font-variant-numeric: tabular-nums; }
+.comparison { color: var(--ink-soft); font-size: .71rem; font-weight: 650; }
+.comparison[data-match="true"] { color: var(--green); }
+.paymentMeta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 12px; color: var(--muted); font-size: .7rem; }
+
+.details { border-top: 1px solid #eee9e0; }
+.details summary { display: flex; align-items: center; gap: 8px; padding: 11px 0; color: var(--ink-soft); font-size: .72rem; font-weight: 650; cursor: pointer; list-style: none; }
+.details summary::-webkit-details-marker { display: none; }
+.details summary::before { content: ""; width: 6px; height: 6px; flex: 0 0 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform .15s ease; }
+.details[open] summary::before { transform: rotate(45deg); }
+.details summary span { margin-left: auto; color: var(--muted); font-weight: 400; text-align: right; }
+.days { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; margin: 2px 0 5px; padding: 0; list-style: none; }
+.days li { display: grid; align-content: start; gap: 2px; min-height: 54px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 9px; background: #fff; }
+.days li span { color: var(--ink); font-size: .74rem; font-weight: 700; }
+.days li small { color: var(--muted); font-size: .64rem; }
+.days li em { overflow: hidden; color: #9a5b2e; font-size: .63rem; font-style: normal; font-weight: 650; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.days li[data-kind="invoice"] { background: var(--blue-wash); }
+.days li[data-kind="off"] { border-style: dashed; background: #f6f4f0; }
+.days li[data-kind="off"] span { color: var(--ink-soft); }
+
+.noteStatus { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; }
+.taxRows { padding-bottom: 2px; }
+.taxRows > div { padding: 7px 0; }
+.taxRows > div:last-child { border-bottom: 0; font-weight: 750; }
+.error { margin: 0; padding: 9px 11px; border: 1px solid #efc4bc; border-radius: 9px; color: #8f352a; background: var(--rose-wash); font-size: .72rem; font-weight: 650; }
+.warn { color: var(--rose) !important; }
+
+@media (max-width: 460px) {
+  .panel { gap: 18px; }
+  .hero { padding: 16px; }
+  .heroValue { font-size: 1.55rem; }
+  .sectionHeading { align-items: flex-start; }
+  .details summary span { max-width: 45%; }
+}
+
+.lines { display: grid; gap: 0; margin: 2px 0 6px; padding: 0; list-style: none; }
+.lines li { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid #f1ede6; }
+.lines li:last-child { border-bottom: 0; }
+.lines li span { display: grid; gap: 2px; color: var(--ink); font-size: .74rem; }
+.lines li small { color: var(--muted); font-size: .66rem; }
+.lines li strong { flex-shrink: 0; color: var(--ink); font-size: .76rem; font-variant-numeric: tabular-nums; }
+.lines li[data-counted="false"] span, .lines li[data-counted="false"] strong { color: var(--muted); }
+.lines li[data-counted="false"] strong { text-decoration: line-through; }
+
+.dueFacts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 14px; margin: 0; }
+.dueFacts > div { display: grid; gap: 2px; min-width: 0; }
+.dueFacts dt { color: var(--muted); font-size: .66rem; }
+.dueFacts dd { margin: 0; color: var(--ink); font-size: .76rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+.dueFacts dd small { display: block; margin-top: 2px; color: #9a5b2e; font-size: .64rem; font-weight: 650; }
+.payments { display: grid; gap: 0; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 10px; list-style: none; }
+.payments li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 12px; border-bottom: 1px solid #f1ede6; }
+.payments li:last-child { border-bottom: 0; }
+.payments li > div { display: grid; gap: 2px; min-width: 0; }
+.payments li > div:last-child { justify-items: end; flex-shrink: 0; }
+.payments strong { color: var(--ink); font-size: .75rem; font-variant-numeric: tabular-nums; }
+.payments small { color: var(--muted); font-size: .66rem; font-variant-numeric: tabular-nums; }
+.payments li[data-counted="false"] > div:first-child strong { color: var(--ink-soft); }
+.verdict { padding: 1px 7px; border-radius: 999px; font-size: .6rem; font-weight: 750; color: var(--green); background: var(--green-wash); }
+.verdict[data-counted="false"] { color: var(--rose); background: var(--rose-wash); }
+@media (max-width: 460px) { .dueFacts { grid-template-columns: minmax(0, 1fr); } }
+
+/* Hero: facts line and Credit Note status. */
+.heroFacts { margin: 4px 0 0; color: var(--ink); font-size: .8rem; font-weight: 650; line-height: 1.45; }
+.hero .heroContext { margin-top: 0; }
+.hero .noteStatus { width: 100%; margin-top: 10px; padding-top: 12px; border-top: 1px solid #d9e8dd; }
+.noteDone { display: grid; gap: 2px; }
+.noteDone strong { color: var(--ink); font-size: .82rem; }
+.noteDone > span { color: var(--muted); font-size: .7rem; }
+.noteDone [data-sent="false"] { color: #9a5b2e; font-weight: 650; }
+.noteHint { color: var(--ink-soft); font-size: .72rem; font-weight: 650; }
+
+/* Day cards: date, one tag, payment chips. Green = on-time money only. */
+.days li { min-height: 0; }
+.days li small[data-off="true"] { color: #9a5b2e; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.days li[data-deadline="true"] { border: 1.5px solid var(--ink); background: #fff; }
+.days li[data-deadline="true"] small { color: var(--ink); font-weight: 800; }
+.days li[data-after="true"] { opacity: .7; background: #fbf7f4; }
+.chip { justify-self: start; margin-top: 4px; padding: 1px 6px; border-radius: 999px; color: var(--green); background: var(--green-wash); font-size: .66rem; font-weight: 750; font-variant-numeric: tabular-nums; }
+.chip[data-counted="false"] { color: var(--rose); background: var(--rose-wash); }
+@media (max-width: 560px) { .days { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+
+/* Compact top box: badge and amount on one row. */
+.hero { gap: 4px; padding: 12px 14px; }
+.heroTop { display: flex; width: 100%; align-items: center; justify-content: space-between; gap: 12px; }
+.heroAmount { display: flex; align-items: baseline; gap: 8px; }
+.heroAmount small { color: var(--ink-soft); font-size: .66rem; font-weight: 700; letter-spacing: .03em; text-transform: uppercase; }
+.heroAmount strong { color: var(--ink); font-size: 1.2rem; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.hero .heroFacts { margin-top: 6px; font-size: .76rem; }
+.hero .heroContext { font-size: .7rem; line-height: 1.4; }
+.hero .noteStatus { margin-top: 6px; padding-top: 8px; }
+.chip { white-space: nowrap; font-size: .62rem; }
+
+/* Credit Note panel: the PDF read back from Tally. */
+.pdfFrame { width: 100%; height: 460px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }

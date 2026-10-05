@@ -24,7 +24,7 @@ export async function GET(request: Request, context: RouteContext) {
     // Helper to apply q filter (ilike) and limit; keeps 7 masters bounded (was unbounded → 5k+ rows each)
     const like = q ? `%${q.replace(/[%_\\]/g, "\\$&")}%` : null;
     const customerGroupsQuery = supabase.from("customer_groups").select("id, tally_group_guid, tally_master_id, tally_alter_id, name, parent_group_id, is_available, last_seen_at").eq("company_id", companyId).order("name").limit(limit);
-    const customersQuery = supabase.from("customers").select("id, tally_ledger_guid, tally_master_id, tally_alter_id, ledger_name, current_customer_group_id, tax_identifier, is_available, last_seen_at, source_payload").eq("company_id", companyId).order("ledger_name").limit(limit);
+    const customersQuery = supabase.from("customers").select("id, tally_ledger_guid, tally_master_id, tally_alter_id, ledger_name, current_customer_group_id, tax_identifier, is_available, last_seen_at").eq("company_id", companyId).order("ledger_name").limit(limit);
     const stockGroupsQuery = supabase.from("stock_groups").select("id, tally_group_guid, tally_master_id, tally_alter_id, name, parent_stock_group_id, is_available, last_seen_at").eq("company_id", companyId).order("name").limit(limit);
     const stockItemsQuery = supabase.from("stock_items").select("id, tally_stock_item_guid, tally_master_id, tally_alter_id, name, current_stock_group_id, default_uom_id, is_available, last_seen_at").eq("company_id", companyId).order("name").limit(limit);
     const unitsQuery = supabase.from("tally_units").select("id, code, name, tally_guid, tally_master_id, tally_alter_id, is_available, last_seen_at").eq("company_id", companyId).order("code").limit(limit);
@@ -56,10 +56,8 @@ export async function GET(request: Request, context: RouteContext) {
     if (errors.length) throw errors[0];
 
     const customerRows = (customers.data ?? []).map((customer) => {
-      const safeCustomer = { ...(customer as Record<string, unknown>) };
-      delete (safeCustomer as Record<string, unknown>).source_payload;
       return {
-        ...safeCustomer,
+        ...customer,
         tallyContact: {
           // phone is intentionally not bulk-exposed; use /contacts with per-customer consent
           phone: null,

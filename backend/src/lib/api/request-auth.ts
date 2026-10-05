@@ -6,7 +6,7 @@ import { createSupabaseServerClient, getSupabaseUrl } from "@/lib/supabase/serve
 type RequestUser = { id: string };
 
 let tokenValidationClient: ReturnType<typeof createClient> | null = null;
-const TOKEN_CACHE_TTL_MS = 15_000;
+const TOKEN_CACHE_TTL_MS = 60_000;
 const tokenCache = new Map<string, { expiresAt: number; request: Promise<RequestUser | null> }>();
 
 function requireEnv(name: string, value?: string) {

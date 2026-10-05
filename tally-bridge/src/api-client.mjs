@@ -64,6 +64,7 @@ export function sendHeartbeat(config, bridgeVersion, tallySnapshot) {
       activeCompany: tallySnapshot.activeCompany ?? null,
       availableCompanies: tallySnapshot.availableCompanies ?? [],
       error: tallySnapshot.error ?? null,
+      masterChangeCounter: tallySnapshot.masterChangeCounter ?? null,
     },
   });
 }

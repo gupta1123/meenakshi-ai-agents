@@ -50,7 +50,7 @@ export async function POST(request: Request, context: RouteContext) {
       newValue: { eventType, notificationMessageId: result.messageId, queued: result.queued },
       metadata: result.blockedReason ? { blockedReason: result.blockedReason } : {},
     });
-    return jsonWithCors(request, { creditNotePostingId: posting.id, eventType, ...result }, { status: result.queued ? 201 : 409 });
+    return jsonWithCors(request, { creditNotePostingId: posting.id, eventType, ...result, ...(!result.queued ? { error: result.blockedReason } : {}) }, { status: result.queued ? 201 : 409 });
   } catch (error) {
     if (error instanceof MeenakshiAccessError) return jsonWithCors(request, { error: error.message }, { status: error.status });
     return rulebookErrorResponse(request, error, "recover verified Credit Note notification");

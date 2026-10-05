@@ -1,30 +1,10 @@
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
-import { appendRulebookAudit, readRequiredUuid, requireCurrentMasterSync, requireDraftVersion, requireRulebookVersionForCompany, RulebookRequestError, rulebookErrorResponse } from "@/lib/rulebook/shared";
+import { appendRulebookAudit, readRequiredUuid, requireCurrentMasterSync, requireDraftVersion, requireRulebookVersionForCompany, requireSundryDebtorsGroup, rulebookErrorResponse } from "@/lib/rulebook/shared";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 type RouteContext = { params: Promise<{ companyId: string; versionId: string }> };
 
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
-
-async function requireSundryDebtorsGroup(companyId: string, customerGroupId: string) {
-  const { data, error } = await createSupabaseAdminClient()
-    .from("customer_groups")
-    .select("id, name, parent_group_id, is_available")
-    .eq("company_id", companyId);
-  if (error) throw error;
-  const groups = (data ?? []) as Array<{ id: string; name: string; parent_group_id: string | null; is_available: boolean }>;
-  const byId = new Map(groups.map((group) => [group.id, group]));
-  const selected = byId.get(customerGroupId);
-  if (!selected || selected.is_available !== true) throw new RulebookRequestError("Customer group is unavailable for this company.", 409);
-  const visited = new Set<string>();
-  let current: typeof selected | undefined = selected;
-  while (current && !visited.has(current.id)) {
-    if (current.name.trim().toLowerCase() === "sundry debtors") return;
-    visited.add(current.id);
-    current = current.parent_group_id ? byId.get(current.parent_group_id) : undefined;
-  }
-  throw new RulebookRequestError("Discount rules can include only Sundry Debtors or one of its customer subgroups.", 409);
-}
 
 export async function GET(request: Request, context: RouteContext) {
   try {

@@ -151,7 +151,15 @@ export type FrozenCdRule = FrozenRuleBase & {
   checkNarration: boolean;
   narrationMode: "informational" | "required" | "disabled";
   calendar: WorkingCalendar;
+  /** "amount_per_tonne" = segments with ₹/MT (docs/CD_LOGIC.md); legacy rules are "percentage_of_bill". */
+  cdDiscountBasis?: "percentage_of_bill" | "amount_per_tonne";
+  segments?: CdSegmentRule[];
+  selectedStockItemIds?: string[];
+  selectedStockGroupIds?: string[];
+  unitConversions?: Array<{ id: string; sourceUomId: string; tonnesPerUnit: DecimalString }>;
 };
+
+export type CdSegmentRule = { id: string; label: string; allowedWorkingDays: number; amountPerTonne: DecimalString; customerGroupIds: string[] };
 
 export type FrozenTodRule = FrozenRuleBase & {
   schemeType: "tod";

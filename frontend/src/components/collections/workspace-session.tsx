@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { usePathname } from "next/navigation";
 
 import { apiRequest } from "@/lib/api";
@@ -9,12 +9,15 @@ import { userFacingError } from "@/lib/user-copy";
 
 import { useCompany } from "./company-context";
 import { useTallyHealth } from "./tally-readiness";
-import type { CreditNotePosting, LaunchControl, MessageTemplate, NotificationHealth, NotificationMessage, OperationsHealth, OverviewSummary, Proposal, ReferenceData, TallyHealth } from "./types";
+import type { CashDiscountCreditNote, CashDiscountDebitNoteHistory, Contact, CreditNotePosting, LaunchControl, MessageTemplate, NotificationHealth, NotificationMessage, OperationsHealth, OverviewSummary, Proposal, ReferenceData, TallyHealth } from "./types";
 
 export type WorkspaceData = {
   proposals: Proposal[];
   creditNotes: CreditNotePosting[];
+  cdCreditNotes: CashDiscountCreditNote[];
+  debitNotes: CashDiscountDebitNoteHistory[];
   messages: NotificationMessage[];
+  contacts: Contact[];
   messageHealth: NotificationHealth | null;
   operations: OperationsHealth | null;
   launchControl: LaunchControl | null;
@@ -23,7 +26,7 @@ export type WorkspaceData = {
   overview: OverviewSummary | null;
 };
 
-const emptyData: WorkspaceData = { proposals: [], creditNotes: [], messages: [], messageHealth: null, operations: null, launchControl: null, reference: null, templates: [], overview: null };
+const emptyData: WorkspaceData = { proposals: [], creditNotes: [], cdCreditNotes: [], debitNotes: [], messages: [], contacts: [], messageHealth: null, operations: null, launchControl: null, reference: null, templates: [], overview: null };
 const workspaceRequestCache = new Map<string, { expiresAt: number; request: Promise<WorkspaceData> }>();
 
 type WorkspaceSessionValue = {
@@ -54,15 +57,18 @@ export function WorkspaceSessionProvider({ email, signOut, children }: { email: 
   const [data, setData] = useState<WorkspaceData>(emptyData);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const loadSequence = useRef(0);
 
   const load = useCallback(async (useCache: boolean) => {
+    const sequence = ++loadSequence.current;
     const token = await accessToken();
     if (!token) return;
 
     setLoading(true);
     setError(null);
     const base = `/api/companies/${company.id}`;
-    const cacheKey = `${company.id}:${pathname}:${isAdministrator}`;
+    // Shared across pages: same company + role, not per-pathname (fixes repeat reference-data/launch-control/contacts)
+    const cacheKey = `${company.id}:${isAdministrator}:${pathname}`;
     try {
       if (!useCache) workspaceRequestCache.delete(cacheKey);
       const cached = workspaceRequestCache.get(cacheKey);
@@ -71,21 +77,31 @@ export function WorkspaceSessionProvider({ email, signOut, children }: { email: 
         if (pathname === "/tally" || pathname === "/cash-discount") return { ...emptyData };
         if (pathname === "/turnover-discount") {
           const [proposalData, launchData, reference] = await Promise.all([
-            apiRequest<{ proposals: Proposal[] }>(token, `${base}/evaluations/proposals?schemeType=tod`),
+            apiRequest<{ proposals: Proposal[] }>(token, `${base}/evaluations/proposals?schemeType=tod&activeOnly=true`),
             apiRequest<{ launchControl: LaunchControl }>(token, `${base}/launch-control`),
             apiRequest<ReferenceData>(token, `${base}/rulebook/reference-data`).catch(() => null),
           ]);
           return { ...emptyData, proposals: proposalData.proposals, launchControl: launchData.launchControl, reference };
         }
         if (pathname === "/credit-notes") {
-          const [proposalData, creditNoteData, messageData, launchData, reference] = await Promise.all([
+          const [proposalData, creditNoteData, messageData, contactData, launchData, reference, cdCreditNoteData] = await Promise.all([
             apiRequest<{ proposals: Proposal[] }>(token, `${base}/evaluations/proposals?schemeType=tod`),
             apiRequest<{ creditNotePostings: CreditNotePosting[] }>(token, `${base}/credit-notes`),
-            apiRequest<{ messages: NotificationMessage[] }>(token, `${base}/notifications`),
+            apiRequest<{ messages: NotificationMessage[] }>(token, `${base}/notifications?for=credit_notes`),
+            apiRequest<{ contacts: Contact[] }>(token, `${base}/contacts`).catch(() => ({ contacts: [] })),
             apiRequest<{ launchControl: LaunchControl }>(token, `${base}/launch-control`),
             apiRequest<ReferenceData>(token, `${base}/rulebook/reference-data`).catch(() => null),
+            apiRequest<{ creditNotes: CashDiscountCreditNote[] }>(token, `${base}/cash-discount/credit-notes`).catch(() => ({ creditNotes: [] })),
           ]);
-          return { ...emptyData, proposals: proposalData.proposals, creditNotes: creditNoteData.creditNotePostings, messages: messageData.messages, launchControl: launchData.launchControl, reference };
+          return { ...emptyData, cdCreditNotes: cdCreditNoteData.creditNotes ?? [], proposals: proposalData.proposals, creditNotes: creditNoteData.creditNotePostings, messages: messageData.messages, contacts: contactData.contacts, launchControl: launchData.launchControl, reference };
+        }
+        if (pathname === "/debit-notes") {
+          const [response, messageData, contactData] = await Promise.all([
+            apiRequest<{ history: CashDiscountDebitNoteHistory[] }>(token, `${base}/cash-discount/recoveries`, { cache: "no-store" }),
+            apiRequest<{ messages: NotificationMessage[] }>(token, `${base}/notifications?for=debit_notes`),
+            apiRequest<{ contacts: Contact[] }>(token, `${base}/contacts`).catch(() => ({ contacts: [] })),
+          ]);
+          return { ...emptyData, debitNotes: response.history ?? [], messages: messageData.messages, contacts: contactData.contacts };
         }
         if (pathname === "/messages") {
           const [messageData, messageHealth, templates] = await Promise.all([
@@ -99,12 +115,13 @@ export function WorkspaceSessionProvider({ email, signOut, children }: { email: 
         return { ...emptyData };
       })();
       workspaceRequestCache.set(cacheKey, { expiresAt: Date.now() + 5_000, request });
-      setData(await request);
+      const nextData = await request;
+      if (sequence === loadSequence.current) setData(nextData);
     } catch (cause) {
       workspaceRequestCache.delete(cacheKey);
-      setError(userFacingError(cause, "Could not load this company workspace."));
+      if (sequence === loadSequence.current) setError(userFacingError(cause, "Could not load this company workspace."));
     } finally {
-      setLoading(false);
+      if (sequence === loadSequence.current) setLoading(false);
     }
   }, [company.id, isAdministrator, pathname]);
 

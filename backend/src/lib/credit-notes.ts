@@ -17,17 +17,21 @@ type ProposalRow = {
   amount_paid_by_deadline: string | number;
   calculated_discount_amount: string | number;
   posted_discount_amount: string | number | null;
+  eligible_tonnes: string | number | null;
 };
 
 type EvaluationRow = { id: string; evaluation_run_id: string | null; source_fingerprint: string; evaluated_at: string; formula_snapshot: unknown };
 type SourceLedgerAllocation = { id: string; guid: string; name: string; amount: string };
 
-const REVIEW_REFRESH_MAX_AGE_MS = 15 * 60 * 1_000;
+// A Credit Note may be created from any completed Tally calculation of this
+// proposal (a full TOD run or a single-customer refresh) up to 5 days old.
+// The created voucher is still read back from Tally and verified.
+export const REVIEW_REFRESH_MAX_AGE_MS = 5 * 24 * 60 * 60 * 1_000;
 type PostingInput = {
   proposalId: string;
   proposalEvaluationId: string;
   creditNoteDate: string;
-  billAllocationType: "agst_ref" | "new_ref";
+  billAllocationType: "agst_ref" | "new_ref" | "on_account";
   tallyBillReference: string | null;
   calculationReference: string;
   creditNoteSnapshot: Record<string, unknown>;
@@ -94,6 +98,90 @@ async function automaticPostingMasters(companyId: string, formulaSnapshot: unkno
   return { voucherType, allocations };
 }
 
+// Credit Notes follow the client's own GST credit note (e.g. No. 15): the
+// discount goes to their "(Discount)" sales ledger, GST is added on top, the
+// total is rounded to rupees, and the party is credited On Account.
+const MEENAKSHI_STATE_GSTIN_PREFIX = "33"; // Tamil Nadu
+const GST_LEDGERS = {
+  intraState: { discount: "TN SGST Sales (Discount)", taxes: [["SGST-9%", "9"], ["CGST - 9%", "9"]] as const },
+  interState: { discount: "TN IGST Sales (Discount)", taxes: [["IGST @  18%", "18"]] as const },
+  roundOff: "Round Off",
+};
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function shortMonth(iso: string | null) { if (!iso) return ""; const [y, m] = iso.split("-"); return `${MONTHS[Number(m) - 1]}-${y.slice(2)}`; }
+function inr(value: Decimal) { return new Intl.NumberFormat("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value.toNumber()); }
+
+export type GstCreditNotePlan = {
+  mode: "intra_state" | "inter_state";
+  taxableValue: string;
+  discountLedger: { id: string; guid: string; name: string };
+  taxLines: Array<{ guid: string; name: string; rate: string; amount: string }>;
+  roundOff: { guid: string; name: string; amount: string };
+  total: string;
+  narration: string;
+  reference: string;
+  partyGstin: string | null;
+  placeOfSupply: string | null;
+};
+
+async function gstCreditNotePlan(companyId: string, customerId: string, taxable: Decimal, proposal: ProposalRow, formulaSnapshot: unknown): Promise<GstCreditNotePlan> {
+  const supabase = createSupabaseAdminClient();
+  const { data: customer, error } = await supabase.from("customers").select("tax_identifier, source_payload").eq("id", customerId).eq("company_id", companyId).maybeSingle();
+  if (error) throw error;
+  const gstin = String(customer?.tax_identifier ?? "").trim().toUpperCase() || null;
+  const stateName = String((customer?.source_payload as Record<string, unknown> | null)?.stateName ?? "").trim() || null;
+  // GSTIN state code is authoritative; fall back to the ledger's state.
+  const intraState = gstin ? gstin.startsWith(MEENAKSHI_STATE_GSTIN_PREFIX) : stateName ? /^tamil\s*nadu$/i.test(stateName) : null;
+  if (intraState === null) throw new Error("The customer's GSTIN and state are missing in Tally, so CGST/SGST or IGST cannot be decided. Update the customer ledger and refresh Tally masters.");
+  const set = intraState ? GST_LEDGERS.intraState : GST_LEDGERS.interState;
+  const names = [set.discount, ...set.taxes.map(([name]) => name), GST_LEDGERS.roundOff];
+  // Synced master names can differ from Tally only in spacing ("IGST @  18%"
+  // vs "IGST @ 18%"); match ignoring spaces, but post Tally's exact name.
+  const collapse = (value: string) => value.replace(/\s+/g, " ").trim().toLowerCase();
+  const { data: ledgers, error: ledgerError } = await supabase.from("tally_ledgers").select("id, tally_ledger_guid, name").eq("company_id", companyId).eq("is_available", true)
+    .in("name", [...new Set([...names, ...names.map((name) => name.replace(/\s+/g, " "))])]);
+  if (ledgerError) throw ledgerError;
+  const synced = new Map((ledgers ?? []).map((row) => [collapse(row.name), row]));
+  const byName = new Map(names.flatMap((name) => { const row = synced.get(collapse(name)); return row ? [[name, row] as const] : []; }));
+  const missing = names.filter((name) => !byName.has(name));
+  if (missing.length) throw new Error(`These Tally ledgers are required for the Credit Note but were not found: ${missing.join(", ")}.`);
+
+  const taxLines = set.taxes.map(([name, rate]) => ({ guid: byName.get(name)!.tally_ledger_guid, name, rate, amount: taxable.mul(rate).div(100).toDecimalPlaces(2, Decimal.ROUND_HALF_UP).toFixed(2) }));
+  const exact = taxLines.reduce((sum, line) => sum.plus(line.amount), taxable);
+  const total = exact.toDecimalPlaces(0, Decimal.ROUND_HALF_UP);
+  const roundOff = total.minus(exact); // positive: added (debit); negative: reduced (credit)
+  const formula = (formulaSnapshot && typeof formulaSnapshot === "object" ? formulaSnapshot : {}) as Record<string, unknown>;
+  const rate = formula.achievedTierRatePerMt != null ? new Decimal(String(formula.achievedTierRatePerMt)) : null;
+  const tonnes = proposal.eligible_tonnes != null ? String(proposal.eligible_tonnes) : null;
+  // Slab start (e.g. "200 MT & above") from the rule tier that pays this rate.
+  const { data: tiers } = rate
+    ? await supabase.from("scheme_version_tiers").select("minimum_tonnes, discount_amount_per_tonne").eq("scheme_version_id", proposal.scheme_version_id)
+    : { data: [] as Array<{ minimum_tonnes: number; discount_amount_per_tonne: number | null }> };
+  const tier = (tiers ?? []).find((row) => row.discount_amount_per_tonne != null && rate !== null && new Decimal(String(row.discount_amount_per_tonne)).equals(rate));
+  const tierFrom = tier ? String(Number(tier.minimum_tonnes)) : null;
+  const period = proposal.period_start && proposal.period_end ? `${shortMonth(proposal.period_start)} to ${shortMonth(proposal.period_end)}` : "the period";
+  const narration = [
+    `Being amount credited twds Turnover Discount for ${period}`,
+    rate ? `Slab ${tierFrom ? `${tierFrom} MT and above ` : ""}@ Rs.${inr(rate)}/MT` : null,
+    tonnes ? `Total qty ${Number(tonnes).toFixed(3)} MT` : null,
+    `Value Rs.${inr(taxable)}`,
+    `Credit note amount Rs.${inr(total)}`,
+  ].filter(Boolean).join(" - ");
+  const discount = byName.get(set.discount)!;
+  return {
+    mode: intraState ? "intra_state" : "inter_state",
+    taxableValue: taxable.toFixed(2),
+    discountLedger: { id: discount.id, guid: discount.tally_ledger_guid, name: discount.name },
+    taxLines,
+    roundOff: { guid: byName.get(GST_LEDGERS.roundOff)!.tally_ledger_guid, name: GST_LEDGERS.roundOff, amount: roundOff.toFixed(2) },
+    total: total.toFixed(2),
+    narration,
+    reference: `TOD ${period}`.slice(0, 50),
+    partyGstin: gstin,
+    placeOfSupply: stateName,
+  };
+}
+
 export function createCorrelationId() {
   return randomUUID();
 }
@@ -110,7 +198,7 @@ export async function buildCreditNoteApprovalInput(companyId: string, proposalId
   const supabase = createSupabaseAdminClient();
   const { data: proposalData, error: proposalError } = await supabase
     .from("discount_proposals")
-    .select("id, company_id, customer_id, scheme_version_id, scheme_type, source_sales_voucher_id, period_start, period_end, source_fingerprint, invoice_amount_due, amount_paid_by_deadline, calculated_discount_amount, posted_discount_amount")
+    .select("id, company_id, customer_id, scheme_version_id, scheme_type, source_sales_voucher_id, period_start, period_end, source_fingerprint, invoice_amount_due, amount_paid_by_deadline, calculated_discount_amount, posted_discount_amount, eligible_tonnes")
     .eq("id", proposalId).eq("company_id", companyId).maybeSingle();
   if (proposalError) throw proposalError;
   const proposal = proposalData as ProposalRow | null;
@@ -139,16 +227,12 @@ export async function buildCreditNoteApprovalInput(companyId: string, proposalId
     .maybeSingle();
   if (reviewRefreshError) throw reviewRefreshError;
   const completedAt = reviewRefresh?.completed_at ? new Date(reviewRefresh.completed_at).getTime() : Number.NaN;
-  const refreshWasRequestedForProposal = reviewRefresh?.request_context
-    && typeof reviewRefresh.request_context === "object"
-    && (reviewRefresh.request_context as Record<string, unknown>).reviewRefreshForProposal === proposal.id;
   if (
     reviewRefresh?.status !== "completed"
-    || !refreshWasRequestedForProposal
     || !Number.isFinite(completedAt)
     || Date.now() - completedAt > REVIEW_REFRESH_MAX_AGE_MS
   ) {
-    throw new Error("Refresh live Tally evidence and wait for it to complete before creating the Credit Note. A refresh is valid for 15 minutes.");
+    throw new Error("This result was calculated more than 5 days ago. Check the latest Tally information, then create the Credit Note.");
   }
 
   const [{ data: company, error: companyError }, { data: customer, error: customerError }, { data: version, error: versionError }] = await Promise.all([
@@ -158,14 +242,16 @@ export async function buildCreditNoteApprovalInput(companyId: string, proposalId
   ]);
   if (companyError || customerError || versionError) throw companyError ?? customerError ?? versionError;
   if (!company || !customer || !version) throw new Error("The proposal's current company, customer, or rule configuration is unavailable.");
-  const billAllocationType = "new_ref" as const;
-  const tallyBillReference = stableReference(["TOD", String(version.version_number), proposal.period_start ?? "period", proposal.period_end ?? "period", proposal.customer_id.slice(0, 8)]);
+  // The credit is left On Account; the accountant adjusts it against bills.
+  const billAllocationType = "on_account" as const;
+  const tallyBillReference = null;
   const calculationReference = stableReference(["TOD", String(version.version_number), proposal.period_start ?? "", proposal.period_end ?? "", evaluation.id]);
   const creditNoteDate = new Date().toISOString().slice(0, 10);
   const approvedAmount = proposal.posted_discount_amount ?? proposal.calculated_discount_amount;
   const amount = new Decimal(String(approvedAmount));
   if (!amount.isPositive()) throw new Error("The approved Credit Note amount must be positive.");
   const postingMasters = await automaticPostingMasters(companyId, evaluation.formula_snapshot, amount);
+  const gst = await gstCreditNotePlan(companyId, proposal.customer_id, amount.toDecimalPlaces(2, Decimal.ROUND_HALF_UP), proposal, evaluation.formula_snapshot);
 
   return {
     proposalId: proposal.id,
@@ -191,7 +277,10 @@ export async function buildCreditNoteApprovalInput(companyId: string, proposalId
         company: { guid: company.tally_company_guid, name: company.tally_company_name },
         voucherType: { id: postingMasters.voucherType.id, guid: postingMasters.voucherType.tally_voucher_type_guid, name: postingMasters.voucherType.name },
         party: { guid: customer.tally_ledger_guid, name: customer.ledger_name },
-        sourceSalesLedgers: postingMasters.allocations,
+        // The discount ledger carries the whole taxable value (verified as the "source" ledger).
+        sourceSalesLedgers: [{ id: gst.discountLedger.id, guid: gst.discountLedger.guid, name: gst.discountLedger.name, amount: gst.taxableValue }],
+        originalSalesLedgers: postingMasters.allocations,
+        gstNote: gst,
       },
       allocation: { type: billAllocationType, tallyBillReference },
       calculationReference,
