@@ -1,4 +1,7 @@
 import { spawnSync } from 'node:child_process';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const sourceRepo = 'nyx-solutions-team/meenakshi-ai-agents';
 const targetRepo = 'gupta1123/meenakshi-ai-agents';
@@ -33,8 +36,9 @@ function gitAuth(host, username, token) {
   };
 }
 
-async function api(url, token, headers = {}) {
+async function api(url, token, headers = {}, options = {}) {
   const response = await fetch(url, {
+    ...options,
     headers: { Authorization: `Bearer ${token}`, ...headers },
     signal: AbortSignal.timeout(30_000),
   });
@@ -66,12 +70,41 @@ function mirror() {
   console.log(`Synchronized ${sha} to ${targetRepo}.`);
 }
 
-function backend() {
-  const sha = run('git', ['subtree', 'split', '--prefix=backend', required('GITHUB_SHA')], { capture: true });
-  if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error('Invalid backend subtree commit.');
-  run('git', ['push', `https://git.heroku.com/${herokuApp}.git`, `${sha}:refs/heads/main`], {
-    env: gitAuth('git.heroku.com', '', required('HEROKU_API_KEY')),
-  });
+async function backend() {
+  const sha = required('GITHUB_SHA');
+  if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error('Invalid source commit.');
+  const token = required('HEROKU_API_KEY');
+  const base = `https://api.heroku.com/apps/${herokuApp}`;
+  const headers = { Accept: 'application/vnd.heroku+json; version=3' };
+  const directory = await mkdtemp(join(tmpdir(), 'meenakshi-deploy-'));
+  try {
+    const archive = join(directory, 'backend.tar.gz');
+    run('git', ['archive', '--format=tar.gz', `--output=${archive}`, `${sha}:backend`]);
+    const source = await api(`${base}/sources`, token, headers, { method: 'POST' });
+    const upload = await fetch(source.source_blob.put_url, {
+      method: 'PUT', body: await readFile(archive), signal: AbortSignal.timeout(60_000),
+    });
+    if (!upload.ok) throw new Error(`Backend source upload failed (${upload.status}).`);
+    let build = await api(`${base}/builds`, token, { ...headers, 'Content-Type': 'application/json' }, {
+      method: 'POST', body: JSON.stringify({ source_blob: { url: source.source_blob.get_url, version: sha } }),
+    });
+    console.log(`Heroku build ${build.id} started for ${sha}.`);
+    const deadline = Date.now() + 15 * 60_000;
+    while (build.status === 'pending' && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, 5_000));
+      build = await api(`${base}/builds/${build.id}`, token, headers);
+    }
+    if (build.output_stream_url) {
+      const log = await fetch(build.output_stream_url, { signal: AbortSignal.timeout(30_000) });
+      if (log.ok) console.log((await log.text()).replaceAll('\0', ''));
+    }
+    if (build.status !== 'succeeded' || build.source_blob?.version !== sha || !build.slug?.id) {
+      throw new Error(`Heroku build did not succeed for the expected commit (status: ${build.status}).`);
+    }
+    console.log(`Heroku built and released ${sha}.`);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 function frontend() {

@@ -3,7 +3,7 @@
 Push development changes to `nyx-solutions-team/meenakshi-ai-agents`, branch `main`.
 The `Validate, sync and deploy` Actions workflow checks both applications and the
 backend tests, then synchronizes the exact commit to `gupta1123/meenakshi-ai-agents`,
-deploys the `backend/` subtree to Heroku, and deploys `frontend/` to Netlify.
+deploys an archive of `backend/` through Heroku's Builds API, and deploys `frontend/` to Netlify.
 Production API, CORS, Netlify deployment identity and frontend HTTP checks finish
 the release. Pull requests run validation only. The mirrored workflow does not
 release from Gupta. Main releases are serialized and never force-push.
@@ -14,7 +14,7 @@ release from Gupta. Main releases are serialized and never force-push.
   Contents and Workflows write permission. Its account must have repository write
   access. Keep Gupta main free of independent edits; reconcile any divergence in
   Nyx before rerunning a failed synchronization.
-- `HEROKU_API_KEY`: dedicated Heroku deployment authorization. Rotate before expiry.
+- `HEROKU_API_KEY`: dedicated Heroku read/write deployment authorization. Rotate before expiry.
 - `NETLIFY_AUTH_TOKEN`: token belonging to an account with deployment access to the
   production Netlify site.
 - `NETLIFY_SITE_ID`: ID of `meenakshi-ai-agents.netlify.app`; the workflow rejects
