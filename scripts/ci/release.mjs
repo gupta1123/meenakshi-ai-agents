@@ -70,7 +70,7 @@ function backend() {
   const sha = run('git', ['subtree', 'split', '--prefix=backend', required('GITHUB_SHA')], { capture: true });
   if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error('Invalid backend subtree commit.');
   run('git', ['push', `https://git.heroku.com/${herokuApp}.git`, `${sha}:refs/heads/main`], {
-    env: gitAuth('git.heroku.com', 'heroku', required('HEROKU_API_KEY')),
+    env: gitAuth('git.heroku.com', '', required('HEROKU_API_KEY')),
   });
 }
 
