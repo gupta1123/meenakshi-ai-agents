@@ -40,7 +40,7 @@ export async function PATCH(request: Request, context: RouteContext) {
     if (body.isActive !== undefined) update.is_active = readBoolean(body.isActive, "isActive");
     if (!Object.keys(update).length) throw new RulebookRequestError("Provide one or more editable template fields.");
     if (update.is_active === true || (existing.is_active && (update.component_schema || update.language_code))) {
-      const problem = await liveProviderTemplateProblem({ providerTemplateId: existing.provider_template_id, languageCode: String(update.language_code ?? existing.language_code), componentSchema: update.component_schema ?? existing.component_schema });
+      const problem = await liveProviderTemplateProblem({ providerTemplateId: existing.provider_template_id, languageCode: String(update.language_code ?? existing.language_code), componentSchema: readTemplateComponentSchema(update.component_schema ?? existing.component_schema) });
       if (problem) throw new RulebookRequestError(problem, 422);
     }
     if (Object.keys(update).some((key) => key !== "name") || update.is_active === false) await assertNoOpenTemplateMessages(existing.id);

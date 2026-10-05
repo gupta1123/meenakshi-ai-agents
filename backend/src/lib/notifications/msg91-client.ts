@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { msg91Recipient } from "./eligibility";
+import { msg91Recipient, normalizeStoredE164 } from "./eligibility";
 import { renderMsg91Template } from "./template-renderer";
 import type { NotificationEventType, NotificationPayload, TemplateSnapshot } from "./types";
 
@@ -21,7 +21,8 @@ export function getMsg91Config() {
   const senderNumber = env("MSG91_WHATSAPP_NUMBER");
   const baseUrl = (env("MSG91_WHATSAPP_API_BASE_URL") || DEFAULT_BASE_URL).replace(/\/+$/, "");
   const transport = env("MEENAKSHI_MSG91_TRANSPORT").toLowerCase() || "live";
-  return { authKey, senderNumber, baseUrl, transport, isConfigured: Boolean(authKey && senderNumber) || transport === "mock" };
+  const testRecipientE164 = normalizeStoredE164(env("MEENAKSHI_MSG91_TEST_RECIPIENT_E164"));
+  return { authKey, senderNumber, baseUrl, transport, testRecipientE164, isConfigured: Boolean(authKey && senderNumber) || transport === "mock" };
 }
 
 export async function fetchMsg91WhatsappTemplates(fetcher: FetchLike = fetch) {
