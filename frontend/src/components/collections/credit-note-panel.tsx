@@ -121,7 +121,7 @@ export function CreditNotePanel({ note, companyId, onClose, onSend, onOpenCalcul
       </section>
 
       {created && <section className={styles.section} aria-labelledby="cn-pdf">
-        <div className={styles.sectionHeading}><h3 id="cn-pdf">Document</h3><span>Same layout as Tally's print</span></div>
+        <div className={styles.sectionHeading}><h3 id="cn-pdf">Document</h3><span>Same layout as Tally&apos;s print</span></div>
         {/* A failed read is not shown: the PDF simply prints without the e-Invoice block. */}
         {einvoice && (typeof einvoice === "object" || einvoice === "none") && <p className={styles.paymentMeta}>{typeof einvoice === "object" ? <span>e-Invoice: IRN {einvoice.irn.slice(0, 16)}… · Ack No. {einvoice.ackNo}, printed with its QR code.</span>
           : einvoice === "none" ? <span>Not e-invoiced in Tally yet, so the PDF has no IRN or QR. Generate the e-Invoice in Tally, then show the PDF again.</span>
