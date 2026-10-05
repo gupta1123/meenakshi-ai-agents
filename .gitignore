@@ -15,6 +15,7 @@
 **/out/
 **/build/
 **/coverage/
+**/.netlify/
 **/*.tsbuildinfo
 
 # Desktop installer output

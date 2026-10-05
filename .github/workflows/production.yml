@@ -1,0 +1,82 @@
+name: Validate, sync and deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NEXT_PUBLIC_API_BASE_URL: https://meenakshi-ai-agents-d9c2580d84e3.herokuapp.com
+  NEXT_PUBLIC_SUPABASE_URL: https://onjbqvqinbsojdptqixo.supabase.co
+  NEXT_TELEMETRY_DISABLED: '1'
+
+jobs:
+  validate:
+    if: github.repository == 'nyx-solutions-team/meenakshi-ai-agents'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ci-build-only-key
+      SUPABASE_SECRET_KEY: ci-build-only-key
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+      - run: npm install --global npm@11.6.2
+      - run: npm ci --prefix backend
+      - run: npm ci --prefix frontend
+      - run: npm test --prefix backend
+      - run: npm run build --prefix backend
+      - run: npm run typecheck --prefix backend
+      - run: npm run build --prefix frontend
+      - run: npm run typecheck --prefix frontend
+
+  release:
+    needs: validate
+    if: github.repository == 'nyx-solutions-team/meenakshi-ai-agents' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      GUPTA_REPO_TOKEN: ${{ secrets.GUPTA_REPO_TOKEN }}
+      HEROKU_API_KEY: ${{ secrets.HEROKU_API_KEY }}
+      NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+      NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+      NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm install --global npm@11.6.2
+      - name: Verify deployment credentials and target identities
+        run: node scripts/ci/release.mjs preflight
+      - name: Sync the verified commit to Gupta
+        run: node scripts/ci/release.mjs mirror
+      - name: Deploy backend to Heroku
+        run: node scripts/ci/release.mjs backend
+      - run: npm ci --prefix frontend
+      - name: Deploy frontend to Netlify
+        run: node scripts/ci/release.mjs frontend
+      - name: Verify production API, CORS and frontend
+        run: node scripts/ci/release.mjs verify
