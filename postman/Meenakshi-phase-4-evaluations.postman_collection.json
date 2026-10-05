@@ -1,0 +1,59 @@
+{
+  "info": {
+    "_postman_id": "6191fb92-7648-4987-bd1a-7ff5e05e0e59",
+    "name": "Meenakshi local API — Phase 4 evaluations",
+    "description": "Queue and poll a fresh CD/TOD evaluation. Apply 20260805000000_phase_4_evaluation_execution.sql after the prior chain, use a paired healthy Tally bridge, and run both backend workers. This collection contains no password, service-role key, bridge token, or real customer data.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "api_base", "value": "http://localhost:3001", "type": "string" },
+    { "key": "access_token", "value": "", "type": "string" },
+    { "key": "company_id", "value": "", "type": "string" },
+    { "key": "sales_voucher_id", "value": "", "type": "string" },
+    { "key": "customer_id", "value": "", "type": "string" },
+    { "key": "evaluated_on", "value": "2026-08-04", "type": "string" },
+    { "key": "evaluation_run_id", "value": "", "type": "string" },
+    { "key": "proposal_id", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "1. Queue Cash Discount evaluation",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('CD evaluation is queued', () => pm.response.to.have.status(202));", "pm.collectionVariables.set('evaluation_run_id', pm.response.json().evaluationRun.id);"] } }],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" }, { "key": "Idempotency-Key", "value": "phase4-cd-{{sales_voucher_id}}" }],
+        "body": { "mode": "raw", "raw": "{\n  \"salesVoucherId\": \"{{sales_voucher_id}}\",\n  \"evaluatedOn\": \"{{evaluated_on}}\"\n}", "options": { "raw": { "language": "json" } } },
+        "url": "{{api_base}}/api/companies/{{company_id}}/evaluations/cd"
+      }
+    },
+    {
+      "name": "2. Queue Turnover Discount evaluation",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('TOD evaluation is queued', () => pm.response.to.have.status(202));", "pm.collectionVariables.set('evaluation_run_id', pm.response.json().evaluationRun.id);"] } }],
+      "request": {
+        "method": "POST",
+        "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" }, { "key": "Idempotency-Key", "value": "phase4-tod-{{customer_id}}-{{evaluated_on}}" }],
+        "body": { "mode": "raw", "raw": "{\n  \"customerId\": \"{{customer_id}}\",\n  \"asOfDate\": \"{{evaluated_on}}\",\n  \"evaluatedOn\": \"{{evaluated_on}}\"\n}", "options": { "raw": { "language": "json" } } },
+        "url": "{{api_base}}/api/companies/{{company_id}}/evaluations/tod"
+      }
+    },
+    {
+      "name": "3. Poll evaluation run",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('run is readable', () => pm.response.to.have.status(200));", "const body = pm.response.json();", "if (body.proposalId) pm.collectionVariables.set('proposal_id', body.proposalId);"] } }],
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+        "url": "{{api_base}}/api/companies/{{company_id}}/evaluations/runs/{{evaluation_run_id}}",
+        "description": "Repeat only after both the outbox worker and evaluation worker are running. Expect refreshing_tally while Tally chunks are in progress, then completed or completed_with_issues."
+      }
+    },
+    {
+      "name": "4. Read completed proposal",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }],
+        "url": "{{api_base}}/api/companies/{{company_id}}/evaluations/proposals/{{proposal_id}}",
+        "description": "Run only after Poll evaluation run returned a proposalId. This returns finance-safe calculated values, reason codes, and summary snapshots—not raw Tally payloads."
+      }
+    }
+  ]
+}

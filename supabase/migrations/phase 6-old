@@ -1,0 +1,470 @@
+-- Phase 6: controlled MSG91 WhatsApp notifications.
+-- This migration extends the existing notification tables. It deliberately
+-- does not create a generic "send message" surface or modify Tally workflows.
+
+alter table public.notification_messages
+  add column if not exists available_at timestamptz not null default now(),
+  add column if not exists locked_at timestamptz,
+  add column if not exists locked_by text,
+  add column if not exists lease_expires_at timestamptz,
+  add column if not exists attempt_count integer not null default 0 check (attempt_count >= 0),
+  add column if not exists max_attempts integer not null default 5 check (max_attempts > 0),
+  add column if not exists provider_metadata jsonb not null default '{}'::jsonb;
+
+update public.notification_messages
+set available_at = coalesce(available_at, scheduled_for, created_at, now())
+where available_at is null;
+
+-- A pre-Phase-6 sending row has no lease information. Return it to the retry
+-- path before enforcing the new lease invariant rather than guessing whether a
+-- historical process is still running.
+update public.notification_messages
+set status = 'failed',
+    available_at = now(),
+    failure_reason = coalesce(failure_reason, 'Recovered after Phase 6 notification lease migration.'),
+    updated_at = now()
+where status = 'sending';
+
+alter table public.notification_messages
+  add constraint notification_messages_attempt_limit_check
+    check (attempt_count <= max_attempts),
+  add constraint notification_messages_lock_check
+    check (
+      (status = 'sending' and locked_at is not null and locked_by is not null and lease_expires_at is not null)
+      or (status <> 'sending' and locked_at is null and locked_by is null and lease_expires_at is null)
+    );
+
+-- One active approved template per business event is intentional. Historical
+-- templates remain available for message snapshots and audit history.
+create unique index whatsapp_templates_one_active_event_idx
+  on public.whatsapp_templates (organization_id, event_type)
+  where is_active;
+
+create index notification_messages_company_status_idx
+  on public.notification_messages (company_id, status, created_at desc);
+create index notification_messages_claim_idx
+  on public.notification_messages (available_at, created_at)
+  where status in ('queued', 'failed', 'sending');
+create index notification_messages_contact_idx
+  on public.notification_messages (company_id, customer_contact_id, created_at desc);
+create index notification_attempts_recent_idx
+  on public.notification_attempts (notification_message_id, attempted_at desc);
+
+-- Keep all identity, consent and business-state safeguards in the database.
+-- A re-claimed temporary failure is allowed to move directly back to sending,
+-- while a stale item is suppressed before any provider call.
+create or replace function public.validate_notification_message()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+declare
+  requires_send_validation boolean;
+  is_currently_opted_in boolean;
+  current_opt_in_snapshot jsonb;
+  current_template_snapshot jsonb;
+begin
+  if tg_op = 'UPDATE' and (
+    new.company_id <> old.company_id
+    or new.proposal_id <> old.proposal_id
+    or new.customer_contact_id <> old.customer_contact_id
+    or new.whatsapp_template_id <> old.whatsapp_template_id
+    or new.event_type <> old.event_type
+    or new.business_event_key <> old.business_event_key
+    or new.credit_note_posting_id is distinct from old.credit_note_posting_id
+    or new.resend_of_notification_id is distinct from old.resend_of_notification_id
+  ) then
+    raise exception 'Message identity and frozen business evidence cannot change after creation';
+  end if;
+
+  if tg_op = 'UPDATE' and new.status <> old.status then
+    if not (
+      (old.status = 'queued' and new.status in ('sending', 'failed', 'suppressed', 'cancelled'))
+      or (old.status = 'sending' and new.status in ('sent', 'failed', 'suppressed'))
+      or (old.status = 'sent' and new.status in ('delivered', 'read', 'failed'))
+      or (old.status = 'delivered' and new.status = 'read')
+      or (old.status = 'failed' and new.status in ('queued', 'sending', 'suppressed', 'cancelled'))
+    ) then
+      raise exception 'Invalid notification status transition: % to %', old.status, new.status;
+    end if;
+  end if;
+
+  requires_send_validation := tg_op = 'INSERT'
+    or (tg_op = 'UPDATE' and new.status = 'sending' and old.status <> 'sending');
+
+  if requires_send_validation then
+    if not exists (
+      select 1
+      from public.companies company
+      join public.discount_proposals proposal
+        on proposal.id = new.proposal_id and proposal.company_id = company.id
+      join public.customer_contacts contact
+        on contact.id = new.customer_contact_id
+       and contact.company_id = company.id
+       and contact.customer_id = proposal.customer_id
+       and contact.is_active
+      join public.whatsapp_templates template
+        on template.id = new.whatsapp_template_id
+       and template.organization_id = company.organization_id
+       and template.event_type = new.event_type
+       and template.is_active
+      where company.id = new.company_id
+    ) then
+      raise exception 'Active template, recipient, proposal, and company must belong to the same organization and customer';
+    end if;
+
+    select true, jsonb_build_object(
+      'optInId', opt_in.id, 'recordedAt', opt_in.recorded_at,
+      'source', opt_in.source, 'evidence', opt_in.evidence
+    ) into is_currently_opted_in, current_opt_in_snapshot
+    from public.whatsapp_opt_ins opt_in
+    where opt_in.customer_contact_id = new.customer_contact_id
+      and opt_in.is_opted_in and opt_in.revoked_at is null
+    order by opt_in.recorded_at desc
+    limit 1;
+
+    if not coalesce(is_currently_opted_in, false) then
+      raise exception 'Sending a WhatsApp message requires a current recorded opt-in';
+    end if;
+
+    select jsonb_build_object(
+      'templateId', template.id, 'provider', template.provider_name,
+      'providerTemplateId', template.provider_template_id,
+      'eventType', template.event_type, 'languageCode', template.language_code,
+      'namespace', template.template_namespace, 'version', template.template_version,
+      'componentSchema', template.component_schema
+    ) into current_template_snapshot
+    from public.whatsapp_templates template
+    where template.id = new.whatsapp_template_id;
+
+    if tg_op = 'INSERT' then
+      new.opt_in_snapshot := current_opt_in_snapshot;
+      new.template_snapshot := current_template_snapshot;
+    end if;
+
+    if new.event_type = 'cd_shortfall' and not exists (
+      select 1 from public.discount_proposals proposal
+      where proposal.id = new.proposal_id and proposal.company_id = new.company_id
+        and proposal.scheme_type = 'cd' and proposal.status = 'near_eligibility'
+        and proposal.shortfall_amount > 0
+    ) then
+      raise exception 'CD shortfall messages require a current near-eligibility proposal with a positive shortfall';
+    end if;
+
+    if new.event_type in ('cd_credit_note_created', 'tod_credit_note_created') and (
+      new.credit_note_posting_id is null or not exists (
+        select 1 from public.credit_note_postings posting
+        where posting.id = new.credit_note_posting_id
+          and posting.proposal_id = new.proposal_id
+          and posting.company_id = new.company_id
+          and posting.status = 'created_verified'
+      )
+    ) then
+      raise exception 'Credit Note messages require a verified Tally Credit Note';
+    end if;
+
+    if new.resend_of_notification_id is not null and not exists (
+      select 1 from public.notification_messages original
+      where original.id = new.resend_of_notification_id
+        and original.company_id = new.company_id
+        and original.proposal_id = new.proposal_id
+        and original.customer_contact_id = new.customer_contact_id
+        and original.event_type = new.event_type
+    ) then
+      raise exception 'A resend must reference a message for the same company, proposal, recipient, and event';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+-- Produces one immutable initial event for a proposal. Missing consent,
+-- contacts or templates simply mean there is no event to send.
+create or replace function public.enqueue_phase_6_notification(
+  p_company_id uuid,
+  p_proposal_id uuid,
+  p_event_type text,
+  p_credit_note_posting_id uuid default null,
+  p_created_by uuid default null
+)
+returns uuid
+language plpgsql
+set search_path = ''
+as $$
+declare
+  proposal_record public.discount_proposals;
+  company_record public.companies;
+  contact_record public.customer_contacts;
+  template_record public.whatsapp_templates;
+  posting_record public.credit_note_postings;
+  customer_name text;
+  invoice_reference text;
+  event_key text;
+  payload jsonb;
+  message_id uuid;
+begin
+  select proposal.* into proposal_record
+  from public.discount_proposals proposal
+  where proposal.id = p_proposal_id and proposal.company_id = p_company_id;
+  if not found then raise exception 'Proposal was not found for company'; end if;
+
+  if p_event_type not in ('cd_shortfall', 'cd_credit_note_created', 'tod_credit_note_created') then
+    raise exception 'Unsupported notification event type';
+  end if;
+  if (p_event_type = 'cd_shortfall' and (proposal_record.scheme_type <> 'cd' or proposal_record.status <> 'near_eligibility' or proposal_record.shortfall_amount <= 0))
+     or (p_event_type = 'cd_credit_note_created' and proposal_record.scheme_type <> 'cd')
+     or (p_event_type = 'tod_credit_note_created' and proposal_record.scheme_type <> 'tod') then
+    return null;
+  end if;
+
+  select * into company_record from public.companies where id = p_company_id;
+  select * into contact_record
+  from public.customer_contacts contact
+  where contact.company_id = p_company_id and contact.customer_id = proposal_record.customer_id
+    and contact.is_active
+  order by contact.is_primary desc, contact.created_at asc
+  limit 1;
+  if not found or not exists (
+    select 1 from public.whatsapp_opt_ins opt_in
+    where opt_in.company_id = p_company_id and opt_in.customer_contact_id = contact_record.id
+      and opt_in.is_opted_in and opt_in.revoked_at is null
+  ) then return null; end if;
+
+  select * into template_record from public.whatsapp_templates template
+  where template.organization_id = company_record.organization_id
+    and template.event_type = p_event_type and template.is_active
+  limit 1;
+  if not found then return null; end if;
+
+  select coalesce(nullif(contact_record.contact_name, ''), customer.ledger_name, 'Customer')
+    into customer_name
+  from public.customers customer where customer.id = proposal_record.customer_id and customer.company_id = p_company_id;
+  select coalesce(voucher.voucher_number, voucher.tally_guid, proposal_record.source_sales_voucher_id::text, '')
+    into invoice_reference
+  from public.tally_vouchers voucher
+  where voucher.id = proposal_record.source_sales_voucher_id and voucher.company_id = p_company_id;
+
+  if p_event_type = 'cd_shortfall' then
+    event_key := 'phase6:cd_shortfall:' || proposal_record.id::text;
+    payload := jsonb_build_object(
+      'customerName', customer_name, 'companyName', company_record.tally_company_name,
+      'invoiceReference', coalesce(invoice_reference, ''),
+      'paidAmount', proposal_record.amount_paid_by_deadline,
+      'benefitAmount', proposal_record.calculated_discount_amount,
+      'shortfallAmount', proposal_record.shortfall_amount,
+      'eligibilityDeadline', proposal_record.eligibility_deadline,
+      'eventType', p_event_type
+    );
+  else
+    select posting.* into posting_record from public.credit_note_postings posting
+    where posting.id = p_credit_note_posting_id and posting.company_id = p_company_id
+      and posting.proposal_id = proposal_record.id and posting.status = 'created_verified';
+    if not found then return null; end if;
+    event_key := 'phase6:credit_note:' || posting_record.id::text;
+    payload := jsonb_build_object(
+      'customerName', customer_name, 'companyName', company_record.tally_company_name,
+      'creditNoteNumber', posting_record.verified_voucher_number,
+      'creditNoteDate', posting_record.credit_note_date,
+      'creditNoteAmount', posting_record.verified_amount,
+      'invoiceReference', coalesce(invoice_reference, posting_record.tally_bill_reference, ''),
+      'todPeriodStart', proposal_record.period_start,
+      'todPeriodEnd', proposal_record.period_end,
+      'todTonnes', proposal_record.eligible_tonnes,
+      'todTierId', proposal_record.achieved_tier_id,
+      'documentStoragePath', posting_record.document_storage_path,
+      'eventType', p_event_type
+    );
+  end if;
+
+  insert into public.notification_messages (
+    company_id, proposal_id, credit_note_posting_id, customer_contact_id,
+    whatsapp_template_id, event_type, business_event_key, recipient_phone_e164,
+    payload, opt_in_snapshot, status, scheduled_for, available_at, created_by
+  ) values (
+    p_company_id, proposal_record.id, p_credit_note_posting_id, contact_record.id,
+    template_record.id, p_event_type, event_key, contact_record.phone_e164,
+    payload, '{}'::jsonb, 'queued', now(), now(), p_created_by
+  ) on conflict (business_event_key) do update
+    set updated_at = public.notification_messages.updated_at
+  returning id into message_id;
+  return message_id;
+end;
+$$;
+
+create or replace function public.phase_6_enqueue_shortfall_reminder_trigger()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+begin
+  if new.scheme_type = 'cd' and new.status = 'near_eligibility' and new.shortfall_amount > 0 then
+    perform public.enqueue_phase_6_notification(new.company_id, new.id, 'cd_shortfall', null, null);
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists phase_6_enqueue_shortfall_reminder on public.discount_proposals;
+create trigger phase_6_enqueue_shortfall_reminder
+  after insert or update of status, shortfall_amount on public.discount_proposals
+  for each row execute function public.phase_6_enqueue_shortfall_reminder_trigger();
+
+create or replace function public.phase_6_enqueue_verified_credit_note_trigger()
+returns trigger
+language plpgsql
+set search_path = ''
+as $$
+declare
+  event_type text;
+begin
+  if new.status = 'created_verified' and old.status is distinct from 'created_verified' then
+    select case proposal.scheme_type when 'cd' then 'cd_credit_note_created' else 'tod_credit_note_created' end
+      into event_type
+    from public.discount_proposals proposal
+    where proposal.id = new.proposal_id and proposal.company_id = new.company_id;
+    if event_type is not null then
+      perform public.enqueue_phase_6_notification(new.company_id, new.proposal_id, event_type, new.id, null);
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
+drop trigger if exists phase_6_enqueue_verified_credit_note on public.credit_note_postings;
+create trigger phase_6_enqueue_verified_credit_note
+  after update of status on public.credit_note_postings
+  for each row execute function public.phase_6_enqueue_verified_credit_note_trigger();
+
+-- A resend is a distinct, audited business event. The original event remains
+-- immutable and no caller can select a different recipient or payload.
+create or replace function public.resend_phase_6_notification(
+  p_notification_message_id uuid,
+  p_company_id uuid,
+  p_actor_id uuid,
+  p_reason text,
+  p_resend_key text
+)
+returns uuid
+language plpgsql
+set search_path = ''
+as $$
+declare
+  original public.notification_messages;
+  company_record public.companies;
+  new_message_id uuid;
+begin
+  if nullif(btrim(coalesce(p_reason, '')), '') is null or length(btrim(p_reason)) > 500 then
+    raise exception 'A resend reason of at most 500 characters is required';
+  end if;
+  if nullif(btrim(coalesce(p_resend_key, '')), '') is null or length(p_resend_key) > 120 then
+    raise exception 'A resend idempotency key is required';
+  end if;
+  select * into original from public.notification_messages
+  where id = p_notification_message_id and company_id = p_company_id for update;
+  if not found then raise exception 'Notification message was not found for company'; end if;
+  if original.status not in ('sent', 'delivered', 'read', 'failed') then
+    raise exception 'Only sent, delivered, read, or failed messages may be resent';
+  end if;
+
+  insert into public.notification_messages (
+    company_id, proposal_id, credit_note_posting_id, customer_contact_id,
+    whatsapp_template_id, event_type, business_event_key, resend_of_notification_id,
+    resend_reason, recipient_phone_e164, payload, opt_in_snapshot, status,
+    scheduled_for, available_at, created_by
+  ) values (
+    original.company_id, original.proposal_id, original.credit_note_posting_id,
+    original.customer_contact_id, original.whatsapp_template_id, original.event_type,
+    'phase6:resend:' || original.id::text || ':' || btrim(p_resend_key), original.id,
+    btrim(p_reason), original.recipient_phone_e164, original.payload, '{}'::jsonb,
+    'queued', now(), now(), p_actor_id
+  ) on conflict (business_event_key) do update
+    set updated_at = public.notification_messages.updated_at
+  returning id into new_message_id;
+
+  select * into company_record from public.companies where id = p_company_id;
+  insert into public.audit_events (
+    organization_id, company_id, actor_type, actor_id, action, entity_type,
+    entity_id, new_value, metadata
+  ) values (
+    company_record.organization_id, p_company_id, 'user', p_actor_id,
+    'notification_resent', 'notification_message', new_message_id,
+    jsonb_build_object('resendOfNotificationId', original.id, 'reason', btrim(p_reason)),
+    jsonb_build_object('eventType', original.event_type, 'resendKey', btrim(p_resend_key))
+  );
+  return new_message_id;
+end;
+$$;
+
+-- Claiming verifies consent and current business eligibility before delivery.
+-- Invalidated or revoked messages are suppressed instead of being sent.
+create or replace function public.claim_phase_6_notification_messages(
+  p_worker_id text,
+  p_limit integer default 10,
+  p_lease_seconds integer default 90
+)
+returns setof public.notification_messages
+language sql
+set search_path = ''
+as $$
+  with suppressed as (
+    update public.notification_messages message
+    set status = 'suppressed',
+        failure_reason = 'Notification suppressed because consent or current business eligibility is no longer valid.',
+        locked_at = null, locked_by = null, lease_expires_at = null, updated_at = now()
+    where message.status in ('queued', 'failed', 'sending')
+      and (
+        not exists (
+          select 1 from public.whatsapp_opt_ins opt_in
+          where opt_in.company_id = message.company_id
+            and opt_in.customer_contact_id = message.customer_contact_id
+            and opt_in.is_opted_in and opt_in.revoked_at is null
+        )
+        or (message.event_type = 'cd_shortfall' and not exists (
+          select 1 from public.discount_proposals proposal
+          where proposal.id = message.proposal_id and proposal.company_id = message.company_id
+            and proposal.scheme_type = 'cd' and proposal.status = 'near_eligibility'
+            and proposal.shortfall_amount > 0
+        ))
+        or (message.event_type in ('cd_credit_note_created', 'tod_credit_note_created') and not exists (
+          select 1 from public.credit_note_postings posting
+          where posting.id = message.credit_note_posting_id and posting.proposal_id = message.proposal_id
+            and posting.company_id = message.company_id and posting.status = 'created_verified'
+        ))
+      )
+    returning message.id
+  ), candidates as (
+    select message.id
+    from public.notification_messages message
+    where message.attempt_count < message.max_attempts
+      and (
+        (message.status in ('queued', 'failed') and message.available_at <= now())
+        or (message.status = 'sending' and message.lease_expires_at < now())
+      )
+    order by message.available_at, message.created_at
+    for update skip locked
+    limit greatest(1, least(p_limit, 50))
+  )
+  update public.notification_messages message
+  set status = 'sending', locked_at = now(), locked_by = p_worker_id,
+      lease_expires_at = now() + make_interval(secs => greatest(15, p_lease_seconds)),
+      attempt_count = message.attempt_count + 1, updated_at = now()
+  from candidates
+  where message.id = candidates.id
+  returning message.*;
+$$;
+
+alter table public.notification_messages enable row level security;
+alter table public.notification_attempts enable row level security;
+alter table public.whatsapp_templates enable row level security;
+revoke all on table public.notification_messages, public.notification_attempts, public.whatsapp_templates from anon, authenticated;
+grant all on table public.notification_messages, public.notification_attempts, public.whatsapp_templates to service_role;
+
+revoke execute on function public.enqueue_phase_6_notification(uuid, uuid, text, uuid, uuid) from public, anon, authenticated;
+revoke execute on function public.resend_phase_6_notification(uuid, uuid, uuid, text, text) from public, anon, authenticated;
+revoke execute on function public.claim_phase_6_notification_messages(text, integer, integer) from public, anon, authenticated;
+grant execute on function public.enqueue_phase_6_notification(uuid, uuid, text, uuid, uuid) to service_role;
+grant execute on function public.resend_phase_6_notification(uuid, uuid, uuid, text, text) to service_role;
+grant execute on function public.claim_phase_6_notification_messages(text, integer, integer) to service_role;
+
+comment on table public.notification_messages is
+  'Phase 6 MSG91 notification events. Queue delivery never changes or creates a Tally Credit Note.';

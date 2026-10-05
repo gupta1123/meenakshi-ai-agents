@@ -1,0 +1,30 @@
+{
+  "name": "meenakshi-tally-bridge",
+  "private": true,
+  "version": "0.3.1",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "decimal.js": "10.6.0"
+  },
+  "scripts": {
+    "configure": "node ./src/bridge.mjs configure",
+    "configure-pdf-capture": "node ./src/bridge.mjs configure-pdf-capture",
+    "connect": "node ./src/bridge.mjs connect",
+    "install-protocol": "node ./src/bridge.mjs install-protocol",
+    "machine-id": "node ./src/bridge.mjs machine-id",
+    "pair": "node ./src/bridge.mjs pair",
+    "probe": "node ./src/bridge.mjs probe",
+    "start": "node ./src/bridge.mjs start",
+    "once": "node ./src/bridge.mjs once",
+    "test": "node --test ./test/*.test.mjs",
+    "desktop:dev": "npm --prefix ./installer/electron-app run start",
+    "installer:validate": "node ./scripts/build-meenakshi-installer.mjs --validate",
+    "installer:build": "node ./scripts/build-meenakshi-installer.mjs",
+    "seed:cd-test": "node ./scripts/seed-cd-test-cases.mjs",
+    "seed:cd-recovery-test": "node ./scripts/seed-cd-recovery-cases.mjs",
+    "seed:tod-test": "node ./scripts/seed-tod-test-vouchers.mjs"
+  }
+}

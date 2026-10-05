@@ -1,0 +1,297 @@
+{
+  "info": {
+    "_postman_id": "5d5ddf10-6e45-4a48-b796-2108f7255103",
+    "name": "Meenakshi local API — Phase 1 and Phase 2",
+    "description": "Import this collection into Postman. Set only the blank collection variables in the Variables tab. Do not place a Supabase service-role/secret key here. The bridge routes are deliberately not included as manually runnable requests: the tally-bridge CLI calls them with its installation credential.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "api_base", "value": "http://localhost:3001", "type": "string" },
+    { "key": "supabase_url", "value": "", "type": "string" },
+    { "key": "supabase_publishable_key", "value": "", "type": "string" },
+    { "key": "admin_email", "value": "meenakshi.api.admin@example.test", "type": "string" },
+    { "key": "admin_password", "value": "", "type": "string" },
+    { "key": "access_token", "value": "", "type": "string" },
+    { "key": "organization_id", "value": "", "type": "string" },
+    { "key": "company_id", "value": "", "type": "string" },
+    { "key": "tally_test_company_id", "value": "", "type": "string" },
+    { "key": "machine_fingerprint", "value": "", "type": "string" },
+    { "key": "installation_key", "value": "meenakshi-local-tally-01", "type": "string" },
+    { "key": "connector_id", "value": "", "type": "string" },
+    { "key": "control_token", "value": "", "type": "string" },
+    { "key": "sync_run_id", "value": "", "type": "string" },
+    { "key": "master_sync_key", "value": "local-master-sync-001", "type": "string" },
+    { "key": "voucher_sync_key", "value": "local-voucher-sync-001", "type": "string" },
+    { "key": "voucher_date_from", "value": "2026-01-01", "type": "string" },
+    { "key": "voucher_date_to", "value": "2026-01-01", "type": "string" },
+    { "key": "sales_voucher_id", "value": "", "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "1. Sign in (Supabase Auth)",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('sign-in succeeds', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "pm.collectionVariables.set('access_token', body.access_token);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "apikey", "value": "{{supabase_publishable_key}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"{{admin_email}}\",\n  \"password\": \"{{admin_password}}\"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": {
+          "raw": "{{supabase_url}}/auth/v1/token?grant_type=password",
+          "host": [ "{{supabase_url}}" ],
+          "path": [ "auth", "v1", "token" ],
+          "query": [ { "key": "grant_type", "value": "password" } ]
+        },
+        "description": "Uses the publishable key and the local administrator test account. The Tests tab stores the returned access token locally in this collection."
+      }
+    },
+    {
+      "name": "2. Bootstrap access",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('bootstrap succeeds', () => pm.response.to.have.status(200));",
+              "const body = pm.response.json();",
+              "const organization = body.organizations?.[0];",
+              "const company = organization?.companies?.[0];",
+              "if (!organization || !company) throw new Error('No enabled organization/company was returned. Re-run the test-access provisioner.');",
+              "pm.collectionVariables.set('organization_id', organization.id);",
+              "pm.collectionVariables.set('company_id', company.id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" } ],
+        "url": { "raw": "{{api_base}}/api/bootstrap", "host": [ "{{api_base}}" ], "path": [ "api", "bootstrap" ] },
+        "description": "Stores organization_id and company_id for the remaining administrator requests."
+      }
+    },
+    {
+      "name": "3. Tally health — before pairing",
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" } ],
+        "url": { "raw": "{{api_base}}/api/companies/{{company_id}}/tally-health", "host": [ "{{api_base}}" ], "path": [ "api", "companies", "{{company_id}}", "tally-health" ] },
+        "description": "Expected before setup: status not_bound. This confirms authenticated access and Phase 2 status reads."
+      }
+    },
+    {
+      "name": "4. Create connector — after machine-id",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('connector is created', () => pm.response.to.have.status(201));",
+              "const body = pm.response.json();",
+              "pm.collectionVariables.set('connector_id', body.connector.id);",
+              "pm.collectionVariables.set('control_token', body.controlToken);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{access_token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"organizationId\": \"{{organization_id}}\",\n  \"installationKey\": \"{{installation_key}}\",\n  \"displayName\": \"Meenakshi Local Tally Bridge\",\n  \"machineFingerprint\": \"{{machine_fingerprint}}\"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": { "raw": "{{api_base}}/api/connectors", "host": [ "{{api_base}}" ], "path": [ "api", "connectors" ] },
+        "description": "Run npm run machine-id in tally-bridge first and paste its output into machine_fingerprint. The Tests tab stores connector_id and the one-time control_token locally; do not share or export that token."
+      }
+    },
+    {
+      "name": "5. List connectors",
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" } ],
+        "url": { "raw": "{{api_base}}/api/connectors?organizationId={{organization_id}}", "host": [ "{{api_base}}" ], "path": [ "api", "connectors" ], "query": [ { "key": "organizationId", "value": "{{organization_id}}" } ] }
+      }
+    },
+    {
+      "name": "7. Bind connector to registered Tally test company",
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{access_token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"companyId\": \"{{tally_test_company_id}}\"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": { "raw": "{{api_base}}/api/connectors/{{connector_id}}/bindings", "host": [ "{{api_base}}" ], "path": [ "api", "connectors", "{{connector_id}}", "bindings" ] },
+        "description": "Run after request 6a has registered the exact active Tally company GUID and name. It binds only that separate controlled company, never the demo company."
+      }
+    },
+    {
+      "name": "6a. Register probed Tally test company",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Tally company is registered', () => pm.response.to.have.status(201));",
+              "pm.collectionVariables.set('tally_test_company_id', pm.response.json().company.id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{access_token}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"organizationId\": \"{{organization_id}}\",\n  \"code\": \"TALLY_TEST\",\n  \"tallyCompanyGuid\": \"a40939e2-530a-4d85-8f83-33c8bbd5f932\",\n  \"tallyCompanyName\": \"Test\",\n  \"timezone\": \"Asia/Kolkata\"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": { "raw": "{{api_base}}/api/companies", "host": [ "{{api_base}}" ], "path": [ "api", "companies" ] },
+        "description": "Registers the exact name/GUID returned by the successful controlled Tally probe. It creates a separate company record and leaves the old demo company untouched. The Tests tab saves tally_test_company_id."
+      }
+    },
+    {
+      "name": "8. List connector bindings",
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" } ],
+        "url": { "raw": "{{api_base}}/api/connectors/{{connector_id}}/bindings", "host": [ "{{api_base}}" ], "path": [ "api", "connectors", "{{connector_id}}", "bindings" ] }
+      }
+    },
+    {
+      "name": "9. Tally health — after bridge pairing",
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" } ],
+        "url": { "raw": "{{api_base}}/api/companies/{{company_id}}/tally-health", "host": [ "{{api_base}}" ], "path": [ "api", "companies", "{{company_id}}", "tally-health" ] },
+        "description": "Expected only after the bridge has paired and sent a valid heartbeat: status ready."
+      }
+    },
+    {
+      "name": "10. Queue full master sync",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('master sync is queued', () => pm.response.to.have.status(202));",
+              "pm.collectionVariables.set('sync_run_id', pm.response.json().syncRun.id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{access_token}}" },
+          { "key": "Idempotency-Key", "value": "{{master_sync_key}}" }
+        ],
+        "url": { "raw": "{{api_base}}/api/companies/{{company_id}}/sync/masters", "host": [ "{{api_base}}" ], "path": [ "api", "companies", "{{company_id}}", "sync", "masters" ] },
+        "description": "Run only when Tally health is ready and the outbox worker plus bridge are running. This is read-only against Tally."
+      }
+    },
+    {
+      "name": "11. Read last sync run",
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" } ],
+        "url": { "raw": "{{api_base}}/api/companies/{{company_id}}/sync/runs/{{sync_run_id}}", "host": [ "{{api_base}}" ], "path": [ "api", "companies", "{{company_id}}", "sync", "runs", "{{sync_run_id}}" ] },
+        "description": "Repeat this request until status is completed. It shows received/applied counts and any error summary."
+      }
+    },
+    {
+      "name": "12. Queue a small voucher sync",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('voucher sync is queued', () => pm.response.to.have.status(202));",
+              "pm.collectionVariables.set('sync_run_id', pm.response.json().syncRun.id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{access_token}}" },
+          { "key": "Content-Type", "value": "application/json" },
+          { "key": "Idempotency-Key", "value": "{{voucher_sync_key}}" }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"dateFrom\": \"{{voucher_date_from}}\",\n  \"dateTo\": \"{{voucher_date_to}}\"\n}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": { "raw": "{{api_base}}/api/companies/{{company_id}}/sync/vouchers", "host": [ "{{api_base}}" ], "path": [ "api", "companies", "{{company_id}}", "sync", "vouchers" ] },
+        "description": "After masters complete, change the dates to one known, controlled day in Tally. It only reads vouchers. Do not use an entire financial year for the first test."
+      }
+    },
+    {
+      "name": "13. List synced Sales vouchers — save voucher ID",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('synced voucher lookup succeeds', () => pm.response.to.have.status(200));",
+              "const salesVoucher = pm.response.json().vouchers?.find((voucher) => voucher.voucher_kind === 'sales' && voucher.status === 'posted');",
+              "if (salesVoucher) pm.collectionVariables.set('sales_voucher_id', salesVoucher.id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "GET",
+        "header": [ { "key": "Authorization", "value": "Bearer {{access_token}}" } ],
+        "url": {
+          "raw": "{{api_base}}/api/companies/{{company_id}}/vouchers?dateFrom={{voucher_date_from}}&dateTo={{voucher_date_to}}&voucherKind=sales",
+          "host": [ "{{api_base}}" ],
+          "path": [ "api", "companies", "{{company_id}}", "vouchers" ],
+          "query": [
+            { "key": "dateFrom", "value": "{{voucher_date_from}}" },
+            { "key": "dateTo", "value": "{{voucher_date_to}}" },
+            { "key": "voucherKind", "value": "sales" }
+          ]
+        },
+        "description": "Run only after request 11 reports the voucher sync completed. The Tests tab stores the first posted Sales voucher UUID as sales_voucher_id for the Phase 4 CD evaluation collection."
+      }
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+web: npm run start
+tally-worker: npm run worker:tally-outbox
+evaluation-worker: npm run worker:evaluations
+notification-worker: npm run worker:notifications

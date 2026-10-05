@@ -1,0 +1,14 @@
+-- This file is intentionally not executable.
+--
+-- Do not insert users directly into auth.users or auth.identities. Supabase
+-- Auth owns those tables, and direct inserts can produce accounts that cannot
+-- sign in. Use the supported Admin API provisioner instead:
+--
+--   cd backend
+--   npm run provision:test-access
+--
+-- It recreates only these non-production test accounts and assigns their
+-- Meenakshi organization roles:
+--
+--   Administrator:    meenakshi.api.admin@example.test
+--   Finance approver: meenakshi.api.finance@example.test

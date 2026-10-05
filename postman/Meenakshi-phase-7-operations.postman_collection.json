@@ -1,0 +1,56 @@
+{
+  "info": {
+    "name": "Meenakshi - Phase 7 Collections operations",
+    "description": "Use only after 20260808000000_phase_7_collections_operations.sql. It verifies safe review-only defaults, role boundaries, reconciliation-gated posting, and sanitized operational diagnostics. No request contains Tally XML, credentials, customer phone data, or MSG91 secrets.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "api_base", "value": "http://localhost:3001" },
+    { "key": "access_token", "value": "" },
+    { "key": "finance_access_token", "value": "" },
+    { "key": "company_id", "value": "" },
+    { "key": "reconciliation_period_from", "value": "2026-08-01" },
+    { "key": "reconciliation_period_to", "value": "2026-08-31" },
+    { "key": "reconciliation_reference", "value": "FIN-RECON-LOCAL-001" }
+  ],
+  "item": [
+    {
+      "name": "1. Read safe default launch control",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('launch control is readable', () => pm.response.to.have.status(200));", "pm.test('safe default is review-only or an explicitly enabled control', () => pm.expect(pm.response.json().launchControl.mode).to.be.oneOf(['review_only', 'posting_enabled']));"] } }],
+      "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }], "url": "{{api_base}}/api/companies/{{company_id}}/launch-control" }
+    },
+    {
+      "name": "2. Read Operations health",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('operations health is readable', () => pm.response.to.have.status(200));", "const text = pm.response.text();", "pm.test('health never exposes raw Tally XML', () => pm.expect(text).to.not.include('<ENVELOPE'));", "pm.test('health does not expose MSG91 keys', () => pm.expect(text.toLowerCase()).to.not.include('msg91_authkey'));"] } }],
+      "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }], "url": "{{api_base}}/api/companies/{{company_id}}/operations/health" }
+    },
+    {
+      "name": "3. Finance Approver cannot change launch control",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Finance Approver is forbidden from changing launch state', () => pm.response.to.have.status(403));"] } }],
+      "request": { "method": "PATCH", "header": [{ "key": "Authorization", "value": "Bearer {{finance_access_token}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"mode\": \"review_only\"\n}" }, "url": "{{api_base}}/api/companies/{{company_id}}/launch-control" },
+      "description": "Set finance_access_token to a valid Finance Approver token. Skip this request if the test account has only Administrator access."
+    },
+    {
+      "name": "4. Posting enablement without reconciliation is rejected",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('incomplete posting gate is rejected', () => pm.response.to.have.status(400));"] } }],
+      "request": { "method": "PATCH", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"mode\": \"posting_enabled\"\n}" }, "url": "{{api_base}}/api/companies/{{company_id}}/launch-control" }
+    },
+    {
+      "name": "5. Enable posting with recorded reconciliation",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('posting is enabled with recorded reconciliation', () => pm.response.to.have.status(200));", "pm.test('audit-ready reconciliation metadata is returned', () => { const control = pm.response.json().launchControl; pm.expect(control.mode).to.eql('posting_enabled'); pm.expect(control.reconciliation.reference).to.eql(pm.collectionVariables.get('reconciliation_reference')); });"] } }],
+      "request": { "method": "PATCH", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"mode\": \"posting_enabled\",\n  \"reconciliationPeriodFrom\": \"{{reconciliation_period_from}}\",\n  \"reconciliationPeriodTo\": \"{{reconciliation_period_to}}\",\n  \"reconciliationReference\": \"{{reconciliation_reference}}\"\n}" }, "url": "{{api_base}}/api/companies/{{company_id}}/launch-control" },
+      "description": "Administrator only. Use a non-production reconciliation reference during local tests."
+    },
+    {
+      "name": "6. Read sanitized launch-control audit detail",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('operational detail is readable', () => pm.response.to.have.status(200));", "const text = pm.response.text();", "pm.test('detail excludes raw XML and payloads', () => { pm.expect(text).to.not.include('<ENVELOPE'); pm.expect(text).to.not.include('recipient_phone_e164'); });"] } }],
+      "request": { "method": "GET", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }], "url": "{{api_base}}/api/companies/{{company_id}}/operations/detail?entityType=company_launch_control&entityId={{company_id}}" }
+    },
+    {
+      "name": "7. Restore review-only mode",
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('safe review-only mode is restored', () => pm.response.to.have.status(200));", "pm.test('posting is disabled', () => pm.expect(pm.response.json().launchControl.mode).to.eql('review_only'));"] } }],
+      "request": { "method": "PATCH", "header": [{ "key": "Authorization", "value": "Bearer {{access_token}}" }, { "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"mode\": \"review_only\"\n}" }, "url": "{{api_base}}/api/companies/{{company_id}}/launch-control" },
+      "description": "Run this final request after the local authorization test so the company returns to its safe default."
+    }
+  ]
+}

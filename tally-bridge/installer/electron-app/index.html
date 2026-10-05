@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Meenakshi Tally Connector</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: "Aptos", "Segoe UI Variable", "Segoe UI", sans-serif;
+        --ink: #231b18;
+        --muted: #756966;
+        --line: #eadfda;
+        --paper: #fffdfb;
+        --canvas: #f7f2ef;
+        --brand: #ed1c24;
+        --green: #159447;
+        --amber: #d38b18;
+        --red: #d93c3c;
+        --gray: #9d9692;
+      }
+      * { box-sizing: border-box; }
+      body { margin: 0; color: var(--ink); background: var(--canvas); }
+      button { font: inherit; }
+      .shell { min-height: 100vh; background: var(--paper); }
+      .brandbar {
+        display: flex;
+        align-items: center;
+        height: 80px;
+        padding: 15px 24px;
+        color: white;
+        background: var(--brand);
+      }
+      .brandbar img { width: 178px; height: 50px; object-fit: contain; object-position: left center; }
+      .content { padding: 24px; }
+      .eyebrow { margin: 0 0 7px; color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
+      .headline { display: flex; align-items: flex-start; gap: 12px; }
+      .signal {
+        width: 13px;
+        height: 13px;
+        margin-top: 6px;
+        flex: 0 0 auto;
+        border: 3px solid var(--paper);
+        border-radius: 50%;
+        background: var(--gray);
+        box-shadow: 0 0 0 4px color-mix(in srgb, var(--gray) 17%, transparent);
+      }
+      h1 { margin: 0; font-size: 24px; line-height: 1.12; letter-spacing: -.035em; }
+      .status-copy { min-height: 38px; margin: 8px 0 0 25px; max-width: 360px; color: var(--muted); font-size: 13px; line-height: 1.45; }
+      .connection[data-state="connected"] .signal { background: var(--green); box-shadow: 0 0 0 4px #dcf5e5; }
+      .connection[data-state="running"] .signal,
+      .connection[data-state="warning"] .signal { background: var(--amber); box-shadow: 0 0 0 4px #fff0d6; animation: pulse 1.6s ease-in-out infinite; }
+      .connection[data-state="error"] .signal { background: var(--red); box-shadow: 0 0 0 4px #fde2e2; }
+      .connection[data-state="disconnected"] .signal { background: var(--gray); box-shadow: 0 0 0 4px #eee9e6; }
+      .checks {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        margin-top: 18px;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        background: #fff;
+        box-shadow: 0 8px 28px rgba(54, 37, 31, .055);
+      }
+      .check { min-width: 0; padding: 15px 13px; border-right: 1px solid var(--line); }
+      .check:last-child { border-right: 0; }
+      .check-top { display: flex; align-items: center; gap: 7px; }
+      .check-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--gray); }
+      .check[data-state="on"] .check-dot { background: var(--green); }
+      .check[data-state="warning"] .check-dot { background: var(--amber); }
+      .check-label { overflow: hidden; font-size: 11px; font-weight: 750; text-overflow: ellipsis; white-space: nowrap; }
+      .check-state { margin: 6px 0 0 14px; color: var(--muted); font-size: 10px; }
+      .company-compare {
+        display: none;
+        margin-top: 12px;
+        padding: 11px 13px;
+        border: 1px solid #f3b6b6;
+        border-radius: 10px;
+        background: #fff4f4;
+        font-size: 12px;
+      }
+      .company-compare.visible { display: grid; grid-template-columns: auto 1fr; gap: 4px 9px; }
+      .company-compare span { color: var(--muted); }
+      details { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+      summary { cursor: pointer; color: #5f5551; font-size: 11px; font-weight: 700; list-style: none; }
+      summary::-webkit-details-marker { display: none; }
+      summary::before { content: "›"; display: inline-block; margin-right: 7px; transition: transform .16s ease; }
+      details[open] summary::before { transform: rotate(90deg); }
+      .company-list { margin: 9px 0 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
+      .company-list li { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 11px; }
+      .company-list span { color: var(--muted); }
+      summary:focus-visible { outline: 3px solid #ffc7c9; outline-offset: 2px; }
+      .connector-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 18px; color: var(--muted); font-size: 10px; }
+      .connector-footer span:first-child::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: var(--green); vertical-align: 1px; }
+      @keyframes pulse { 50% { opacity: .58; } }
+      @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+    </style>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="brandbar"><img src="brand.png" alt="Meenakshi TMT"></header>
+      <section class="content connection" id="connection" data-state="disconnected">
+        <p class="eyebrow">Tally connection</p>
+        <div class="headline"><span class="signal" aria-hidden="true"></span><h1 id="status-title">Not connected to Meenakshi</h1></div>
+        <p class="status-copy" id="status-detail">Open Meenakshi and connect this computer.</p>
+
+        <div class="checks" aria-label="Connection checks">
+          <div class="check" id="check-meenakshi" data-state="off"><div class="check-top"><span class="check-dot"></span><span class="check-label">Meenakshi</span></div><p class="check-state">Not connected</p></div>
+          <div class="check" id="check-tally" data-state="off"><div class="check-top"><span class="check-dot"></span><span class="check-label">Tally Prime</span></div><p class="check-state">Not available</p></div>
+          <div class="check" id="check-company" data-state="off"><div class="check-top"><span class="check-dot"></span><span class="check-label">Active company</span></div><p class="check-state">Not confirmed</p></div>
+        </div>
+
+        <div class="company-compare" id="company-compare"><span>Open in Tally</span><strong id="active-company">—</strong><span>Expected by Meenakshi</span><strong id="expected-company">—</strong></div>
+
+        <details id="companies-detail"><summary id="companies-summary">Companies available in Tally</summary><ul class="company-list" id="company-list"></ul></details>
+        <footer class="connector-footer"><span>Reconnects automatically</span><span id="last-check"></span></footer>
+      </section>
+    </main>
+    <script>
+      const labels = {
+        meenakshi: { on: "Connected", warning: "Checking", off: "Not connected" },
+        tally: { on: "Available", warning: "Checking", off: "Not available" },
+        company: { on: "Confirmed", warning: "Checking", off: "Not confirmed" },
+      };
+
+      function checkState(name, state) {
+        const element = document.getElementById(`check-${name}`);
+        element.dataset.state = state || "off";
+        element.querySelector(".check-state").textContent = labels[name][state] || labels[name].off;
+      }
+
+      function formatTime(value) {
+        if (!value) return "";
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) return "";
+        return `Checked ${date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
+      }
+
+      window.meenakshiBridge?.onStatus((status) => {
+        const state = status.state || "disconnected";
+        document.getElementById("connection").dataset.state = state;
+        document.getElementById("status-title").textContent = status.title || "Meenakshi Tally Connector";
+        document.getElementById("status-detail").textContent = status.detail || "";
+        checkState("meenakshi", status.checks?.meenakshi || "off");
+        checkState("tally", status.checks?.tally || "off");
+        checkState("company", status.checks?.company || "off");
+
+        const mismatch = state === "error" && status.activeCompany && status.expectedCompany;
+        document.getElementById("company-compare").classList.toggle("visible", Boolean(mismatch));
+        document.getElementById("active-company").textContent = status.activeCompany || "—";
+        document.getElementById("expected-company").textContent = status.expectedCompany || "—";
+
+        document.getElementById("last-check").textContent = formatTime(status.lastSuccessfulCheck);
+
+        const companies = Array.isArray(status.availableCompanies) ? status.availableCompanies : [];
+        const details = document.getElementById("companies-detail");
+        details.hidden = companies.length < 2;
+        document.getElementById("companies-summary").textContent = `${companies.length} companies available in Tally`;
+        document.getElementById("company-list").replaceChildren(...companies.map((company) => {
+          const item = document.createElement("li");
+          const name = document.createElement("strong");
+          const meta = document.createElement("span");
+          name.textContent = company.name;
+          meta.textContent = company.isActive ? "Currently open" : "Available";
+          item.append(name, meta);
+          return item;
+        }));
+      });
+    </script>
+  </body>
+</html>
