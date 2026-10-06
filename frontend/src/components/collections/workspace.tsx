@@ -271,7 +271,7 @@ function CashDiscountRecoveryPage({ data, setNotice, setError, isAdministrator }
     if (!token) return;
     try {
       const [response] = await Promise.all([
-        apiRequest<{ evaluationRuns: EvaluationRun[] }>(token, `/api/companies/${company.id}/evaluations/runs?schemeType=cd&limit=30&fresh=1`, { cache: "no-store" }),
+        apiRequest<{ evaluationRuns: EvaluationRun[] }>(token, `/api/companies/${company.id}/evaluations/runs?schemeType=cd&limit=30&detail=compact&fresh=1`, { cache: "no-store" }),
         loadRecoveries("all", ""),
       ]);
       // The latest run of the selected rule (older runs carry no rule in their context).
@@ -279,7 +279,9 @@ function CashDiscountRecoveryPage({ data, setNotice, setError, isAdministrator }
       const latest = selectedRuleId && cdRules.length > 1
         ? response.evaluationRuns.find((item) => ruleOf(item) === selectedRuleId) ?? null
         : response.evaluationRuns[0] ?? null;
-      setRun(latest);
+      // Load invoice details for one selected run, rather than all 30 history entries.
+      const detail = latest ? await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/runs/${latest.id}`, { cache: "no-store" }) : null;
+      setRun(detail?.evaluationRun ?? null);
     } catch (cause) { setError(userFacingError(cause, "Could not load the latest Cash Discount recovery check.")); }
     finally { setLoadingLatest(false); }
   }, [cdRules.length, company.id, loadRecoveries, selectedRuleId, setError]);
@@ -312,7 +314,7 @@ function CashDiscountRecoveryPage({ data, setNotice, setError, isAdministrator }
       } catch (cause) { setError(userFacingError(cause, "Could not update the Cash Discount recovery check.")); }
       finally { busy = false; }
     };
-    const timer = window.setInterval(() => { void update(); }, 3_000);
+    const timer = window.setInterval(() => { if (document.visibilityState === "visible") void update(); }, 30_000);
     return () => window.clearInterval(timer);
   }, [company.id, loadRecoveries, run, running, setError]);
 
@@ -761,10 +763,10 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       // Saving writes one result per customer; hundreds of customers can take
       // several minutes, so keep waiting (up to 20 minutes) instead of giving
       // up while the rows still say "Saving details…".
-      for (let attempt = 0; attempt < 600; attempt += 1) {
-        if (attempt) await new Promise((resolve) => window.setTimeout(resolve, 2_000));
+      for (let attempt = 0; attempt <= 40; attempt += 1) {
+        if (attempt) await new Promise((resolve) => window.setTimeout(resolve, 30_000));
         // An older proposal with identical values cannot confirm this run.
-        const saved = await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/runs/${response.evaluationRun.id}`, { cache: "no-store" });
+        const saved = await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/runs/${response.evaluationRun.id}?detail=compact`, { cache: "no-store" });
         setLatestRun(saved.evaluationRun);
         if (["failed", "completed_with_issues", "cancelled"].includes(saved.evaluationRun.status)) {
           setLocalTodRows([]);

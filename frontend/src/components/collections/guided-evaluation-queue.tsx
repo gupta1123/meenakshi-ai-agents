@@ -77,7 +77,7 @@ export function GuidedEvaluationQueue({ scheme, latestRun, onError, onRetry, onV
       // Batch TOD runs are stored as one parent plus many customer jobs. Fetch
       // enough rows before collapsing them so history is not silently limited
       // to the first few parent calculations.
-      const response = await apiRequest<{ evaluationRuns: EvaluationRun[] }>(token, `/api/companies/${company.id}/evaluations/runs?schemeType=${scheme}&limit=500${fresh ? "&fresh=1" : ""}`);
+      const response = await apiRequest<{ evaluationRuns: EvaluationRun[] }>(token, `/api/companies/${company.id}/evaluations/runs?schemeType=${scheme}&limit=500&detail=compact${fresh ? "&fresh=1" : ""}`);
       setRuns(response.evaluationRuns);
       onError(null);
     } catch (cause) {
@@ -124,7 +124,7 @@ export function GuidedEvaluationQueue({ scheme, latestRun, onError, onRetry, onV
   useEffect(() => {
     if (!hasLiveRun) return;
     void load(true);
-    const interval = window.setInterval(() => { if (document.visibilityState === "visible") void load(true); }, scheme === "cd" ? 1_000 : 1_500);
+    const interval = window.setInterval(() => { if (document.visibilityState === "visible") void load(true); }, 30_000);
     return () => window.clearInterval(interval);
   }, [hasLiveRun, load, scheme]);
   useEffect(() => {

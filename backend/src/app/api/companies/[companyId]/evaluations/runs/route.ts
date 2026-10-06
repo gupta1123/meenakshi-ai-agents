@@ -3,6 +3,7 @@ import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/autho
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { collapseEvaluationRuns } from "@/lib/evaluation/run-batches";
+import { compactSummaryColumns, restoreCompactSummary, type RunSummaryRow } from "@/lib/evaluation/run-summary";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 type SchemeType = "cd" | "tod";
@@ -48,13 +49,14 @@ export async function GET(request: Request, context: RouteContext) {
     const childKey = "________-____-____-____-____________:________-____-____-____-____________";
     let runsQuery = supabase
       .from("evaluation_runs")
-      .select(`${columns}, summary`)
+      .select(`${columns}, ${compact ? compactSummaryColumns : 'summary'}`)
       .eq("company_id", company.id)
       .not("idempotency_key", "like", childKey)
       .order("created_at", { ascending: false });
     if (requestedScheme) runsQuery = runsQuery.eq("request_context->>schemeType", requestedScheme);
-    const { data: rootRuns, error } = await runsQuery.limit(limit);
+    const { data: rootData, error } = await runsQuery.limit(limit).returns<RunSummaryRow[]>();
     if (error) throw error;
+    const rootRuns = (rootData ?? []).map(row => compact ? restoreCompactSummary(row) : row);
     type RunRow = NonNullable<typeof rootRuns>[number];
     const runs: RunRow[] = [...(rootRuns ?? [])];
     const todRoots = (rootRuns ?? []).filter((run) => schemeTypeFromRequestContext(run.request_context) === "tod");

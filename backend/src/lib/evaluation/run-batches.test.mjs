@@ -3,6 +3,12 @@ import test from "node:test";
 
 import { collapseEvaluationRuns } from "./run-batches.ts";
 import { requiresTallyRefresh } from "./refresh-policy.ts";
+import { restoreCompactSummary } from "./run-summary.ts";
+
+test("compact run reads preserve zero totals and flags without invoice evidence", () => {
+  const row = restoreCompactSummary({ id: "run", status: "completed", compact_invoicesChecked: 444, compact_calculatedDiscountAmount: "0.0000", compact_reviewRequired: 0, compact_liveOnly: false, compact_message: null });
+  assert.deepEqual(row, { id: "run", status: "completed", summary: { calculatedDiscountAmount: "0.0000", liveOnly: false, invoicesChecked: 444, reviewRequired: 0 } });
+});
 
 test("completed local TOD evidence never requests another Tally refresh", () => {
   const liveTodEvidence = {
