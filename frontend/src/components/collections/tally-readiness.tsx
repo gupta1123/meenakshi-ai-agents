@@ -5,6 +5,7 @@ import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } fro
 
 import { apiBaseUrl, apiRequest, jsonBody } from "@/lib/api";
 import { detectLocalTallyConnector } from "@/lib/local-tally";
+import { selectReconnectConnector } from "@/lib/connector-selection";
 import { supabase } from "@/lib/supabase";
 import { userFacingDetail, userFacingError } from "@/lib/user-copy";
 
@@ -191,7 +192,7 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [selectedConnectorId, setSelectedConnectorId] = useState<string | null>(null);
   const [localConnectorId, setLocalConnectorId] = useState<string | null>(null);
-  const [manualConnectorSelection, setManualConnectorSelection] = useState(false);
+  const reconnectStorageKey = `meenakshi:connector:${organization.id}`;
   const [connectorSnapshot, setConnectorSnapshot] = useState<ConnectorCompanySnapshot | null>(null);
   const [snapshotError, setSnapshotError] = useState<string | null>(null);
  const [notice, setNotice] = useState<string | null>(null);
@@ -207,18 +208,18 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
   const [registeringCompany, setRegisteringCompany] = useState(false);
   const [assigningCompany, setAssigningCompany] = useState(false);
   const refreshInFlight = useRef(false);
+  const launchInFlight = useRef(false);
 
   const selectedConnector = useMemo(
-    () => connectors.find((item) => item.id === selectedConnectorId)
-      ?? connectors.find((item) => item.id === health?.connector?.id)
-      ?? (connectors.length === 1 ? connectors[0] : null)
-      ?? null,
-    [connectors, health?.connector?.id, selectedConnectorId]
+    () => selectReconnectConnector(connectors, localConnectorId, selectedConnectorId, health?.connector?.id ?? null),
+    [connectors, health?.connector?.id, localConnectorId, selectedConnectorId]
   );
   const connectorId = selectedConnector?.id ?? null;
-  const snapshotConnector = connectorSnapshot?.connector ?? null;
-  const tallyCompanies = connectorSnapshot?.companies ?? [];
-  const activeTallyCompany = connectorSnapshot?.activeCompany ?? tallyCompanies.find((item) => item.isActive) ?? null;
+  // A delayed poll for an older session must not describe the chosen computer.
+  const currentSnapshot = connectorSnapshot?.connector.id === connectorId ? connectorSnapshot : null;
+  const snapshotConnector = currentSnapshot?.connector ?? null;
+  const tallyCompanies = currentSnapshot?.companies ?? [];
+  const activeTallyCompany = currentSnapshot?.activeCompany ?? tallyCompanies.find((item) => item.isActive) ?? null;
   // Tally Prime is the only place where the active company can change.
   // The browser only reflects its live selection; it never picks another
   // detected company on the user's behalf.
@@ -229,12 +230,11 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
     && connectorId !== health?.connector?.id
     && selectedTallyCompany?.guid.toLowerCase() === company.tally_company_guid.toLowerCase()
   );
-  const selectedConnectorHasClaimedMachine = Boolean(selectedConnector && !selectedConnector.machineFingerprint.startsWith("pending:"));
   const bridgeConnected = Boolean(snapshotConnector?.bridgeConnected);
   const tallyReachable = Boolean(snapshotConnector?.tallyReachable);
   const companyLoaded = Boolean(snapshotConnector?.companyLoaded && activeTallyCompany);
-  const connectorVerified = Boolean(bridgeConnected && tallyReachable && companyLoaded && health?.ready);
- const hasMismatch = health?.status === "company_mismatch";
+  const connectorVerified = Boolean(bridgeConnected && tallyReachable && companyLoaded && health?.ready && health.connector?.id === connectorId);
+ const hasMismatch = health?.connector?.id === connectorId && health?.status === "company_mismatch";
   const heartbeatStale = Boolean(snapshotConnector?.heartbeatStale);
  const resolvedTallyUrl = targetMode === "same_machine" ? sameMachineTallyUrl : tallyUrlInput;
   const feedback = actionError
@@ -246,30 +246,26 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
         : null;
 
   useEffect(() => {
-    setSelectedConnectorId(null);
-    setManualConnectorSelection(false);
+    try { setSelectedConnectorId(window.localStorage.getItem(reconnectStorageKey)); }
+    catch { setSelectedConnectorId(null); }
     setConfirmDisconnect(false);
-  }, [companyKey]);
+  }, [companyKey, reconnectStorageKey]);
   useEffect(() => {
     if (!isAdministrator) return;
     let cancelled = false;
     const probe = async () => {
       const id = await detectLocalTallyConnector();
-      if (!cancelled) setLocalConnectorId(id);
+      if (!cancelled) {
+        setLocalConnectorId(id);
+        if (id) {
+          try { window.localStorage.setItem(reconnectStorageKey, id); } catch { /* Storage may be disabled. */ }
+        }
+      }
     };
     void probe();
     const interval = window.setInterval(() => { if (document.visibilityState === "visible") void probe(); }, 15_000);
     return () => { cancelled = true; window.clearInterval(interval); };
-  }, [isAdministrator]);
-  useEffect(() => {
-    const boundConnectorId = health?.connector?.id ?? null;
-    setSelectedConnectorId((current) => {
-      if (manualConnectorSelection && current && connectors.some((item) => item.id === current)) return current;
-      if (localConnectorId && connectors.some((item) => item.id === localConnectorId)) return localConnectorId;
-      if (boundConnectorId && connectors.some((item) => item.id === boundConnectorId)) return boundConnectorId;
-      return connectors.length === 1 ? connectors[0].id : null;
-    });
-  }, [connectors, health?.connector?.id, localConnectorId, manualConnectorSelection]);
+  }, [isAdministrator, reconnectStorageKey]);
 
   const loadConnectors = useCallback(async () => {
     if (!isAdministrator) return;
@@ -354,37 +350,61 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
   }, [selectedTallyCompany?.guid, selectedTallyCompany?.name]);
 
   async function connect() {
-    const activeConnectorId = connectorId;
-    if (!activeConnectorId) {
-      setActionError("Meenakshi Tally Connector has not been set up for this workspace yet.");
-      return;
-    }
-    const accessToken = await token();
-    if (!accessToken) return;
+    if (launchInFlight.current || launching || addingComputer) return;
+    launchInFlight.current = true;
     setActionError(null);
     setNotice(null);
     try {
+      // Probe again at click time: the desktop connector may have opened since
+      // the last page poll. Reuse its ID even when another company session is bound.
+      const detectedId = await detectLocalTallyConnector();
+      const activeConnectorId = selectReconnectConnector(connectors, detectedId, selectedConnectorId, health?.connector?.id ?? null)?.id;
+      if (!activeConnectorId) {
+        if (!connectors.some((item) => item.status !== "revoked")) {
+          launchInFlight.current = false;
+          await addComputer();
+          return;
+        }
+        setActionError("Open Meenakshi Tally Connector on this computer, then click Reconnect. No new computer has been created.");
+        return;
+      }
+      const accessToken = await token();
+      if (!accessToken) return;
       const tallyUrl = normalizeTallyUrl(resolvedTallyUrl);
       setLaunching(true);
       const credential = await apiRequest<SetupCredential>(accessToken, `/api/connectors/${activeConnectorId}/rotate-credential`, {
         method: "POST",
         body: jsonBody({ tallyUrl }),
       });
+      setLocalConnectorId(null);
+      setSelectedConnectorId(activeConnectorId);
+      setConnectorSnapshot(null);
+      try { window.localStorage.setItem(reconnectStorageKey, activeConnectorId); } catch { /* Optional hint, not a credential. */ }
       setNotice("Opening Meenakshi Tally Connector. If your browser asks, allow it to open.");
       window.location.assign(bridgeLaunchUrl(credential));
     } catch (cause) {
       setLaunching(false);
       setActionError(userFacingError(cause, "Could not open Meenakshi Tally Connector."));
+    } finally {
+      launchInFlight.current = false;
     }
   }
 
   async function addComputer() {
-    const accessToken = await token();
-    if (!accessToken) return;
-    setAddingComputer(true);
+    if (launchInFlight.current || launching || addingComputer) return;
+    launchInFlight.current = true;
     setActionError(null);
     setNotice(null);
     try {
+      const detectedId = await detectLocalTallyConnector();
+      if (connectors.some((item) => item.id === detectedId && item.status !== "revoked")) {
+        launchInFlight.current = false;
+        await connect();
+        return;
+      }
+      const accessToken = await token();
+      if (!accessToken) return;
+      setAddingComputer(true);
       const displayName = `Tally computer ${connectors.length + 1}`;
       const credential = await apiRequest<SetupCredential>(accessToken, "/api/connectors", {
         method: "POST",
@@ -392,12 +412,16 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
       });
       setConnectors((current) => [credential.connector, ...current.filter((item) => item.id !== credential.connector.id)]);
       setSelectedConnectorId(credential.connector.id);
+      setLocalConnectorId(null);
+      try { window.localStorage.setItem(reconnectStorageKey, credential.connector.id); } catch { /* Optional hint. */ }
       setConnectorSnapshot(null);
       setNotice("Opening Meenakshi Tally Connector on this computer. If your browser asks, allow it to open.");
       window.location.assign(bridgeLaunchUrl(credential));
     } catch (cause) {
       setActionError(userFacingError(cause, "Could not add the Tally computer."));
       setAddingComputer(false);
+    } finally {
+      launchInFlight.current = false;
     }
   }
 
@@ -492,8 +516,7 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
 
   // One headline, one sentence, one next action.
   const waitingForConnector = launching || addingComputer;
-  const useNewComputer = !connectorId || selectedConnectorHasClaimedMachine;
-  const connectLabel = useNewComputer ? "Connect this computer" : "Connect Tally";
+  const connectLabel = connectorId ? "Reconnect" : "Connect this computer";
   const recheckButton = (primary = false) => <Button type="button" className={primary ? "" : "button-secondary"} disabled={rechecking} onClick={() => void recheck()}><RefreshCw size={15} className={rechecking ? s.spin : undefined} />{rechecking ? "Checking…" : "Check again"}</Button>;
 
   let tone: Tone;
@@ -533,12 +556,12 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
     tone = "attention";
     title = "The connector stopped responding";
     description = "Make sure the computer running Tally is on and Meenakshi Tally Connector is open.";
-    primary = isAdministrator ? <Button type="button" onClick={() => void (useNewComputer ? addComputer() : connect())}><PlugZap size={15} />Reconnect</Button> : recheckButton(true);
+    primary = isAdministrator ? <Button type="button" onClick={() => void connect()}><PlugZap size={15} />Reconnect</Button> : recheckButton(true);
   } else {
     tone = "idle";
     title = "Connect Tally Prime";
     description = isAdministrator ? "Follow the three steps below. It takes about a minute." : "An Administrator needs to connect Tally Prime from this page.";
-    primary = isAdministrator ? <Button type="button" onClick={() => void (useNewComputer ? addComputer() : connect())}><PlugZap size={15} />{connectLabel}</Button> : null;
+    primary = isAdministrator ? <Button type="button" onClick={() => void connect()}><PlugZap size={15} />{connectLabel}</Button> : null;
   }
 
   const stepConnector: StepState = bridgeConnected ? "done" : heartbeatStale ? "problem" : waitingForConnector ? "current" : "todo";
@@ -612,18 +635,13 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
               <div><dt>Last contact</dt><dd>{sinceLabel(snapshotConnector?.lastHeartbeatAt)}</dd></div>
             </dl>
 
-            {connectors.length > 1 && <label className={s.select}><span>Switch computer</span><select value={connectorId ?? ""} onChange={(event) => { setManualConnectorSelection(true); setSelectedConnectorId(event.target.value || null); setConnectorSnapshot(null); setSnapshotError(null); }}>
-              {!connectorId && <option value="">Choose a computer</option>}
-              {connectors.map((connector) => <option key={connector.id} value={connector.id}>{connector.displayName}{connector.id === localConnectorId ? " (this computer)" : ""}</option>)}
-            </select></label>}
-
             {tallyCompanies.length > 0 && <div className={s.companies}>
               <span>Companies in Tally Prime</span>
               <ul>{tallyCompanies.map((item) => <li key={item.guid} data-active={item.isActive}><Building2 size={14} />{item.name}{item.isActive && <em>Open</em>}</li>)}</ul>
             </div>}
 
             <div className={s.advancedActions}>
-              <Button type="button" className="button-secondary" disabled={addingComputer} onClick={() => void addComputer()}><ServerCog size={15} />{addingComputer ? "Opening connector…" : "Add another computer"}</Button>
+              <Button type="button" className="button-secondary" disabled={addingComputer || launching} onClick={() => void addComputer()}><ServerCog size={15} />{addingComputer ? "Opening connector…" : "Set up another computer"}</Button>
               {bridgeConnected && (confirmDisconnect
                 ? <span className={s.confirm}><span>Disconnect Tally from Meenakshi?</span><Button type="button" className="button-danger" disabled={disconnecting} onClick={() => void disconnect()}>{disconnecting ? "Disconnecting…" : "Disconnect"}</Button><Button type="button" className="button-quiet" onClick={() => setConfirmDisconnect(false)}>Cancel</Button></span>
                 : <Button type="button" className="button-quiet" onClick={() => setConfirmDisconnect(true)}><Unplug size={15} />Disconnect</Button>)}

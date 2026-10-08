@@ -12,9 +12,12 @@ export const LOCAL_TALLY_PORT = 3219;
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
 
 function normalized(value) { return String(value ?? "").trim().toLowerCase(); }
-function allowedOrigins(config) {
+export function allowedOrigins(config) {
   return new Set([
     "http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001", "http://127.0.0.1:3001",
+    // Both supported Meenakshi frontends must discover the same installation.
+    // A reconnect from localhost must not lock the production site out.
+    "https://meenakshi-ai-agents.netlify.app",
     config.frontendOrigin,
   ].filter(Boolean).map((value) => String(value).replace(/\/+$/, "")));
 }
