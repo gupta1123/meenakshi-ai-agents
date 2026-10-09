@@ -25,7 +25,7 @@ export async function GET(request: Request, context: RouteContext) {
     const [candidates, notes] = await Promise.all([
       supabase.from("cash_discount_recovery_candidates").select("id, invoice_tally_guid, status, remaining_recovery, settlement_category")
         .eq("company_id", company.id).eq("current_snapshot", true).eq("candidate_kind", "settlement"),
-      supabase.from("cash_discount_debit_note_postings").select("id, status, amount, verified_voucher_number, verified_at, failure_reason, created_at, invoice:debit_note_snapshot->sourceInvoice->>guid")
+      supabase.from("cash_discount_debit_note_postings").select("id, status, amount, verified_voucher_number, verified_at, failure_reason, created_at, updated_at, invoice:debit_note_snapshot->sourceInvoice->>guid")
         .eq("company_id", company.id).eq("note_kind", "credit_note").order("created_at", { ascending: false }).limit(5000),
     ]);
     if (candidates.error) throw candidates.error;

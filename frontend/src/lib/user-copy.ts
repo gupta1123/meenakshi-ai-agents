@@ -4,6 +4,7 @@ const labels: Record<string, string> = {
   awaiting_pairing: "Connecting",
   bridge_stale: "Connection needs attention",
   company_mismatch: "Open the selected company",
+  connection_check_failed: "Could not check Tally connection",
   completed_with_issues: "Needs attention",
   created_verified: "Created and checked",
   dead_letter: "Needs attention",

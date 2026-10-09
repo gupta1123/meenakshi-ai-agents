@@ -186,7 +186,7 @@ function Step({ state, label, detail }: { state: StepState; label: string; detai
   </li>;
 }
 
-export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: TallyHealth | null; onRefresh?: () => Promise<void> }) {
+export function TallyReadiness({ health: initialHealth, healthError, onRefresh }: { health?: TallyHealth | null; healthError?: string | null; onRefresh?: () => Promise<void> }) {
   const { company, organization, companyKey, isAdministrator, availableCompanies } = useCompany();
   const health = initialHealth ?? null;
   const [connectors, setConnectors] = useState<Connector[]>([]);
@@ -512,6 +512,7 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
     }
   }
 
+  if (!health && healthError) return <div className="workspace-content">{PAGE_HEADER}<InlineMessage tone="warning">{healthError} Connection status is unknown.</InlineMessage><Button onClick={() => void onRefresh?.()}>Check again</Button></div>;
   if (!health) return <TallyReadinessSkeleton />;
 
   // One headline, one sentence, one next action.

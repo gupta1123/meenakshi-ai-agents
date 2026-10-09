@@ -12,6 +12,7 @@ import { ChevronLeft, ChevronRight, CircleAlert, RefreshCw } from "lucide-react"
 import { apiRequest, jsonBody } from "@/lib/api";
 import { readLocalProgress, runLocalCashDiscount, type LocalCdBootstrap, type LocalProgress } from "@/lib/local-tally";
 import { userFacingError } from "@/lib/user-copy";
+import { savedPostingFailure } from "@/lib/tally-status";
 
 import { WorkspacePageHeader } from "./app-shell";
 import { useCompany } from "./company-context";
@@ -34,7 +35,7 @@ export type CdSettlementRow = {
   payments?: Array<{ voucherNumber: string | null; voucherType: string | null; date: string; amount: string; counted: boolean }>;
   productLines?: Array<{ name: string; quantity: string; unit: string; tonnes: string }>;
 };
-type CreditNote = { id: string; status: string; amount: string; verified_voucher_number: string | null; verified_at?: string | null; failure_reason: string | null; whatsapp?: { status: string; sentAt: string | null } | null };
+type CreditNote = { id: string; status: string; amount: string; verified_voucher_number: string | null; verified_at?: string | null; updated_at?: string | null; failure_reason: string | null; whatsapp?: { status: string; sentAt: string | null } | null };
 type SettlementData = {
   run: { id: string; completedAt: string | null; periodStart: string | null; periodEnd: string | null } | null;
   results: CdSettlementRow[];
@@ -322,7 +323,7 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice }: {
                 : canCreate ? <Button className="button-secondary" disabled={busyId === candidate!.id} onClick={() => void createCreditNote(row, candidate!.id)}>{busyId === candidate!.id ? "Queuing…" : `Create ₹${Number(row.creditAmount).toLocaleString("en-IN")}`}</Button>
                 : <small>{row.category === "full_payment" && !Number(row.creditAmount) ? "Run the check again" : ["full_payment", "discounted_payment", "over_ninety_percent"].includes(row.category) ? row.gstDeadlinePassed ? "GST deadline passed" : postingEnabled ? "Save the check first" : "Creation is off" : row.category === "awaiting_payment" ? "Window open" : row.category === "needs_review" ? row.reviewMessage ?? "Needs review" : "No discount"}</small>}
               {["full_payment", "discounted_payment", "over_ninety_percent"].includes(row.category) && note?.status !== "created_verified" && row.gstLastDate && (row.gstDeadlinePassed || daysUntil(row.gstLastDate) <= 30) && <small className="cd-gst-warning">{row.gstDeadlinePassed ? `GST deadline passed (${shortDate(row.gstLastDate)})` : `Create by ${shortDate(row.gstLastDate)} for GST`}</small>}
-              {note?.status === "failed" && <small className="field-error">{/active Tally company does not match/i.test(note.failure_reason ?? "") ? `Tally had another company open. Open ${company.tally_company_name} in Tally, then create again.` : note.failure_reason ?? "Tally rejected it. Create again."}</small>}
+              {note?.status === "failed" && <small className="field-error">{savedPostingFailure(note.failure_reason, company.tally_company_name, note.updated_at)}</small>}
             </div>
           </article>;
         })}</div>

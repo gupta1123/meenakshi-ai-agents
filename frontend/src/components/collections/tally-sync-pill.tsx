@@ -7,6 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
 
 import { apiRequest } from "@/lib/api";
+import { tallyConnectionView } from "@/lib/tally-status";
 
 import { useCompany } from "./company-context";
 import { accessToken } from "./workspace";
@@ -27,7 +28,8 @@ export function TallySyncPill({ tallyStatus }: { tallyStatus: string }) {
   const { company, companyKey, isAdministrator } = useCompany();
   const [status, setStatus] = useState<SyncStatus | null>(null);
   const [requesting, setRequesting] = useState(false);
-  const connected = tallyStatus.includes("ready");
+  const connection = tallyConnectionView(tallyStatus);
+  const connected = connection.connected;
 
   const load = useCallback(async () => {
     const token = await accessToken(); if (!token) return;
@@ -51,7 +53,7 @@ export function TallySyncPill({ tallyStatus }: { tallyStatus: string }) {
   }
 
   const view = !connected
-    ? { tone: "bad", title: tallyStatus.includes("mismatch") ? "Other company open in Tally" : "Tally not connected", sub: "Open Tally and the connector" }
+    ? connection
     : !status ? { tone: "ok", title: "Tally connected", sub: "" }
     : status.state === "syncing" ? { tone: "busy", title: "Updating from Tally…", sub: status.lastSyncedAt ? `last synced ${ago(status.lastSyncedAt)}` : "" }
     : status.state === "changes_pending" ? { tone: "warn", title: "Tally has changes", sub: "updating shortly" }

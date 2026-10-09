@@ -10,6 +10,7 @@
     "dev": "next dev --turbopack --port 3000",
     "build": "next build --turbopack",
     "start": "next start --port 3000",
+    "test": "node --test src/lib/*.test.mjs",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

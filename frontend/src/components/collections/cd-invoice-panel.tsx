@@ -2,11 +2,12 @@
 
 // Review one per-MT Cash Discount invoice without obscuring the decision with audit detail.
 import type { Calendar } from "./types";
+import { savedPostingFailure } from "@/lib/tally-status";
 import { Button, Drawer, StatusBadge, formatMoney, formatTonnes } from "./ui";
 import type { CdSettlementRow } from "./cash-discount-settlements";
 import styles from "./cd-invoice-panel.module.css";
 
-type CreditNote = { status: string; amount?: string | null; verified_voucher_number: string | null; verified_at?: string | null; failure_reason: string | null; whatsapp?: { status: string; sentAt: string | null } | null };
+type CreditNote = { status: string; amount?: string | null; verified_voucher_number: string | null; verified_at?: string | null; updated_at?: string | null; failure_reason: string | null; whatsapp?: { status: string; sentAt: string | null } | null };
 
 const CATEGORY_LABEL: Record<string, string> = {
   full_payment: "Paid in full on time",
@@ -101,7 +102,7 @@ export function CdInvoicePanel({ row, note, calendar, canCreate, busy, companyNa
             ? row.reviewMessage ?? "Review this invoice before creating a Credit Note."
             : "The payment was late, or short of the bill by more than ₹10,000. No discount applies.";
   const failed = note?.status === "failed"
-    ? /active Tally company does not match/i.test(note.failure_reason ?? "") ? `Tally had another company open. Open ${companyName} in Tally, then create again.` : note.failure_reason ?? "Tally rejected it. Create again."
+    ? savedPostingFailure(note.failure_reason, companyName, note.updated_at)
     : null;
   const created = note?.status === "created_verified";
   const whatsapp = note?.whatsapp ?? null;

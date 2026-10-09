@@ -73,10 +73,9 @@ export async function accessToken() {
 }
 
 export function WorkspaceEntry({ page, email, signOut }: { page: CollectionsPage; email: string; signOut: () => Promise<void> }) {
-  const { health, reloadTally } = useWorkspaceSession();
-  const tallyStatus = health?.status ?? "checking";
+  const { health, tallyStatus, tallyError, reloadTally } = useWorkspaceSession();
   if (page === "tally") {
-    return <AppShell email={email} onSignOut={signOut} tallyStatus={tallyStatus}><TallyReadiness health={health} onRefresh={reloadTally} /></AppShell>;
+    return <AppShell email={email} onSignOut={signOut} tallyStatus={tallyStatus}><TallyReadiness health={health} healthError={tallyError} onRefresh={reloadTally} /></AppShell>;
   }
   // Every page stays usable without Tally: saved results and history remain
   // visible, and WorkspaceAvailabilityNotice explains what needs Tally.
@@ -85,7 +84,7 @@ export function WorkspaceEntry({ page, email, signOut }: { page: CollectionsPage
 
 function Workspace({ page, email, signOut, tallyHealth }: { page: CollectionsPage; email: string; signOut: () => Promise<void>; tallyHealth: TallyHealth | null }) {
   const { company, companyKey, isAdministrator } = useCompany();
-  const { data, loading, error, refresh, setError } = useWorkspaceSession();
+  const { data, loading, error, refresh, setError, tallyStatus } = useWorkspaceSession();
   const [notice, setNotice] = useState<string | null>(null);
   const customerNames = useMemo(() => new Map(data.reference?.masters.customers.map((customer) => [customer.id, labelFor(customer)]) ?? []), [data.reference]);
   const pageProps = { data, refresh, setNotice, setError, customerNames, isAdministrator };
@@ -95,10 +94,10 @@ function Workspace({ page, email, signOut, tallyHealth }: { page: CollectionsPag
     : workspaceCanCalculateLive(tallyHealth);
   const companyMismatch = tallyHealth?.status === "company_mismatch";
 
-  return <AppShell email={email} onSignOut={signOut} tallyStatus={tallyHealth?.status ?? (loading ? "checking" : "bridge_stale")}>
+  return <AppShell email={email} onSignOut={signOut} tallyStatus={tallyStatus}>
     <div className="workspace-content" key={companyKey}>
       {error ? <InlineMessage tone="error">{error}</InlineMessage> : notice ? <InlineMessage tone="success">{notice}</InlineMessage> : null}
-      {error && !loading && !hasLoadedWorkspace ? <EmptyState title="Workspace unavailable" detail="The latest data could not be loaded. This is not an empty result." action={<Button onClick={() => void refresh()}>Try again</Button>} /> : loading && !hasLoadedWorkspace ? page === "credit-notes" ? <><WorkspacePageHeader eyebrow="" title="Credit Notes" detail="Create and track Credit Notes." /><CreditNotesLoadingContent /></> : page === "messages" ? <><WorkspacePageHeader eyebrow="" title="Messages" detail="WhatsApp delivery status and audit history." /><MessagesLoadingContent /></> : page === "turnover-discount" ? <><WorkspacePageHeader title="Turnover Discount" /><TodPageSkeleton /></> : <Skeleton lines={7} /> : companyMismatch ? <TallyCompanyMismatchNotice health={tallyHealth} expectedCompanyName={company.tally_company_name} /> : <>{!tallyEvidenceCurrent && <WorkspaceAvailabilityNotice page={page} connected={Boolean(tallyHealth?.ready)} />}{page === "control-centre" ? <OverviewPage {...pageProps} /> : page === "cash-discount" || page === "turnover-discount" ? <DiscountPage scheme={page === "cash-discount" ? "cd" : "tod"} {...pageProps} /> : page === "credit-notes" ? <CreditNotesPage {...pageProps} /> : page === "debit-notes" ? <DebitNotesPage {...pageProps} /> : page === "messages" ? <MessagesWorkspace {...pageProps} /> : <RulebookWorkspace {...pageProps} />}</>}
+      {error && !loading && !hasLoadedWorkspace ? <EmptyState title="Workspace unavailable" detail="The latest data could not be loaded. This is not an empty result." action={<Button onClick={() => void refresh()}>Try again</Button>} /> : loading && !hasLoadedWorkspace ? page === "credit-notes" ? <><WorkspacePageHeader eyebrow="" title="Credit Notes" detail="Create and track Credit Notes." /><CreditNotesLoadingContent /></> : page === "messages" ? <><WorkspacePageHeader eyebrow="" title="Messages" detail="WhatsApp delivery status and audit history." /><MessagesLoadingContent /></> : page === "turnover-discount" ? <><WorkspacePageHeader title="Turnover Discount" /><TodPageSkeleton /></> : <Skeleton lines={7} /> : companyMismatch ? <TallyCompanyMismatchNotice health={tallyHealth} expectedCompanyName={company.tally_company_name} /> : <>{!tallyEvidenceCurrent && <WorkspaceAvailabilityNotice page={page} connected={Boolean(tallyHealth?.ready)} tallyStatus={tallyStatus} />}{page === "control-centre" ? <OverviewPage {...pageProps} /> : page === "cash-discount" || page === "turnover-discount" ? <DiscountPage scheme={page === "cash-discount" ? "cd" : "tod"} {...pageProps} /> : page === "credit-notes" ? <CreditNotesPage {...pageProps} /> : page === "debit-notes" ? <DebitNotesPage {...pageProps} /> : page === "messages" ? <MessagesWorkspace {...pageProps} /> : <RulebookWorkspace {...pageProps} />}</>}
     </div>
   </AppShell>;
 }
@@ -108,7 +107,9 @@ function TallyCompanyMismatchNotice({ health, expectedCompanyName }: { health: T
   return <InlineMessage tone="warning"><strong>Company context locked.</strong> Tally Prime is open to <strong>{activeCompanyName}</strong>. Switch it to <strong>{expectedCompanyName}</strong>; Meenakshi will update automatically and no data or actions are shown until the companies match.</InlineMessage>;
 }
 
-function WorkspaceAvailabilityNotice({ page, connected }: { page: CollectionsPage; connected: boolean }) {
+function WorkspaceAvailabilityNotice({ page, connected, tallyStatus }: { page: CollectionsPage; connected: boolean; tallyStatus: string }) {
+  if (tallyStatus === "checking") return <InlineMessage tone="info"><strong>Checking Tally connection…</strong> Saved information remains available.</InlineMessage>;
+  if (tallyStatus === "connection_check_failed") return <InlineMessage tone="warning"><strong>Could not check the Tally connection.</strong> Showing saved information; connection status is unknown. <Link href="/tally">Check connection</Link></InlineMessage>;
   // Connected, but the Rulebook also needs freshly synced customers, groups and ledgers.
   if (connected && page === "rulebook") {
     return <InlineMessage tone="info"><strong>Tally data needs a refresh.</strong> Rules can be viewed; refresh customers and ledgers from Tally before changing them. <Link href="/tally">Refresh</Link></InlineMessage>;
@@ -1915,7 +1916,7 @@ const NOTE_CREATING = ["queued", "sending", "verification_pending", "sending_to_
 function noteProblem(status: string, reason: string | null, companyName: string) {
   if (!["failed", "correction_required", "reconciliation_required"].includes(status)) return { problem: null, fix: null };
   const text = reason ?? "Tally could not confirm this Credit Note.";
-  if (/active Tally company does not match/i.test(text)) return { problem: "Tally had another company open.", fix: `Open ${companyName} in Tally, then create it again.` };
+  if (/active Tally company does not match/i.test(text)) return { problem: "Previous attempt failed: a different company was active in Tally.", fix: `Check the current connection and confirm ${companyName} is open before any new attempt.` };
   if (/GST ledger/i.test(text)) return { problem: text, fix: "Remove the GST ledger from the Credit Note setup in the rule, then create it again." };
   return { problem: text, fix: status === "reconciliation_required" ? "Check the voucher in Tally, then confirm or cancel it." : "Open it to retry safely." };
 }

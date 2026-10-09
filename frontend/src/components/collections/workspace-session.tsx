@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { apiRequest } from "@/lib/api";
 import { supabase } from "@/lib/supabase";
 import { userFacingError } from "@/lib/user-copy";
+import { tallyConnectionStatus } from "@/lib/tally-status";
 
 import { useCompany } from "./company-context";
 import { useTallyHealth } from "./tally-readiness";
@@ -33,6 +34,8 @@ type WorkspaceSessionValue = {
   email: string;
   signOut: () => Promise<void>;
   health: TallyHealth | null;
+  tallyStatus: string;
+  tallyError: string | null;
   data: WorkspaceData;
   loading: boolean;
   error: string | null;
@@ -53,7 +56,11 @@ export function WorkspaceSessionProvider({ email, signOut, children }: { email: 
   const pathname = usePathname();
   // Every workflow, including Cash Discount, needs the live Tally status for
   // the company picker and connection badge to reflect the active company.
-  const { health, reload: reloadTally } = useTallyHealth();
+  const { health: lastHealth, error: tallyError, reload: reloadTally } = useTallyHealth();
+  // Keep unknown connectivity separate from both ready and confirmed offline.
+  // Do not authorize live actions from a previous ready response after a read fails.
+  const health = tallyError ? null : lastHealth;
+  const tallyStatus = tallyConnectionStatus(health, tallyError);
   const [data, setData] = useState<WorkspaceData>(emptyData);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -132,7 +139,7 @@ export function WorkspaceSessionProvider({ email, signOut, children }: { email: 
     void load(true);
   }, [companyKey, load]);
 
-  const value = useMemo(() => ({ email, signOut, health, data, loading, error, refresh, reloadTally, setError }), [data, email, error, health, loading, refresh, reloadTally, signOut]);
+  const value = useMemo(() => ({ email, signOut, health, tallyStatus, tallyError, data, loading, error, refresh, reloadTally, setError }), [data, email, error, health, tallyStatus, tallyError, loading, refresh, reloadTally, signOut]);
   return <WorkspaceSessionContext.Provider value={value}>{children}</WorkspaceSessionContext.Provider>;
 }
 
