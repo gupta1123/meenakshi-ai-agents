@@ -55,6 +55,32 @@ npm.cmd run installer:build
 
 The build writes only to `installer/payload-clean` and `installer/output` inside this Meenakshi repository.
 
+### Upgrade to 0.3.2 (9 October 2026)
+
+This release includes guarded same-customer/same-invoice Receipt New Ref matching for the per-MT CD check (BKP invoice 1418). It does not clear calculations, change rules or create notes automatically.
+
+1. Wait until no calculation, voucher creation or PDF export is running. Exit the existing Meenakshi connector.
+2. Run `installer/output/MeenakshiTallyConnectorSetup-0.3.2.exe` on the Tally computer. Upgrade in the existing connector folder (normally `C:\Meenakshi\tally-bridge`); do not select a general-purpose directory. The installer replaces the application-folder contents, including old connector logs. It preserves the default pairing/configuration and captured PDFs in `%APPDATA%\Meenakshi\TallyBridge`, outside that folder. A custom config/PDF directory inside the application folder must be backed up externally first.
+3. Launch Meenakshi Tally Connector, open the intended company in Tally and refresh the deployed Meenakshi page. Existing pairing should be retained. Only pair again through the deployed application's connection flow if the connector actually reports unconfigured/disconnected.
+4. Deploy the matching backend source change separately. Installing the connector alone does not update the hosted backend, which independently rechecks the result. Do not mark the fix verified before both are updated.
+5. After both components are updated, rerun the CD calculation and inspect 1418: expected paid-by-deadline ₹3,04,926, shortfall ₹7,735 and review candidate ₹2,520. Do not issue a Credit Note or delete prior results/accounting records during this check.
+
+The setup filename and Windows product version distinguish this build from the older unversioned installer. Building it does not install it or deploy the backend.
+
+### Upgrade to 0.3.3 (9 October 2026)
+
+Adds guarded recognition of legacy CD Credit Note narration such as Kumaran Steel's `Discount allowed ... B.No.192`, retaining the 0.3.2 New Ref fix. A uniquely matched existing note marks the invoice already credited and suppresses a new candidate. Ambiguous and multi-bill narration is not automatically allocated.
+
+Run `installer/output/MeenakshiTallyConnectorSetup-0.3.3.exe` after all jobs finish and the connector is closed. Use the same existing application directory and configuration backup precautions described above. This is a connector-source fix; no additional backend change is introduced by 0.3.3. After launch, recalculate Cash Discount and check Kumaran invoice 0192: paid-by-deadline ₹14,72,066 remains unchanged; CN14 / ₹11,405 should be recognised and Create should be absent. Do not post another note to test this.
+
+Workflow: when a connector source fix needs a new installer, build the versioned installer automatically and report installation/retest steps. Building is not permission to install it, deploy or change accounting records.
+
+### Upgrade to 0.3.4 (9 October 2026)
+
+Implements Shubham's confirmed CD policy: full payment by the deadline still earns a staff-created discount credit; a deadline shortfall subsequently paid in full receives no new credit. Original deadline categories and existing Credit Notes remain as history. Both the backend and connector evaluator must be updated; the frontend explains the later settlement instead of offering Create.
+
+After all jobs finish, close the connector and run `installer/output/MeenakshiTallyConnectorSetup-0.3.4.exe` in the existing application directory, using the same configuration/PDF backup precautions above. Launch it with the intended Tally company open, refresh the matching updated application, and rerun Calculate BEFORE using any saved Create action. Expected: Amr 0010 still offers ₹5,000; BKP 1418 and 3165 show no new credit after late full settlement; Kumaran 0192 remains already credited. Do not delete old cases or create notes during validation.
+
 ## Verified Credit Note PDFs
 
 Run this once after the bridge is connected:

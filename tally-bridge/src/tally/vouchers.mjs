@@ -93,10 +93,19 @@ function parseInventoryLines(voucherXml) {
 }
 
 function parseBillAllocations(voucherXml, voucherGuid, voucherDate) {
+  const allLedgerEntries = extractBlocks(voucherXml, "ALLLEDGERENTRIES.LIST");
+  const ledgerEntries = allLedgerEntries.length ? allLedgerEntries : extractBlocks(voucherXml, "LEDGERENTRIES.LIST");
   return extractBlocks(voucherXml, "BILLALLOCATIONS.LIST").map((allocationXml, index) => {
     const billReference = text(allocationXml, "NAME");
     const billType = text(allocationXml, "BILLTYPE");
     const allocatedAmount = decimalText(text(allocationXml, "AMOUNT"));
+    // Keep the bill's owning ledger and accounting direction. Flattening every
+    // bill in a multi-party voucher must not turn another party's credit (or a
+    // debit/reversal) into this customer's payment. Ambiguous ownership stays
+    // unknown, rather than being inferred from PARTYLEDGERNAME.
+    const owners = ledgerEntries.filter((entry) => extractBlocks(entry, "BILLALLOCATIONS.LIST").includes(allocationXml));
+    const owner = owners.length === 1 ? owners[0] : null;
+    const deemedPositive = owner ? text(owner, "ISDEEMEDPOSITIVE") : "";
     return {
       allocationKey: `${voucherGuid}:${index + 1}:${billReference}:${billType}`,
       billReference,
@@ -105,7 +114,11 @@ function parseBillAllocations(voucherXml, voucherGuid, voucherDate) {
       allocatedAmount: allocatedAmount.startsWith("-") ? allocatedAmount.slice(1) : allocatedAmount,
       targetVoucherGuid: text(allocationXml, "TARGETVOUCHERGUID") || text(allocationXml, "VOUCHERGUID"),
       targetVoucherNumber: text(allocationXml, "VOUCHERNUMBER"),
-      sourcePayload: { billReference, billType, rawAmount: text(allocationXml, "AMOUNT") },
+      sourcePayload: {
+        billReference, billType, rawAmount: text(allocationXml, "AMOUNT"),
+        ledgerName: owner ? text(owner, "LEDGERNAME") : null,
+        ledgerIsDeemedPositive: deemedPositive ? truthy(deemedPositive) : null,
+      },
     };
   }).filter((allocation) => allocation.billReference && allocation.allocatedAmount !== "0");
 }

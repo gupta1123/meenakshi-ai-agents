@@ -28,7 +28,7 @@ test("targeted evidence command keeps paired master and voucher checkpoints dist
         voucherScope: { dateFrom: "2026-08-01", dateTo: "2026-08-31", customerLedgerName: "ACME" },
       },
     }, { config: { tallyUrl: "http://localhost:9000" }, activeCompany: { name: "Test Company", guid: "company-1" } });
-    assert.equal(calls, 8, "seven master exports plus one voucher export");
+    assert.equal(calls, 9, "one master-change probe, seven master exports and one voucher export");
     assert.equal(result.evaluationRunId, "evaluation-1");
     assert.equal(result.masters.syncRunId, "master-sync-1");
     assert.equal(result.vouchers.syncRunId, "voucher-sync-1");
@@ -52,6 +52,7 @@ test("Turnover Discount local fast path needs no cloud voucher-sync record", asy
         masterSyncRunId: "master-sync-1",
         voucherScope: {
           purpose: "live_tod_evaluation",
+          paymentCheck: { dueDays: 25, nonWorkingIsoWeekdays: [7], holidays: [] },
           liveAggregation: true,
           dateFrom: "2026-08-01",
           dateTo: "2026-08-31",
@@ -89,7 +90,7 @@ test("Cash Discount fast path performs one live voucher export and no master exp
           liveAggregation: "cd",
           ruleVersionId: "rule-1",
           dateFrom: "2026-01-01",
-          dateTo: "2026-12-31",
+          dateTo: "2026-01-10",
           customers: [{ customerId: "customer-1", ledgerName: "ACME" }],
         },
       },

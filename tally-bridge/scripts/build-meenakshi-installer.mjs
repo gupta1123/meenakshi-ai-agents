@@ -11,6 +11,7 @@ const sourceRoot = path.join(bridgeRoot, "src");
 const payloadRoot = path.join(installerRoot, "payload-clean");
 const outputRoot = path.join(installerRoot, "output");
 const definitionPath = path.join(installerRoot, "meenakshi-tally-bridge.iss");
+const appVersion = JSON.parse(fs.readFileSync(path.join(electronAppRoot, "package.json"), "utf8")).version;
 const connector = {
   name: "Meenakshi Tally Connector",
   executableName: "Meenakshi Tally Connector.exe",
@@ -45,6 +46,10 @@ function validateSources() {
   ensureContains(path.join(sourceRoot, "commands", "fetch-evidence.mjs"), "fetchLiveCdEvidence", "live Cash Discount routing");
   ensureContains(definitionPath, connector.installDirectory, "Meenakshi install directory");
   ensureContains(definitionPath, connector.protocol, "Meenakshi installer protocol");
+  ensureContains(definitionPath, `#define AppVersion "${appVersion}"`, "Meenakshi installer version");
+  if (JSON.parse(fs.readFileSync(path.join(bridgeRoot, "package.json"), "utf8")).version !== appVersion) {
+    throw new Error("Bridge and Electron package versions must match.");
+  }
   console.log(`Installer sources validated for ${connector.name} (${connector.protocol}://).`);
 }
 
@@ -118,4 +123,4 @@ const compiler = findInnoCompiler();
 buildPayload(runtimeExecutable);
 fs.mkdirSync(outputRoot, { recursive: true });
 execFileSync(compiler, [definitionPath], { cwd: installerRoot, stdio: "inherit" });
-console.log(`Created ${path.join(outputRoot, "MeenakshiTallyConnectorSetup.exe")}.`);
+console.log(`Created ${path.join(outputRoot, `MeenakshiTallyConnectorSetup-${appVersion}.exe`)}.`);

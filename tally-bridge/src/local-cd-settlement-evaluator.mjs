@@ -25,6 +25,50 @@ function money(value) { return decimal(value).toDecimalPlaces(2, Decimal.ROUND_H
 function isoDate(date) { return date.toISOString().slice(0, 10); }
 function addDays(value, days) { const date = new Date(`${value}T00:00:00.000Z`); date.setUTCDate(date.getUTCDate() + days); return isoDate(date); }
 
+function normalized(value) { return String(value ?? "").trim().toLowerCase(); }
+function invoiceReferences(invoice) {
+  return [invoice.tallyGuid, invoice.voucherNumber, ...(invoice.billReferences ?? [])].map(normalized).filter(Boolean);
+}
+function referenceKey(customer, reference) { return JSON.stringify([normalized(customer), normalized(reference)]); }
+
+export function indexCdInvoiceReferences(invoices) {
+  const owners = new Map();
+  for (const invoice of invoices) {
+    for (const reference of invoiceReferences(invoice)) {
+      const key = referenceKey(invoice.customerLedgerName, reference);
+      const ids = owners.get(key) ?? new Set();
+      ids.add(invoice.tallyGuid);
+      owners.set(key, ids);
+    }
+  }
+  return owners;
+}
+
+// A Receipt can create the credit side of the same bill with New Ref instead
+// of Agst Ref. Accept only a positive credit owned by the invoice's customer,
+// with an exact, unambiguous invoice reference. Never guess from amounts,
+// narration, an unrelated advance, or the voucher's top-level party alone.
+export function isMatchedCdNewRefReceipt(invoice, payment, referenceOwners) {
+  if (payment.allocationType !== "new_ref" || payment.receiptKind !== "receipt") return false;
+  if (!normalized(invoice.customerLedgerName)
+      || normalized(payment.customerLedgerName) !== normalized(invoice.customerLedgerName)) return false;
+  if (payment.ledgerIsDeemedPositive === true || !String(payment.rawAllocatedAmount ?? "").trim()) return false;
+  let rawAmount;
+  let allocatedAmount;
+  try {
+    rawAmount = decimal(String(payment.rawAllocatedAmount).replaceAll(",", "").trim());
+    allocatedAmount = decimal(payment.allocatedAmount);
+  } catch { return false; }
+  if (!rawAmount.isFinite() || rawAmount.lte(0) || !rawAmount.eq(allocatedAmount)) return false;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(payment.receiptDate ?? "") || payment.receiptDate < invoice.voucherDate) return false;
+  // An explicit target GUID takes precedence; do not fall back to a bill name
+  // when the GUID says this payment belongs to a different invoice.
+  const reference = normalized(payment.targetVoucherGuid || payment.billReference);
+  if (!reference || !invoiceReferences(invoice).includes(reference)) return false;
+  const owners = referenceOwners.get(referenceKey(invoice.customerLedgerName, reference));
+  return owners?.size === 1 && owners.has(invoice.tallyGuid);
+}
+
 /**
  * The deadline is N days after the invoice date, counting every day (Sundays
  * and holidays included). Only when that last day is a Sunday / non-working
@@ -58,6 +102,7 @@ export function gstCreditNoteLastDate(invoiceDate) {
 export function evaluateCashDiscountSettlements(rule, evaluatedOn, invoices) {
   const results = [];
   const candidates = [];
+  const referenceOwners = indexCdInvoiceReferences(invoices);
   for (const invoice of invoices) {
     const segmentIndex = rule.customerSegments?.[invoice.customerId];
     const segment = segmentIndex === undefined ? null : rule.segments?.[segmentIndex];
@@ -72,7 +117,8 @@ export function evaluateCashDiscountSettlements(rule, evaluatedOn, invoices) {
     const deadline = workingDayDeadline(rule.calendar, invoice.voucherDate, Number(segment.allowedWorkingDays));
     // The evidence step has already matched these allocations to this invoice.
     const payments = (invoice.payments ?? [])
-      .filter((payment) => payment.allocationType === "agst_ref")
+      .filter((payment) => payment.allocationType === "agst_ref"
+        || isMatchedCdNewRefReceipt(invoice, payment, referenceOwners))
       .sort((left, right) => left.receiptDate.localeCompare(right.receiptDate));
     const paidByDeadline = payments.filter((payment) => payment.receiptDate <= deadline).reduce((total, payment) => total.plus(decimal(payment.allocatedAmount).abs()), decimal(0));
     const paidToDate = payments.filter((payment) => payment.receiptDate <= evaluatedOn).reduce((total, payment) => total.plus(decimal(payment.allocatedAmount).abs()), decimal(0));
@@ -90,16 +136,24 @@ export function evaluateCashDiscountSettlements(rule, evaluatedOn, invoices) {
     const short = Decimal.max(invoiceAmount.minus(paidByDeadline), 0);
     // Paying the full bill on time still earns the discount; the customer just
     // did not deduct it, so the Credit Note leaves a credit on their ledger.
-    const creditAmount = category === "discounted_payment" || category === "full_payment" ? discount
+    // Confirmed 9 Oct 2026: full payment ON TIME earns credit, but a
+    // deadline shortfall subsequently cleared in full earns no new note.
+    const settledLate = ["discounted_payment", "over_ninety_percent"].includes(category)
+      && paidToDate.gte(invoiceAmount.minus(TOLERANCE));
+    const creditAmount = settledLate ? decimal(0)
+      : category === "discounted_payment" || category === "full_payment" ? discount
       : category === "over_ninety_percent" ? Decimal.min(short, discount)
       : decimal(0);
     const gstLastDate = gstCreditNoteLastDate(invoice.voucherDate);
     const credited = alreadyCredited.gt(0);
     const status = credited ? "credited"
+      : settledLate ? "settled_late"
       : category === "discounted_payment" || category === "full_payment" ? "ready"
       : category === "over_ninety_percent" ? "review"
       : category;
-    const reviewMessage = category === "needs_review"
+    const reviewMessage = settledLate
+      ? "The remaining balance was paid after the deadline. No new Cash Discount Credit Note applies."
+      : category === "needs_review"
       ? `MT could not be worked out for unit${missingUnits.length === 1 ? "" : "s"} ${missingUnits.join(", ")}. Add the MT conversion to the rule.`
       : null;
 
@@ -134,6 +188,7 @@ export function evaluateCashDiscountSettlements(rule, evaluatedOn, invoices) {
       creditNoteReferences: (invoice.creditNotes ?? []).map((note) => ({ tallyGuid: note.tallyGuid, voucherNumber: note.voucherNumber, voucherDate: note.voucherDate, amount: money(decimal(note.amount).abs()) })),
       // Shown in the invoice side panel: each payment and whether it counted.
       payments: payments.map((payment) => ({
+        allocationType: payment.allocationType,
         voucherNumber: payment.receiptNumber ?? null,
         voucherType: payment.receiptType ?? null,
         date: payment.receiptDate,

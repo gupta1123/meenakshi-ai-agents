@@ -9,6 +9,12 @@ const MAX_MATCHING_VOUCHERS = 50_000;
 const PAYMENT_TOLERANCE = new Decimal(1);
 
 function normalized(value) { return String(value ?? "").trim().toLowerCase(); }
+function tdsJournal(voucher) {
+  if (voucher.voucherKind !== "other" || !/journal/i.test(voucher.voucherTypeName ?? "")) return false;
+  const debits = (voucher.sourcePayload?.ledgerEntries ?? []).filter((entry) => entry.isDeemedPositive && new Decimal(entry.amount || 0).abs().gt(0));
+  // Do not treat arbitrary journals/discounts/write-offs as money received.
+  return debits.length > 0 && debits.every((entry) => /\btds\b|tax deducted at source/i.test(entry.ledgerName ?? ""));
+}
 function contributionSign(voucher) {
   if (voucher.voucherKind === "sales") return 1;
   if (voucher.voucherKind === "sales_return") return -1;
@@ -79,7 +85,9 @@ function checkPayments(pendingSales, allocations, paymentCheck, cdCreditByInvoic
     const billReferences = (voucher.billAllocations ?? []).filter((allocation) => allocation.allocationType === "new_ref").map((allocation) => allocation.billReference).filter(Boolean);
     const payments = [...new Map([voucher.guid, voucher.voucherNumber, ...billReferences]
       .flatMap((reference) => paymentsByReference.get(normalized(reference)) ?? [])
-      .map((payment) => [`${payment.receiptGuid}:${payment.billReference}:${payment.allocatedAmount}`, payment])).values()]
+      .filter((payment) => normalized(payment.customerLedgerName) === normalized(voucher.partyLedgerName)
+        && (!payment.targetVoucherGuid || normalized(payment.targetVoucherGuid) === normalized(voucher.guid)))
+      .map((payment) => [payment.allocationKey, payment])).values()]
       .sort((left, right) => left.receiptDate.localeCompare(right.receiptDate));
     // A discounted payment plus its Cash Discount Credit Note settles the
     // invoice (docs/CD_LOGIC.md §8): the Credit Note reduces what must be paid.
@@ -112,7 +120,9 @@ function checkPayments(pendingSales, allocations, paymentCheck, cdCreditByInvoic
       daysTaken: paidInFullOn ? daysBetween(voucher.voucherDate, paidInFullOn) : null,
       paidByDueDate: paidByDueDate.toFixed(),
       paidTotal: paidTotal.toFixed(),
-      payments: payments.map((payment) => ({ receiptNumber: payment.receiptNumber, receiptDate: payment.receiptDate, amount: new Decimal(payment.allocatedAmount || 0).abs().toFixed() })),
+      receiptTotal: payments.filter((payment) => payment.settlementKind === "receipt").reduce((total, payment) => total.plus(payment.allocatedAmount), new Decimal(0)).toFixed(),
+      tdsTotal: payments.filter((payment) => payment.settlementKind === "tds").reduce((total, payment) => total.plus(payment.allocatedAmount), new Decimal(0)).toFixed(),
+      payments: payments.map((payment) => ({ receiptNumber: payment.receiptNumber, receiptDate: payment.receiptDate, amount: new Decimal(payment.allocatedAmount || 0).abs().toFixed(), settlementKind: payment.settlementKind })),
       tonnes: entry.voucherTonnes.toFixed(),
       taxableValue: entry.voucherTaxableValue.toFixed(),
       counted,
@@ -133,8 +143,8 @@ export async function fetchLiveTodEvidence(command, context) {
   const aggregates = new Map(requestedCustomers.filter((item) => item?.customerId && item?.ledgerName).map((item) => [normalized(item.ledgerName), emptyAggregate(item.customerId, item.ledgerName)]));
   if (!scope.dateFrom || !scope.dateTo || !aggregates.size) throw new Error("Live Turnover Discount evidence requires eligible customers and a bounded date range.");
   if (!eligibleGuids.size && !eligibleNames.size) throw new Error("The active Turnover Discount rule has no eligible Tally products.");
-  // Without paymentCheck (older backends) every period Sales invoice counts, as before.
   const paymentCheck = scope.paymentCheck && typeof scope.paymentCheck === "object" ? scope.paymentCheck : null;
+  if (!paymentCheck || Number(paymentCheck.dueDays) !== 25) throw new Error("TOD payment check required: update the backend before calculating. No unchecked sales total will be returned.");
   const readTo = paymentCheck?.readTo && paymentCheck.readTo > scope.dateTo ? paymentCheck.readTo : scope.dateTo;
 
   let cursor = scope.dateFrom;
@@ -152,9 +162,13 @@ export async function fetchLiveTodEvidence(command, context) {
     chunks += 1;
     vouchersScanned += result.vouchers.length;
     for (const voucher of result.vouchers) {
-      if (paymentCheck && ["receipt", "payment"].includes(voucher.voucherKind) && voucher.status === "posted") {
+      const isTds = tdsJournal(voucher);
+      if ((["receipt", "payment"].includes(voucher.voucherKind) || isTds) && voucher.status === "posted") {
         for (const allocation of voucher.billAllocations ?? []) {
-          if (allocation.allocationType === "agst_ref") allocations.push({ receiptGuid: voucher.guid, receiptNumber: voucher.voucherNumber || null, receiptDate: voucher.voucherDate, billReference: allocation.billReference || null, targetVoucherGuid: allocation.targetVoucherGuid || null, allocatedAmount: allocation.allocatedAmount });
+          const owner = allocation.sourcePayload;
+          // Customer credit entries settle a receivable; debits/reversals do not.
+          if (allocation.allocationType !== "agst_ref" || !owner?.ledgerName || owner.ledgerIsDeemedPositive !== false || !new Decimal(owner.rawAmount || 0).gt(0)) continue;
+          allocations.push({ allocationKey: allocation.allocationKey, customerLedgerName: owner.ledgerName, settlementKind: isTds ? "tds" : "receipt", receiptGuid: voucher.guid, receiptNumber: voucher.voucherNumber || null, receiptDate: voucher.voucherDate, billReference: allocation.billReference || null, targetVoucherGuid: allocation.targetVoucherGuid || null, allocatedAmount: allocation.allocatedAmount });
         }
       }
       if (paymentCheck && voucher.voucherKind === "credit_note" && voucher.status === "posted") {

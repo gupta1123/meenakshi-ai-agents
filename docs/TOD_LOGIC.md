@@ -71,7 +71,9 @@ Each invoice gets a payment-check row, stored in `formula_snapshot.paymentChecks
 
 The due-day count (25) and the extra read window (45) are constants in `evidence.ts` (`TOD_PAYMENT_DUE_DAYS`, `TOD_PAYMENT_READ_BEYOND_DAYS`).
 
-Backward compatibility: if the connector gets no `paymentCheck` in the scope (an older backend), every Sales invoice in the period counts, as before. Older saved results have no payment rows; the panel asks you to run the calculation again.
+Payment checks are required for new calculations. Missing `paymentCheck` scope or missing returned `paymentChecks` causes an error instead of counting unchecked Sales invoices. Historical snapshots remain unchanged.
+
+Linked TDS settlement: posted Journal vouchers whose debit ledgers are explicitly TDS (or Tax Deducted at Source) may settle a bill through the customer's credit-side Agst Ref allocation. Use the journal date and the allocated amount, not the full journal total. Require the owning customer ledger to match the invoice; reject debit/reversal allocations, unrelated journals, On Account amounts and contradictory invoice GUIDs. An allocation is counted only once even when matched by both GUID and bill reference. Preserve separate `receiptTotal`, `tdsTotal` and `payments[].settlementKind` evidence; `paidTotal` is total settlement, not cash received. The 25-day deadline and ₹1 tolerance are unchanged.
 
 ## 5. Page layout (new)
 

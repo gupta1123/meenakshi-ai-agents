@@ -57,7 +57,9 @@ export type TodPaymentCheck = {
   daysTaken: number | null;
   paidByDueDate: string;
   paidTotal: string;
-  payments: Array<{ receiptNumber: string | null; receiptDate: string; amount: string }>;
+  receiptTotal?: string;
+  tdsTotal?: string;
+  payments: Array<{ receiptNumber: string | null; receiptDate: string; amount: string; settlementKind?: "receipt" | "tds" }>;
   tonnes: string;
   taxableValue: string;
   counted: boolean;
@@ -98,6 +100,10 @@ export function isLiveTodBatchAggregate(value: unknown): value is LiveTodBatchAg
 }
 
 export async function evaluateLiveTodAggregate(run: EvaluationRunRecord, aggregate: LiveTodAggregate) {
+  if (!Array.isArray(aggregate.paymentChecks) || aggregate.contributions.some((sale) => sale.voucherKind === "sales"
+    && !aggregate.paymentChecks?.some((check) => check.tallyGuid === sale.tallyGuid && check.counted))) {
+    throw new Error("TOD payment check required. Update the connector and calculate again; unchecked sales totals cannot be used.");
+  }
   const context = await loadLiveTodContext(run);
   if (aggregate.evaluationRunId !== run.id || aggregate.periodStart !== context.periodStart || aggregate.periodEnd !== context.periodEnd) {
     throw new Error("The live Tally result does not match this evaluation and period.");

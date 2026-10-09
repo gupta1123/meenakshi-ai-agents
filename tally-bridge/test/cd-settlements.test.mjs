@@ -85,6 +85,40 @@ test("categories: full, discounted, short up to ₹10,000, not eligible", () => 
   assert.equal(open.results[0].category, "awaiting_payment");
 });
 
+test("late full settlement suppresses new credit without rewriting deadline evidence", () => {
+  for (const onTime of ["95000", "97000"]) {
+    const payments = [["2025-10-06", onTime], ["2025-10-10", String(100000 - Number(onTime))]];
+    const before = evaluateCashDiscountSettlements(rule, "2025-10-09", [invoice(payments)]);
+    assert.equal(before.candidates.length, 1, "future receipts must not suppress credit");
+    const after = evaluateCashDiscountSettlements(rule, "2025-10-10", [invoice(payments)]);
+    assert.equal(after.results[0].paidByDeadline, onTime + ".00");
+    assert.equal(after.results[0].paidToDate, "100000.00");
+    assert.equal(after.results[0].status, "settled_late");
+    assert.equal(after.results[0].creditAmount, "0.00");
+    assert.equal(after.candidates.length, 0);
+    const existing = evaluateCashDiscountSettlements(rule, "2025-10-10", [invoice(payments, { creditNotes: [{ amount: "5000" }] })]);
+    assert.equal(existing.results[0].status, "credited", "existing notes are preserved");
+  }
+  const partial = evaluateCashDiscountSettlements(rule, "2025-10-20", [invoice([["2025-10-06", "95000"], ["2025-10-10", "2000"]])]);
+  assert.equal(partial.candidates.length, 1, "partial later payment is not full settlement");
+  const fullOnTime = evaluateCashDiscountSettlements(rule, "2025-10-20", [invoice([["2025-10-06", "100000"]])]);
+  assert.equal(fullOnTime.candidates[0].creditAmount, "5000.00");
+});
+
+test("BKP 3165 keeps its invoice allocation and suppresses credit after July settlement", () => {
+  const source = invoice([["2025-06-25", "585354"], ["2025-07-05", "5581"]], {
+    voucherDate: "2025-06-23", voucherNumber: "MUI/25-26/3165",
+    grossAmount: "590935", eligibleTonnes: "10.19",
+  });
+  const before = evaluateCashDiscountSettlements(rule, "2025-06-26", [source]);
+  assert.equal(before.results[0].creditAmount, "5095.00");
+  const after = evaluateCashDiscountSettlements(rule, "2026-10-09", [source]);
+  assert.equal(after.results[0].paidByDeadline, "585354.00");
+  assert.equal(after.results[0].paidToDate, "590935.00");
+  assert.equal(after.results[0].status, "settled_late");
+  assert.equal(after.candidates.length, 0);
+});
+
 test("an invoice already credited or missing MT units makes no new Credit Note", () => {
   const credited = evaluateCashDiscountSettlements(rule, "2025-10-20", [invoice([["2025-10-08", "95000"]], { creditNotes: [{ tallyGuid: "cn", voucherNumber: "15", voucherDate: "2025-10-10", amount: "5000", narration: "Being Cash Discount allowed against Inv No. MUI/5193 dt." }] })]);
   assert.equal(credited.results[0].status, "credited");

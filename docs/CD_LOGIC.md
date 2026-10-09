@@ -4,7 +4,7 @@
 
 ## 1. The idea in one paragraph
 
-The invoice goes out at **full price**. A customer who pays within their Cash Discount window may pay the invoice **minus the discount** (₹ per MT). When that happens, staff issue a **Credit Note** for the discount from the Cash Discount page so the bill closes. A customer who pays in full has not claimed the discount, so nothing is issued. Payments of more than 90% that fit neither case are shown to staff, who decide.
+The invoice goes out at **full price**. A customer who pays the invoice **minus the discount** (₹ per MT) within the window may receive a staff-created Credit Note that closes the bill. A customer who pays **in full within the window also earns the discount**; staff may issue a Credit Note leaving credit for a future bill. If a deadline shortfall is subsequently paid in full after the deadline, no new CD Credit Note is offered. These two decisions were confirmed by Shubham on 9 October 2026. Other small shortfalls are shown for staff review.
 
 ## 2. Rule setup
 
@@ -48,6 +48,7 @@ MT uses the rule's unit conversions, the same as TOD. Round as set on the rule.
 
 - **Receipts** with an *Agst Ref* allocation to the invoice, matched by invoice GUID, voucher number, or bill name. This is the same matching as TOD's 25-day check.
 - **Journal** vouchers with an *Agst Ref* allocation to the invoice also count. This covers TDS booked separately against the bill. TDS booked inside the receipt is already included.
+- **Same-bill Receipt New Ref (implementation decision, 9 October 2026):** count a posted receipt's positive credit allocation when its owning ledger is the invoice's customer, its exact bill reference (or explicit target GUID) uniquely identifies that customer's invoice in the fetched evidence, and the receipt is on/after the invoice date. This handles a receipt creating the credit side of the same bill rather than using Agst Ref. Preserve the original allocation type in evidence. Reject ambiguous/unknown ownership, debit or reversed entries, unrelated advances, On Account allocations, pre-invoice receipts and mismatching target GUIDs. Both connector and backend validate this relationship. This decision was authorized during issue-1418 investigation; it is not a new claimed client approval of all existing CD policy wording.
 - Only amounts **received on or before the deadline** count for the categories below. All amounts are **GST-inclusive** (bill amounts).
 
 ## 6. Categories
@@ -56,12 +57,14 @@ The screen **shows** the categories in the client's order: Full payment, Short u
 
 | Category | Condition | Result |
 |---|---|---|
-| **Full payment** | received ≥ invoice − ₹1 | **No Credit Note.** Discount not claimed. Shown for information only. |
+| **Full payment** | received ≥ invoice − ₹1 | **Staff may create a Credit Note for the discount.** It leaves credit for a future bill; never automatic. |
 | **Discounted payment** | received is within ±₹1 of invoice − discount | **Credit Note for the discount, created by staff** from the Cash Discount page (never automatic). The bill closes at zero. |
 | **Short up to ₹10,000** | invoice − received ≤ ₹10,000 (a flat limit, whatever the bill size), and neither of the above | **Staff decide.** The entry is shown with an option to create a Credit Note for **only what is short**, **capped at the discount**: min(invoice − received, discount). Nothing happens automatically. |
 | **Not eligible** | short of the invoice by more than ₹10,000 at the deadline, or no payment by the deadline | No discount. Any shortfall stays in the customer's outstanding balance. |
 
 **Evaluation order:** the system checks the exact matches first (Full, then Discounted), then the ₹10,000 band. A discounted payment is usually short by less than ₹10,000, so checking the ₹10,000 band first would swallow every discounted payment.
+
+**Later full settlement (Shubham confirmation, 9 October 2026):** keep the original deadline category and payment evidence, but if a discounted/small-shortfall invoice is later paid in full (within ₹1), set the new proposed credit to zero and show “Balance paid later — no new Credit Note”. Only payments through the evaluation date count toward that later settlement. Full payment already achieved by the deadline is not suppressed. Existing Credit Notes remain recorded; this rule does not reverse them or remove history.
 
 ## 7. The Credit Note
 

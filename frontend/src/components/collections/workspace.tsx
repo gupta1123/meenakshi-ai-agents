@@ -987,6 +987,8 @@ type TodPaymentCheckRow = {
   tallyGuid: string; voucherNumber: string | null; invoiceDate: string; invoiceAmount: string; dueDays: number;
   nominalDueDate: string; dueDate: string; shiftedFor: Array<{ date: string; reason: "holiday" | "non_working_day" }>;
   paidInFullOn: string | null; daysTaken: number | null; paidTotal: string; tonnes: string; counted: boolean;
+  receiptTotal?: string; tdsTotal?: string;
+  payments?: Array<{ receiptNumber: string | null; receiptDate: string; amount: string; settlementKind?: "receipt" | "tds" }>;
   reason: "paid_in_full_on_time" | "paid_after_due_date" | "partly_paid" | "not_paid";
 };
 /** One status chip per TOD row; rank orders the "Status" sort (most urgent first). */
@@ -1532,7 +1534,10 @@ function ProposalDrawer({ proposal, onClose, onChanged, onError, customerName, l
       const words = paymentWords(check);
       return <article key={check.tallyGuid} className={check.counted ? "is-counted" : "is-excluded"}>
         <div><strong>{check.voucherNumber || "Sales invoice"}</strong><small>{formatBusinessDate(check.invoiceDate)} · {formatMoney(check.invoiceAmount)}</small></div>
-        <div className="tod-payment-days"><small>{words.due}</small><small className={check.counted ? undefined : "is-problem"}>{words.paid}</small></div>
+        <div className="tod-payment-days"><small>{words.due}</small><small className={check.counted ? undefined : "is-problem"}>{Number(check.tdsTotal) > 0 ? words.paid.replace(/^Paid/, "Settled") : words.paid}</small>
+          {Number(check.tdsTotal) > 0 && <small>Receipts {formatMoney(check.receiptTotal ?? "0")} + TDS {formatMoney(check.tdsTotal)} = settled {formatMoney(check.paidTotal)}</small>}
+          {(check.payments ?? []).filter((payment) => payment.settlementKind === "tds").map((payment, index) => <small key={`tds-${index}`}>TDS Journal {payment.receiptNumber ?? ""} · {formatBusinessDate(payment.receiptDate)} · {formatMoney(payment.amount)}</small>)}
+        </div>
         <strong className="tod-payment-mt">{formatTonnes(check.tonnes)} MT</strong>
         <span className={`tod-payment-verdict ${check.counted ? "is-counted" : "is-excluded"}`}>{verdictLabel(check)}</span>
       </article>;
@@ -1556,7 +1561,7 @@ function ProposalDrawer({ proposal, onClose, onChanged, onError, customerName, l
           {missedChecks.length > 0 && remainingTonnes > 0 && <p className={`tod-payment-impact${missedTonnes >= remainingTonnes ? " is-problem" : ""}`}>{missedTonnes >= remainingTonnes
             ? `Paid on time, these ${missedChecks.length} invoices would have reached the next slab (${formatTonnes(remainingTonnes)} MT needed).`
             : `Even counted, these would not reach the next slab: ${formatTonnes(remainingTonnes)} MT is needed.`}</p>}
-          <p className="tod-payment-rule">Counts only invoices paid in full within 25 days. A due date on a Sunday or holiday moves to the next working day.</p>
+          <p className="tod-payment-rule">Counts only invoices fully settled within 25 days. Linked TDS journals count towards settlement on their journal date, not as cash received. A due date on a Sunday or holiday moves to the next working day.</p>
           {missedChecks.length > 0 && <section><p className="eyebrow">Not counted · {missedChecks.length}</p><div className="tod-payment-list">{missedChecks.map(paymentRow)}</div></section>}
           {countedChecks.length > 0 && <details className="tod-payment-counted" open={!missedChecks.length}>
             <summary>Counted · {countedChecks.length} invoice{countedChecks.length === 1 ? "" : "s"} · {formatTonnes(countedChecks.reduce((total, check) => total + (Number(check.tonnes) || 0), 0))} MT</summary>

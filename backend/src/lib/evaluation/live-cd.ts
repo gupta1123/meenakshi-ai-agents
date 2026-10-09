@@ -20,6 +20,14 @@ type LiveCdPayment = {
   targetVoucherGuid: string | null;
   allocationType: string;
   allocatedAmount: string;
+  // Optional for older connector evidence; New Ref is rejected when its
+  // owning-ledger/direction evidence is missing. Agst Ref keeps its behaviour.
+  receiptKind?: string;
+  receiptType?: string | null;
+  allocationKey?: string;
+  customerLedgerName?: string | null;
+  rawAllocatedAmount?: string | null;
+  ledgerIsDeemedPositive?: boolean | null;
 };
 
 type LiveCdDebitNote = {

@@ -3,6 +3,7 @@
 // Review one per-MT Cash Discount invoice without obscuring the decision with audit detail.
 import type { Calendar } from "./types";
 import { savedPostingFailure } from "@/lib/tally-status";
+import { cdPaymentDisplay } from "@/lib/cd-payment-display";
 import { Button, Drawer, StatusBadge, formatMoney, formatTonnes } from "./ui";
 import type { CdSettlementRow } from "./cash-discount-settlements";
 import styles from "./cd-invoice-panel.module.css";
@@ -29,9 +30,9 @@ const exact = (value: number) => money(value).replace(/\.00$/, "");
 const addDays = (value: string, count: number) => { const date = day(value); date.setDate(date.getDate() + count); return iso(date); };
 
 /**
- * Every day from the invoice date to the deadline, continuing to the last
- * payment (at most 7 days past the deadline). All days count; Sundays and
- * holidays are marked, and days past N show the deadline moving.
+ * Every day from the invoice date through the last payment, capped at seven
+ * days after the deadline. Payments beyond the cap are listed separately.
+ * All days count; Sundays and holidays are marked.
  */
 function windowDays(row: CdSettlementRow, calendar: Calendar | null, until: string) {
   const offDays = new Set(calendar?.nonWorkingWeekdays ?? [7]);
@@ -69,6 +70,7 @@ export function CdInvoicePanel({ row, note, calendar, canCreate, busy, companyNa
   const credit = Number(row.creditAmount);
   const owed = Math.max(0, bill - paid);
   const deadline = row.windowDeadline.slice(0, 10);
+  const settledLate = row.status === "settled_late";
   const lastPaymentDate = [...(row.payments ?? [])].map((payment) => payment.date.slice(0, 10)).sort().at(-1) ?? null;
   const timelineEnd = lastPaymentDate && lastPaymentDate > deadline ? [lastPaymentDate, addDays(deadline, 7)].sort()[0] : deadline;
   const days = windowDays(row, calendar, timelineEnd);
@@ -78,19 +80,17 @@ export function CdInvoicePanel({ row, note, calendar, canCreate, busy, companyNa
   const movedFor = days.slice(row.windowWorkingDays).filter((item) => item.kind === "off" && item.date <= deadline);
   const daysAfter = (value: string) => Math.round((day(value).getTime() - day(row.invoiceDate).getTime()) / 86_400_000);
   const payments = [...(row.payments ?? [])].sort((left, right) => left.date.localeCompare(right.date));
-  // The day the payments first covered the amount due (or the last on-time payment).
-  let running = 0;
-  const reached = payments.find((payment) => (running += Number(payment.amount)) >= target - 1) ?? null;
-  const paidOn = reached?.date ?? row.latestPaymentDate ?? null;
+  const { lastOnTimeDate: paidOn, settledDate } = cdPaymentDisplay(row);
   // The discount is GST-inclusive: taxable part = credit ÷ 1.18.
   const taxable = Math.round((credit / 1.18) * 100) / 100;
   const gst = Math.round((credit - taxable) * 100) / 100;
 
   // One line of facts, then one line of meaning.
-  const facts = paid > 0 && paidOn
-    ? `Paid ${money(paid)} by ${shortDay(paidOn)}, day ${daysAfter(paidOn)} of ${row.windowWorkingDays}${movedFor.length ? ` (deadline moved to ${shortDay(deadline)})` : ""}`
+  const facts = paid > 0
+    ? `${money(paid)} paid by the deadline, ${shortDay(deadline)}.${paidOn ? ` Last on-time payment: ${shortDay(paidOn)}.` : ""}`
     : `No payment by the deadline, ${shortDay(deadline)}`;
-  const result = row.category === "full_payment"
+  const result = row.status === "settled_late" ? row.reviewMessage ?? "Balance paid after the deadline. No new Credit Note applies."
+    : row.category === "full_payment"
     ? credit > 0 ? "The full bill was paid on time, so the discount is earned. The Credit Note leaves a credit for the next bill." : "The full bill was paid on time. Run the Cash Discount check again to work out its Credit Note."
     : row.category === "discounted_payment"
       ? "The discounted amount was paid on time. The Credit Note closes the bill."
@@ -116,14 +116,15 @@ export function CdInvoicePanel({ row, note, calendar, canCreate, busy, companyNa
       {/* The answer first: result, amount, the one payment fact, and the Credit Note. */}
       <header className={styles.hero}>
         <div className={styles.heroTop}>
-          <StatusBadge status={row.category === "discounted_payment" || row.category === "full_payment" ? "ready" : row.category === "over_ninety_percent" ? "needs_review" : "not_started"}>{CATEGORY_LABEL[row.category] ?? row.category}</StatusBadge>
-          <span className={styles.heroAmount}><small>{credit > 0 ? "Credit Note" : "Discount on offer"}</small><strong>{money(credit > 0 ? credit : discount)}</strong></span>
+          <StatusBadge status={row.status === "settled_late" ? "not_started" : row.category === "discounted_payment" || row.category === "full_payment" ? "ready" : row.category === "over_ninety_percent" ? "needs_review" : "not_started"}>{row.status === "settled_late" ? "Balance paid later — no new credit" : CATEGORY_LABEL[row.category] ?? row.category}</StatusBadge>
+          <span className={styles.heroAmount}><small>{row.status === "settled_late" ? "Credit Note" : credit > 0 ? "Credit Note" : "Discount on offer"}</small><strong>{money(row.status === "settled_late" ? 0 : credit > 0 ? credit : discount)}</strong></span>
         </div>
         <p className={styles.heroFacts}>{facts}</p>
+        {settledLate && <p className={styles.heroFacts}>{money(paidLater)} paid after the deadline{settledDate ? `; bill fully paid on ${longDate(settledDate)}` : ""}.</p>}
         <p className={styles.heroContext}>{result}</p>
         {credit > 0 && <div className={styles.noteStatus}>
           {created ? <div className={styles.noteDone}>
-              <strong>CN {note!.verified_voucher_number ?? "created"} · {money(Number(note!.amount ?? credit))}</strong>
+              <strong>Credit Note {note!.verified_voucher_number ?? "created"} · {money(Number(note!.amount ?? credit))}</strong>
               <span>{note!.verified_at ? `Created in Tally ${shortDay(note!.verified_at)}` : "Created in Tally"} · <span data-sent={Boolean(whatsapp && ["sent", "delivered", "read"].includes(whatsapp.status))}>{whatsappLabel}</span></span>
             </div>
             : note && ["queued", "sending"].includes(note.status) ? <StatusBadge status="posting">Creating in Tally…</StatusBadge>
@@ -131,15 +132,26 @@ export function CdInvoicePanel({ row, note, calendar, canCreate, busy, companyNa
             : <span className={row.gstDeadlinePassed ? styles.warn : styles.noteHint}>{row.gstDeadlinePassed ? `GST deadline passed (${longDate(row.gstLastDate)})` : `Not created · create by ${longDate(row.gstLastDate)}`}</span>}
           {canCreate && <Button disabled={busy} onClick={onCreate}>{busy ? "Queuing…" : `Create ${money(credit)} Credit Note`}</Button>}
         </div>}
-        {failed && <p className={styles.error}>{failed}</p>}
       </header>
+
+      {failed && <section className={styles.section} aria-label="Credit Note attempt history">
+        <details className={styles.details}>
+          <summary>Previous posting attempt <span>Historical record</span></summary>
+          <p>This is a saved earlier attempt, not the current Tally connection status.{row.status === "credited" ? " The latest calculation already recognises a credit for this invoice; do not create another note." : " Check the current connection before any new posting."}</p>
+          <p>{failed}</p>
+        </details>
+      </section>}
 
       <section className={styles.section} aria-labelledby="cd-calculation">
         <h3 id="cd-calculation">Calculation</h3>
         <dl className={styles.ledger}>
           <div><dt>Invoice total</dt><dd>{money(bill)}</dd></div>
-          <div><dt>Discount <small>{formatTonnes(row.eligibleTonnes)} MT × ₹{Number(row.amountPerTonne).toLocaleString("en-IN")}/MT</small></dt><dd>− {money(discount)}</dd></div>
-          <div className={styles.ledgerTotal}><dt>Amount due with discount</dt><dd>{money(target)}</dd></div>
+          <div><dt>{settledLate ? "Calculated discount — not applied" : "Discount"} <small>{formatTonnes(row.eligibleTonnes)} MT × ₹{Number(row.amountPerTonne).toLocaleString("en-IN")}/MT</small></dt><dd>{settledLate ? "" : "− "}{money(discount)}</dd></div>
+          {settledLate ? <>
+            <div><dt>Total paid</dt><dd>{money(Number(row.paidToDate))}</dd></div>
+            <div className={styles.ledgerTotal}><dt>Remaining invoice balance</dt><dd>{money(Math.max(0, bill - Number(row.paidToDate)))}</dd></div>
+            <div><dt>New Credit Note</dt><dd>{money(0)}</dd></div>
+          </> : <div className={styles.ledgerTotal}><dt>Amount due with discount</dt><dd>{money(target)}</dd></div>}
         </dl>
         {(row.productLines?.length ?? 0) > 0 && <details className={styles.details}>
           <summary>Products counted <span>{row.productLines!.length} line{row.productLines!.length === 1 ? "" : "s"} · {formatTonnes(row.eligibleTonnes)} MT</span></summary>
@@ -178,8 +190,8 @@ export function CdInvoicePanel({ row, note, calendar, canCreate, busy, companyNa
             </li>;
           })}
         </ol>
-        {paidLater > 1 && <p className={styles.paymentMeta}><span>{money(paidLater)} paid after the deadline, not counted.</span></p>}
-        {laterPayments.length > 0 && <p className={styles.paymentMeta}><span>+{laterPayments.length} later payment{laterPayments.length === 1 ? "" : "s"} after {longDate(timelineEnd)}.</span></p>}
+        {paidLater > 0 && <p className={styles.paymentMeta}><span>{money(paidLater)} paid after the deadline. Included in total paid, but not in paid-by-deadline.</span></p>}
+        {laterPayments.map((payment, index) => <p className={styles.paymentMeta} key={`late-${payment.date}-${index}`}><span>{longDate(payment.date)} · {payment.voucherType ?? "Payment"} {payment.voucherNumber ?? ""} · {money(Number(payment.amount))} · after deadline</span></p>)}
         {payments.length > 0 ? <details className={styles.details}>
           <summary>Receipts <span>{payments.length} · {money(payments.reduce((sum, payment) => sum + Number(payment.amount), 0))}</span></summary>
           <ul className={styles.payments} aria-label="Payments against this invoice">

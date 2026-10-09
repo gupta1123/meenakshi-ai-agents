@@ -4,6 +4,13 @@ import test from "node:test";
 import { collapseEvaluationRuns } from "./run-batches.ts";
 import { requiresTallyRefresh } from "./refresh-policy.ts";
 import { restoreCompactSummary } from "./run-summary.ts";
+import { evaluateLiveTodAggregate } from "./live-tod.ts";
+
+test("new TOD persistence rejects missing or incomplete payment checks before loading data", async () => {
+  for (const extra of [{}, { paymentChecks: [], contributions: [{ tallyGuid: "unchecked-sale", voucherKind: "sales" }] }]) {
+    await assert.rejects(evaluateLiveTodAggregate({}, { contributions: [], ...extra }), /TOD payment check required/);
+  }
+});
 
 test("compact run reads preserve zero totals and flags without invoice evidence", () => {
   const row = restoreCompactSummary({ id: "run", status: "completed", compact_invoicesChecked: 444, compact_calculatedDiscountAmount: "0.0000", compact_reviewRequired: 0, compact_liveOnly: false, compact_message: null });
