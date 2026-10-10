@@ -6,6 +6,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      frontend_only:
+        description: Deploy only the frontend; do not restart Heroku
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -75,6 +80,7 @@ jobs:
       - name: Sync the verified commit to Gupta
         run: node scripts/ci/release.mjs mirror
       - name: Deploy backend to Heroku
+        if: github.event_name != 'workflow_dispatch' || !inputs.frontend_only
         run: node scripts/ci/release.mjs backend
       - run: npm ci --prefix frontend
       - name: Deploy frontend to Netlify

@@ -1,4 +1,11 @@
 export type TodPeriodSelection = { start: string; end: string; asOfDate: string; selectedSchemeVersionId: string };
+export type TodPeriodReadState = { scope: string; status: "loading" | "loaded" | "error" };
+
+// A newly selected company/period is loading even before its effect starts.
+// An empty result is valid only after that exact scope has finished loading.
+export function todPeriodReadStatus(scope: string, read: TodPeriodReadState | null) {
+  return read?.scope === scope ? read.status : "loading";
+}
 type ResultPage<T> = { proposals: T[]; hasMore: boolean; nextCursor: string | null };
 
 // Both Customers and View results use this exact, company-scoped period read.

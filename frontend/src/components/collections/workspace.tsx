@@ -10,7 +10,7 @@ import { staffStatusLabel } from "@/lib/staff-status";
 import { userFacingDetail, userFacingError, userLabel } from "@/lib/user-copy";
 import { supabase } from "@/lib/supabase";
 import { runLocalCashDiscount, runLocalTurnoverDiscount, type LocalCdBootstrap, type LocalCdInvoiceCheck, type LocalCdRow, type LocalTodBootstrap, type LocalTodRow } from "@/lib/local-tally";
-import { assertSelectedTodPeriod, loadTodPeriodResults, type TodPeriodSelection } from "@/lib/tod-results";
+import { assertSelectedTodPeriod, loadTodPeriodResults, todPeriodReadStatus, type TodPeriodReadState, type TodPeriodSelection } from "@/lib/tod-results";
 import { canUseTodCloudFallback, refreshSavedTodResults, retryTodRead, runExclusiveTodCalculation, runTodPeriodsInOrder, waitForTodRun, type TodBatchProgress } from "@/lib/tod-calculation";
 
 import { AppShell, WorkspacePageHeader } from "./app-shell";
@@ -606,6 +606,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
   // "qualified" | "close" | "review" | "no_activity" for a period in progress.
   const [statusFilter, setStatusFilter] = useState(scheme === "tod" ? (openReadyView ? "ready" : "") : "all");
   const [localTodBootstrap, setLocalTodBootstrap] = useState<LocalTodBootstrap | null>(null);
+  const [todBootstrapLoading, setTodBootstrapLoading] = useState(scheme === "tod");
   const [localTodRows, setLocalTodRows] = useState<Proposal[]>([]);
   const [savingTod, setSavingTod] = useState(false);
   const [todBatchProgress, setTodBatchProgress] = useState<(TodBatchProgress & { state: "running" | "completed" | "stopped" }) | null>(null);
@@ -651,6 +652,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
   // Always load the selected period completely, not just when View results is clicked.
   const [periodRows, setPeriodRows] = useState<Proposal[]>([]);
   const [periodRowsOwner, setPeriodRowsOwner] = useState<string | null>(null);
+  const [periodRead, setPeriodRead] = useState<TodPeriodReadState | null>(null);
   const [periodRuleBatches, setPeriodRuleBatches] = useState<LocalTodBootstrap["batches"]>([]);
   const loadPeriodRows = useCallback(async (start: string, end: string, versionId?: string) => {
     const token = await accessToken();
@@ -661,13 +663,19 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     if (scheme !== "tod" || !selectedTodPeriodKey) return;
     let cancelled = false;
     const [start, end] = selectedTodPeriodKey.split(":");
-    setPeriodRows([]);
+    const scope = `${company.id}:${selectedTodPeriodKey}`;
+    setPeriodRead({ scope, status: "loading" });
     setPeriodRuleBatches([]);
     void loadPeriodRows(start, end).then((loaded) => {
       if (cancelled) return;
       setPeriodRows(loaded);
       setPeriodRowsOwner(company.id);
-    }).catch((cause) => { if (!cancelled) setError(userFacingError(cause, "Could not load this period's customer results.")); });
+      setPeriodRead({ scope, status: "loaded" });
+    }).catch((cause) => {
+      if (cancelled) return;
+      setPeriodRead({ scope, status: "error" });
+      setError(userFacingError(cause, "Could not load this period's customer results."));
+    });
     // Read the exact-period locked tier definitions, not today's rule's tiers.
     void (async () => {
       const token = await accessToken();
@@ -733,12 +741,17 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
   }, [allSavedRows, company.id, localTodBootstrap, openReadyView, scheme]);
   useEffect(() => {
     if (scheme !== "tod") return;
+    let cancelled = false;
+    setTodBootstrapLoading(true);
     setLocalTodBootstrap(null);
     setLocalTodRows([]);
     setPeriodRows([]);
     setSelectedTodPeriodKey(null);
     lastSavedPeriodApplied.current = null;
-    void preloadLocalTodBootstrap().catch(() => {});
+    void preloadLocalTodBootstrap().catch(() => {}).finally(() => {
+      if (!cancelled) setTodBootstrapLoading(false);
+    });
+    return () => { cancelled = true; };
   }, [company.id, preloadLocalTodBootstrap, scheme]);
 
   const provisionalTodProposal = (row: LocalTodRow): Proposal => {
@@ -989,6 +1002,11 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     if (proposal.status === "failed") return "Review issue";
     return "View details";
   };
+  const periodReadStatus = selectedTodPeriodKey ? todPeriodReadStatus(`${company.id}:${selectedTodPeriodKey}`, periodRead) : "loaded";
+  if (scheme === "tod" && !showEvaluationQueue && !selectedHistoryRun && !savingTod) {
+    if (todBootstrapLoading || periodReadStatus === "loading") return <><WorkspacePageHeader title={title} /><TodPageSkeleton /></>;
+    if (periodReadStatus === "error") return <><WorkspacePageHeader title={title} /><EmptyState title="Customer results unavailable" detail="This period could not be loaded. Your saved results are unchanged." action={<Button onClick={() => void refresh()}>Try again</Button>} /></>;
+  }
   return <><WorkspacePageHeader eyebrow="" title={title} detail="" />
     {scheme === "tod" && todBatchProgress && <InlineMessage tone={todBatchProgress.state === "stopped" ? "warning" : "info"}><span role="status" aria-live="polite">{todBatchProgress.state === "completed" ? `All ${todBatchProgress.total} due periods are calculated and saved.` : todBatchProgress.state === "stopped" ? `Batch stopped after ${todBatchProgress.completed} of ${todBatchProgress.total} periods were saved. Check the error and Run history before trying again.` : `Period ${todBatchProgress.index} of ${todBatchProgress.total}: ${formatBusinessDate(todBatchProgress.start)} – ${formatBusinessDate(todBatchProgress.end)}. ${todBatchProgress.completed} saved. The next period starts automatically after this one is saved. Keep this page open.`}</span></InlineMessage>}
     {scheme === "tod" && todReadWarning && <InlineMessage tone="warning">{todReadWarning}</InlineMessage>}
