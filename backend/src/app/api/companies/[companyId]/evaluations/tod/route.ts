@@ -3,6 +3,8 @@ import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/autho
 import { isUuid } from "@/lib/security";
 import { readIdempotencyKey } from "@/lib/tally/contracts";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { loadSelectedTodPeriod } from "@/lib/evaluation/evidence";
+import { TodPeriodError } from "@/lib/evaluation/tod-period";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -35,18 +37,21 @@ export async function POST(request: Request, context: RouteContext) {
     if (activeRuleError) throw activeRuleError;
     if (!activeRules?.length) return jsonWithCors(request, { error: "Turn on a Turnover Discount rule for this period before calculating customers." }, { status: 409 });
     if (activeRules.length > 1) return jsonWithCors(request, { error: "More than one Turnover Discount rule covers this date. Keep one current rule for each period before calculating customers." }, { status: 409 });
+    const selected = await loadSelectedTodPeriod(company.id, { asOfDate, periodStart: body.periodStart, periodEnd: body.periodEnd, selectedSchemeVersionId: body.selectedSchemeVersionId });
+    const periodContext = { periodStart: selected.period.start, periodEnd: selected.period.end, selectedSchemeVersionId: selected.rule.id };
     const { data, error } = await supabase.rpc("create_meenakshi_evaluation_run", {
       p_organization_id: organization.id,
       p_company_id: company.id,
       p_actor_id: userId,
       p_request_context: batch
-        ? { schemeType: "tod", batch: true, asOfDate: body.asOfDate ?? evaluatedOn, evaluatedOn }
-        : { schemeType: "tod", customerId: body.customerId, asOfDate: body.asOfDate ?? evaluatedOn, evaluatedOn },
+        ? { schemeType: "tod", batch: true, asOfDate: body.asOfDate ?? evaluatedOn, evaluatedOn, ...periodContext }
+        : { schemeType: "tod", customerId: body.customerId, asOfDate: body.asOfDate ?? evaluatedOn, evaluatedOn, ...periodContext },
       p_idempotency_key: idempotencyKey,
     });
     if (error) throw error;
     return jsonWithCors(request, { evaluationRun: data }, { status: 202 });
   } catch (error) {
+    if (error instanceof TodPeriodError) return jsonWithCors(request, { error: error.message }, { status: 422 });
     if (error instanceof MeenakshiAccessError) return jsonWithCors(request, { error: error.message }, { status: error.status });
     console.error("Could not request Turnover Discount evaluation:", error);
     return jsonWithCors(request, { error: "Could not request Turnover Discount evaluation." }, { status: 500 });

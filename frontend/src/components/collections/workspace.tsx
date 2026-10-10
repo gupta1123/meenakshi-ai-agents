@@ -10,6 +10,7 @@ import { staffStatusLabel } from "@/lib/staff-status";
 import { userFacingDetail, userFacingError, userLabel } from "@/lib/user-copy";
 import { supabase } from "@/lib/supabase";
 import { runLocalCashDiscount, runLocalTurnoverDiscount, type LocalCdBootstrap, type LocalCdInvoiceCheck, type LocalCdRow, type LocalTodBootstrap, type LocalTodRow } from "@/lib/local-tally";
+import { assertSelectedTodPeriod, loadTodPeriodResults, type TodPeriodSelection } from "@/lib/tod-results";
 
 import { AppShell, WorkspacePageHeader } from "./app-shell";
 import { useCompany } from "./company-context";
@@ -640,28 +641,57 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       } catch (cause) { setError(userFacingError(cause, "Could not load this calculation snapshot.")); }
     })();
   }
-  // Rows fetched for one period by "View results" (the page's initial list is
-  // capped at 250 recent rows). They fill the gaps; the page's own (refreshed) data wins.
+  // Always load the selected period completely, not just when View results is clicked.
   const [periodRows, setPeriodRows] = useState<Proposal[]>([]);
+  const [periodRowsOwner, setPeriodRowsOwner] = useState<string | null>(null);
+  const [periodRuleBatches, setPeriodRuleBatches] = useState<LocalTodBootstrap["batches"]>([]);
+  const loadPeriodRows = useCallback(async (start: string, end: string, versionId?: string) => {
+    const token = await accessToken();
+    if (!token) throw new Error("Sign in again to load customer results.");
+    return loadTodPeriodResults<Proposal>((params) => apiRequest(token, `/api/companies/${company.id}/evaluations/proposals?${params}`, { cache: "no-store" }), start, end, versionId);
+  }, [company.id]);
+  useEffect(() => {
+    if (scheme !== "tod" || !selectedTodPeriodKey) return;
+    let cancelled = false;
+    const [start, end] = selectedTodPeriodKey.split(":");
+    setPeriodRows([]);
+    setPeriodRuleBatches([]);
+    void loadPeriodRows(start, end).then((loaded) => {
+      if (cancelled) return;
+      setPeriodRows(loaded);
+      setPeriodRowsOwner(company.id);
+    }).catch((cause) => { if (!cancelled) setError(userFacingError(cause, "Could not load this period's customer results.")); });
+    // Read the exact-period locked tier definitions, not today's rule's tiers.
+    void (async () => {
+      const token = await accessToken();
+      if (!token) return;
+      const params = new URLSearchParams({ asOfDate: end < new Date().toISOString().slice(0, 10) ? end : new Date().toISOString().slice(0, 10), periodStart: start, periodEnd: end });
+      const bootstrap = await apiRequest<LocalTodBootstrap>(token, `/api/companies/${company.id}/evaluations/tod/local-bootstrap?${params}`, { cache: "no-store" });
+      if (!cancelled) setPeriodRuleBatches(bootstrap.batches);
+    })().catch(() => { /* Historical misaligned periods may no longer be selectable. Keep their saved values read-only. */ });
+    return () => { cancelled = true; };
+  }, [company.id, data.proposals, loadPeriodRows, scheme, selectedTodPeriodKey, setError]);
   const allSchemeRows = useMemo(() => {
-    const merged = new Map(periodRows.map((proposal) => [proposal.id, proposal]));
+    const merged = new Map((periodRowsOwner === company.id ? periodRows : []).map((proposal) => [proposal.id, proposal]));
     for (const proposal of data.proposals) merged.set(proposal.id, proposal);
     return [...merged.values()].filter((proposal) => proposal.scheme_type === scheme);
-  }, [data.proposals, periodRows, scheme]);
+  }, [company.id, data.proposals, periodRows, periodRowsOwner, scheme]);
   const allSavedRows = allSchemeRows.filter((proposal) => proposal.scheme_type === scheme
-    && (scheme !== "tod" || (proposal.status !== "not_in_scheme" && (!localTodBootstrap || proposal.scheme_version_id === localTodBootstrap.activeSchemeVersionId))));
+    && (scheme !== "tod" || proposal.status !== "not_in_scheme"));
   const savedRows = scheme === "tod" && selectedTodPeriodKey
       ? allSavedRows.filter((proposal) => `${proposal.period_start}:${proposal.period_end}` === selectedTodPeriodKey)
       : allSavedRows;
   const localKeys = new Set(localTodRows.map((proposal) => proposal.entitlement_key).filter(Boolean));
   // Periods with saved or freshly calculated results, newest first, for the period selector.
   const todPeriodOptions = scheme === "tod"
-    ? [...new Set([...localTodRows, ...allSavedRows].flatMap((proposal) => periodKeyOf(proposal) ?? []))].sort().reverse()
+    ? [...new Set([...localTodRows, ...allSavedRows, ...(data.todRuns ?? []).filter((run) => run.status === "completed")].flatMap((proposal) => periodKeyOf(proposal) ?? []))].sort().reverse()
     : [];
   const localPeriodRows = selectedTodPeriodKey ? localTodRows.filter((proposal) => periodKeyOf(proposal) === selectedTodPeriodKey) : localTodRows;
   const allRows = scheme === "tod" && selectedHistoryRun && historyTodRows
     ? historyTodRows
     : scheme === "tod" ? [...localPeriodRows, ...savedRows.filter((proposal) => !proposal.entitlement_key || !localKeys.has(proposal.entitlement_key))] : savedRows;
+  const historicalTodView = Boolean(selectedHistoryRun) || (scheme === "tod"
+    && (!localTodBootstrap || allRows.some((row) => row.scheme_version_id !== localTodBootstrap.activeSchemeVersionId)));
   useEffect(() => {
     if (!openReadyView || readyViewApplied.current) return;
     const latestReady = readyTodCreditNotes(data).map(periodKeyOf).filter((key): key is string => Boolean(key)).sort().at(-1);
@@ -671,11 +701,12 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     setStatusFilter("ready");
   }, [data, openReadyView]);
 
-  const preloadLocalTodBootstrap = useCallback(async (asOfDate?: string) => {
+  const preloadLocalTodBootstrap = useCallback(async (selection?: TodPeriodSelection) => {
     const token = await accessToken();
     if (!token) throw new Error("Sign in again before calculating Turnover Discounts.");
-    const suffix = asOfDate ? `?asOfDate=${encodeURIComponent(asOfDate)}` : "";
-    const bootstrap = await apiRequest<LocalTodBootstrap>(token, `/api/companies/${company.id}/evaluations/tod/local-bootstrap${suffix}`);
+    const params = selection ? new URLSearchParams({ asOfDate: selection.asOfDate, periodStart: selection.start, periodEnd: selection.end, selectedSchemeVersionId: selection.selectedSchemeVersionId }) : null;
+    const bootstrap = await apiRequest<LocalTodBootstrap>(token, `/api/companies/${company.id}/evaluations/tod/local-bootstrap${params ? `?${params}` : ""}`, { cache: "no-store" });
+    if (selection) assertSelectedTodPeriod(selection, bootstrap.batches);
     setLocalTodBootstrap(bootstrap);
     // The period shown on load is chosen from the last saved result (below),
     // not the rule's current period, which may not have been calculated yet.
@@ -685,7 +716,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
   // calculation so the user lands on their last result.
   const lastSavedPeriodApplied = useRef<string | null>(null);
   useEffect(() => {
-    // Wait for the bootstrap so rows from retired rule versions are excluded.
+    // Older exact-period locked versions remain valid results and are read-only.
     if (scheme !== "tod" || openReadyView || !localTodBootstrap || lastSavedPeriodApplied.current === company.id || !allSavedRows.length) return;
     const latest = allSavedRows.reduce((best, proposal) => (proposal.latest_evaluated_at ?? "") > (best.latest_evaluated_at ?? "") ? proposal : best);
     const key = periodKeyOf(latest);
@@ -697,6 +728,9 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     if (scheme !== "tod") return;
     setLocalTodBootstrap(null);
     setLocalTodRows([]);
+    setPeriodRows([]);
+    setSelectedTodPeriodKey(null);
+    lastSavedPeriodApplied.current = null;
     void preloadLocalTodBootstrap().catch(() => {});
   }, [company.id, preloadLocalTodBootstrap, scheme]);
 
@@ -734,19 +768,23 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     };
   };
 
-  const runLocalTodCalculation = async (asOfDate: string) => {
+  const runLocalTodCalculation = async (selection: TodPeriodSelection) => {
+    const { asOfDate, start: periodStart, end: periodEnd, selectedSchemeVersionId } = selection;
+    let tallyReadFinished = false;
     setError(null);
     setSelectedHistoryRun(null);
     setHistoryTodRows(null);
     setSavingTod(true);
     setCalculationStartedAt(new Date().toISOString());
     try {
-      // Rule periods can differ between customers because a prior TOD result
-      // locks its period. Always refresh the lightweight bootstrap before
-      // reading Tally so each group is calculated against the right period.
-      const bootstrap = await preloadLocalTodBootstrap(asOfDate);
+      // A lock preserves a rule only for the exact selected period, never an
+      // overlapping quarter with different boundaries.
+      const bootstrap = await preloadLocalTodBootstrap(selection);
+      lastSavedPeriodApplied.current = company.id;
+      setSelectedTodPeriodKey(`${periodStart}:${periodEnd}`);
       const result = await runLocalTurnoverDiscount(bootstrap);
-      if (result.rows[0]) setSelectedTodPeriodKey(`${result.rows[0].periodStart}:${result.rows[0].periodEnd}`);
+      tallyReadFinished = true;
+      assertSelectedTodPeriod(selection, [result.evidence, ...result.rows]);
       // Keep the user on the progress view until every customer is saved;
       // showing unsaved rows (with no actions) made it look finished early.
       setShowEvaluationQueue(true);
@@ -757,7 +795,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       const response = await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/tod/local-result`, {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey() },
-        body: jsonBody({ asOfDate, evaluatedOn: bootstrap.evaluatedOn, evidence: result.evidence }),
+        body: jsonBody({ asOfDate, periodStart, periodEnd, selectedSchemeVersionId, evaluatedOn: bootstrap.evaluatedOn, evidence: result.evidence }),
         timeoutMs: 60_000,
       });
       setLatestRun(response.evaluationRun);
@@ -776,6 +814,11 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
         }
         if (saved.evaluationRun.status === "completed") {
           await refresh();
+          setPeriodRows(await loadPeriodRows(periodStart, periodEnd));
+          setPeriodRowsOwner(company.id);
+          setSelectedTodPeriodKey(`${periodStart}:${periodEnd}`);
+          setStatusFilter("all");
+          setQuery("");
           setLocalTodRows([]);
           setShowEvaluationQueue(false);
           setNotice("Turnover Discount results are saved. Open any customer to view the calculation.");
@@ -786,14 +829,14 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       throw new Error("The customer results are still being finalized. Open Calculation history before trying again.");
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
-      const connectorNeedsUpgrade = /route not found|failed to fetch|networkerror|load failed/i.test(message);
+      const connectorNeedsUpgrade = !tallyReadFinished && /route not found|failed to fetch|networkerror|load failed/i.test(message);
       if (!connectorNeedsUpgrade) throw cause;
       const token = await accessToken();
       if (!token) throw cause;
       const response = await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/tod`, {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey() },
-        body: jsonBody({ batch: true, asOfDate, evaluatedOn: new Date().toISOString().slice(0, 10) }),
+        body: jsonBody({ batch: true, asOfDate, periodStart, periodEnd, selectedSchemeVersionId, evaluatedOn: new Date().toISOString().slice(0, 10) }),
         timeoutMs: 60_000,
       });
       setLatestRun(response.evaluationRun);
@@ -802,8 +845,8 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       setNotice("The installed connector needs the latest update. The compatible calculation has started in the background.");
     } finally { setSavingTod(false); }
   };
-  const runAllDueTodCalculations = async (asOfDates: string[]) => {
-    for (const asOfDate of asOfDates) await runLocalTodCalculation(asOfDate);
+  const runAllDueTodCalculations = async (periods: TodPeriodSelection[]) => {
+    for (const period of periods) await runLocalTodCalculation(period);
   };
   const statuses = Array.from(new Set(allRows.map((proposal) => proposal.status)));
   const tonnes = (proposal: Proposal) => Number(proposal.eligible_tonnes ?? "0") || 0;
@@ -816,11 +859,12 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
   const lastChecked = allRows.map((proposal) => proposal.latest_evaluated_at).filter(Boolean).sort().at(-1) ?? null;
   const turnoverPeriods = (localTodBootstrap?.periods ?? []).map((period) => ({
     ...period,
-    calculated: allSavedRows.some((proposal) => proposal.scheme_version_id === localTodBootstrap?.activeSchemeVersionId && proposal.period_start === period.start && proposal.period_end === period.end),
+    schemeVersionId: localTodBootstrap!.activeSchemeVersionId,
+    calculated: (data.todRuns ?? []).some((run) => run.status === "completed" && run.period_start === period.start && run.period_end === period.end),
   }));
   const todTierById = new Map<string, { minimumTonnes: number; amountPerTonne: number | null; percentage: number | null; index: number; count: number }>();
   const todScaleByRule = new Map<string, TodSlabScale>();
-  for (const batch of localTodBootstrap?.batches ?? []) {
+  for (const batch of [...(localTodBootstrap?.batches ?? []), ...periodRuleBatches]) {
     const tiers = Array.isArray(batch.rule.tiers) ? batch.rule.tiers as Array<Record<string, unknown>> : [];
     tiers.forEach((tier, index) => {
       const id = typeof tier.id === "string" ? tier.id : null;
@@ -895,9 +939,9 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     return "View details";
   };
   return <><WorkspacePageHeader eyebrow="" title={title} detail="" />
-    {scheme === "tod" ? <div className="tod-overview" aria-label="Turnover Discount summary"><div className="tod-overview-meta"><div className="tod-period-context"><StatusBadge status={savingTod ? "saving" : selectedHistoryRun ? "historical" : "ready"} />{todPeriodOptions.length > 1 && !selectedHistoryRun
+    {scheme === "tod" ? <div className="tod-overview" aria-label="Turnover Discount summary"><div className="tod-overview-meta"><div className="tod-period-context"><StatusBadge status={savingTod ? "saving" : historicalTodView ? "historical" : "ready"} />{todPeriodOptions.length > 1 && !selectedHistoryRun
           ? <select className="tod-period-select" aria-label="Turnover Discount period" value={selectedTodPeriodKey ?? todPeriodOptions[0]} onChange={(event) => { setSelectedTodPeriodKey(event.target.value); setQuery(""); }}>{todPeriodOptions.map((key) => { const [start, end] = key.split(":"); return <option key={key} value={key}>{formatBusinessDate(start)} – {formatBusinessDate(end)} · {periodHasEnded(end) ? "ended" : "in progress"}</option>; })}</select>
-          : <strong>{periodLabel}</strong>}<span className={periodEnded ? "is-ready" : ""}><CircleAlert size={13} />{savingTod ? "Checking fresh Tally data…" : selectedHistoryRun ? "Historical calculation snapshot" : periodKeys.size > 1 ? "Includes completed and active periods" : periodEnded ? "Period ended" : periodRow?.period_end ? `Projected until ${formatBusinessDate(periodRow.period_end)}` : "No period calculated yet"}</span></div><div className="tod-overview-actions"><span>{savingTod && calculationStartedAt ? `Started ${formatDate(calculationStartedAt)}` : lastChecked ? `Calculated ${formatDate(lastChecked)}` : "Not calculated yet"}</span><Button className="button-secondary" disabled={savingTod} onClick={() => { setSelectedHistoryRun(null); setHistoryTodRows(null); setNotice(null); setEvaluationOpen(true); }}><RefreshCw size={15} />{savingTod ? "Checking Tally…" : "Calculate period"}</Button><div className="segmented tod-inline-tabs" aria-label={`${title} views`}><button className={!showEvaluationQueue ? "selected" : ""} onClick={() => { setSelectedHistoryRun(null); setHistoryTodRows(null); setNotice(null); setShowEvaluationQueue(false); }}>Customers</button><button className={showEvaluationQueue ? "selected" : ""} onClick={() => setShowEvaluationQueue(true)}>Run history</button></div></div></div>{!showEvaluationQueue && allRows.length > 0 && <div className="cd-action-cards tod-action-cards" role="tablist" aria-label="Turnover Discount customers">{todBuckets.map((bucket) => {
+          : <strong>{periodLabel}</strong>}<span className={periodEnded ? "is-ready" : ""}><CircleAlert size={13} />{savingTod ? "Checking fresh Tally data…" : historicalTodView ? "Earlier-rule results · read-only" : periodKeys.size > 1 ? "Includes completed and active periods" : periodEnded ? "Period ended" : periodRow?.period_end ? `Projected until ${formatBusinessDate(periodRow.period_end)}` : "No period calculated yet"}</span></div><div className="tod-overview-actions"><span>{savingTod && calculationStartedAt ? `Started ${formatDate(calculationStartedAt)}` : lastChecked ? `Calculated ${formatDate(lastChecked)}` : "Not calculated yet"}</span><Button className="button-secondary" disabled={savingTod} onClick={() => { setSelectedHistoryRun(null); setHistoryTodRows(null); setNotice(null); setEvaluationOpen(true); }}><RefreshCw size={15} />{savingTod ? "Checking Tally…" : "Calculate period"}</Button><div className="segmented tod-inline-tabs" aria-label={`${title} views`}><button className={!showEvaluationQueue ? "selected" : ""} onClick={() => { setSelectedHistoryRun(null); setHistoryTodRows(null); setNotice(null); setShowEvaluationQueue(false); void refresh(); }}>Customers</button><button className={showEvaluationQueue ? "selected" : ""} onClick={() => setShowEvaluationQueue(true)}>Run history</button></div></div></div>{!showEvaluationQueue && allRows.length > 0 && <div className="cd-action-cards tod-action-cards" role="tablist" aria-label="Turnover Discount customers">{todBuckets.map((bucket) => {
       const count = todCount(bucket);
       const card = {
         ready: { label: "Ready to create", value: formatMoney(todAmount("ready")), detail: `${count} customer${count === 1 ? "" : "s"}` },
@@ -919,20 +963,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
         void (async () => {
           setNotice("Loading this period’s results…");
           try {
-            const token = await accessToken();
-            if (!token) return;
-            // Load every saved result of this period and rule version (pages of 200 keep request URLs short).
-            const loaded: Proposal[] = [];
-            let cursor: string | null = null;
-            for (let page = 0; page < 20; page += 1) {
-              const params = new URLSearchParams({ schemeType: "tod", periodStart, periodEnd, limit: "200" });
-              if (run.scheme_version_id) params.set("schemeVersionId", run.scheme_version_id);
-              if (cursor) params.set("cursor", cursor);
-              const response: { proposals: Proposal[]; nextCursor: string | null; hasMore: boolean } = await apiRequest(token, `/api/companies/${company.id}/evaluations/proposals?${params}`, { cache: "no-store" });
-              loaded.push(...response.proposals.filter((proposal) => proposal.status !== "not_in_scheme"));
-              if (!response.hasMore || !response.nextCursor) break;
-              cursor = response.nextCursor;
-            }
+            const loaded = (await loadPeriodRows(periodStart, periodEnd, run.scheme_version_id ?? undefined)).filter((proposal) => proposal.status !== "not_in_scheme");
             if (!loaded.length) { openSnapshot(run); return; }
             const isCurrentRule = !localTodBootstrap || !run.scheme_version_id || run.scheme_version_id === localTodBootstrap.activeSchemeVersionId;
             setSelectedTodPeriodKey(`${periodStart}:${periodEnd}`);
@@ -942,6 +973,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
             if (isCurrentRule) {
               // Live view: Credit Notes can be created from here.
               setPeriodRows(loaded);
+              setPeriodRowsOwner(company.id);
               setSelectedHistoryRun(null);
               setHistoryTodRows(null);
               setNotice(null);
@@ -964,13 +996,24 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       await refresh();
       setLatestRun(null);
       if (run.status === "completed") {
+        if (run.period_start && run.period_end) {
+          lastSavedPeriodApplied.current = company.id;
+          setSelectedTodPeriodKey(`${run.period_start}:${run.period_end}`);
+          setPeriodRows(await loadPeriodRows(run.period_start, run.period_end));
+          setPeriodRowsOwner(company.id);
+          setSelectedHistoryRun(null);
+          setHistoryTodRows(null);
+          setStatusFilter("all");
+          setQuery("");
+        }
         setNotice("Tally calculation completed. Customer results are ready.");
         setShowEvaluationQueue(false);
       }
     }} />}
-    {scheme === "tod" && isAdministrator && periodEnded && statusFilter === "ready" && !showEvaluationQueue && !selectedHistoryRun && <PostingSwitch show="off" launchControl={data.launchControl} onChanged={async (message) => { setNotice(message); await refresh(); }} onError={setError} />}
+    {scheme === "tod" && isAdministrator && periodEnded && statusFilter === "ready" && !showEvaluationQueue && !historicalTodView && <PostingSwitch show="off" launchControl={data.launchControl} onChanged={async (message) => { setNotice(message); await refresh(); }} onError={setError} />}
     <div hidden={showEvaluationQueue}>
-    {scheme === "tod" && <TodResults scaleByRule={todScaleByRule} reference={data.reference} rows={rows} allRows={allRows} query={query} setQuery={setQuery} filter={statusFilter} setFilter={setStatusFilter} customerNames={customerNames} tierById={todTierById} historical={Boolean(selectedHistoryRun)} defaultFilter={todBuckets[0]} onChanged={refresh} postingEnabled={data.launchControl?.mode === "posting_enabled"} onOpen={(proposal) => {
+    {scheme === "tod" && historicalTodView && allRows.length > 0 && !showEvaluationQueue && <InlineMessage tone="info">{localTodBootstrap ? "This period contains results from an earlier locked rule version. The saved values are shown read-only." : "Checking saved rule versions. Results are read-only until this check finishes."}</InlineMessage>}
+    {scheme === "tod" && <TodResults scaleByRule={todScaleByRule} reference={data.reference} rows={rows} allRows={allRows} query={query} setQuery={setQuery} filter={statusFilter} setFilter={setStatusFilter} customerNames={customerNames} tierById={todTierById} historical={historicalTodView} defaultFilter={todBuckets[0]} onChanged={refresh} postingEnabled={data.launchControl?.mode === "posting_enabled"} onOpen={(proposal) => {
       if (proposal.id.startsWith("local:")) setNotice("This current Tally result is being added to the audit history. Details will be available shortly.");
       else setSelected(proposal);
     }} />}
@@ -1813,7 +1856,7 @@ function DebitNotesPage({ data, refresh, setError, setNotice }: PageProps) {
 
 const periodHasEnded = (periodEnd: string | null | undefined) => Boolean(periodEnd && new Date(`${periodEnd.slice(0, 10)}T23:59:59`).getTime() < Date.now());
 
-const periodKeyOf = (proposal: Proposal) => proposal.period_start && proposal.period_end ? `${proposal.period_start}:${proposal.period_end}` : null;
+const periodKeyOf = (proposal: { period_start?: string | null; period_end?: string | null }) => proposal.period_start && proposal.period_end ? `${proposal.period_start}:${proposal.period_end}` : null;
 
 /** Earned Turnover Discounts whose period has ended and that have no Credit Note yet. */
 function readyTodCreditNotes(data: WorkspaceData) {

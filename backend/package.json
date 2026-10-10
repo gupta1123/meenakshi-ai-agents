@@ -12,7 +12,7 @@
     "start": "node --use-system-ca node_modules/next/dist/bin/next start",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test src/lib/security.test.mjs src/lib/bridge.test.mjs src/lib/tally/contracts.test.mjs src/lib/evaluation/evaluation.test.mjs src/lib/evaluation/run-batches.test.mjs src/lib/evaluation/result-visibility.test.mjs src/lib/notifications/notifications.test.mjs src/lib/operations.test.mjs",
+    "test": "node --import tsx --test src/lib/security.test.mjs src/lib/bridge.test.mjs src/lib/tally/contracts.test.mjs src/lib/evaluation/evaluation.test.mjs src/lib/evaluation/run-batches.test.mjs src/lib/evaluation/result-visibility.test.mjs src/lib/evaluation/tod-period.test.mjs src/lib/notifications/notifications.test.mjs src/lib/operations.test.mjs",
     "provision:test-access": "node --env-file=.env.local ./scripts/provision-test-access.mjs",
     "worker:tally-outbox": "node --use-system-ca ./worker/process-tally-outbox.mjs",
     "worker:tally-outbox:local": "node --use-system-ca --env-file=.env.local ./worker/process-tally-outbox.mjs",

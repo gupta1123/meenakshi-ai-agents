@@ -10,9 +10,10 @@ import { tallyConnectionStatus } from "@/lib/tally-status";
 
 import { useCompany } from "./company-context";
 import { useTallyHealth } from "./tally-readiness";
-import type { CashDiscountCreditNote, CashDiscountDebitNoteHistory, Contact, CreditNotePosting, LaunchControl, MessageTemplate, NotificationHealth, NotificationMessage, OperationsHealth, OverviewSummary, Proposal, ReferenceData, TallyHealth } from "./types";
+import type { CashDiscountCreditNote, CashDiscountDebitNoteHistory, Contact, CreditNotePosting, EvaluationRun, LaunchControl, MessageTemplate, NotificationHealth, NotificationMessage, OperationsHealth, OverviewSummary, Proposal, ReferenceData, TallyHealth } from "./types";
 
 export type WorkspaceData = {
+  todRuns?: EvaluationRun[];
   proposals: Proposal[];
   creditNotes: CreditNotePosting[];
   cdCreditNotes: CashDiscountCreditNote[];
@@ -83,12 +84,15 @@ export function WorkspaceSessionProvider({ email, signOut, children }: { email: 
         if (pathname === "/") return { ...emptyData, overview: await apiRequest<OverviewSummary>(token, `${base}/overview`) };
         if (pathname === "/tally" || pathname === "/cash-discount") return { ...emptyData };
         if (pathname === "/turnover-discount") {
-          const [proposalData, launchData, reference] = await Promise.all([
-            apiRequest<{ proposals: Proposal[] }>(token, `${base}/evaluations/proposals?schemeType=tod&activeOnly=true`),
+          const [proposalData, launchData, reference, runData] = await Promise.all([
+            // The initial recent list chooses the last calculated period; the
+            // Customers view then loads that period's complete paginated list.
+            apiRequest<{ proposals: Proposal[] }>(token, `${base}/evaluations/proposals?schemeType=tod`, { cache: "no-store" }),
             apiRequest<{ launchControl: LaunchControl }>(token, `${base}/launch-control`),
             apiRequest<ReferenceData>(token, `${base}/rulebook/reference-data`).catch(() => null),
+            apiRequest<{ evaluationRuns: EvaluationRun[] }>(token, `${base}/evaluations/runs?schemeType=tod&detail=compact&fresh=1`, { cache: "no-store" }),
           ]);
-          return { ...emptyData, proposals: proposalData.proposals, launchControl: launchData.launchControl, reference };
+          return { ...emptyData, proposals: proposalData.proposals, launchControl: launchData.launchControl, reference, todRuns: runData.evaluationRuns };
         }
         if (pathname === "/credit-notes") {
           const [proposalData, creditNoteData, messageData, contactData, launchData, reference, cdCreditNoteData] = await Promise.all([

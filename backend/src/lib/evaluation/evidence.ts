@@ -1,4 +1,4 @@
-import { addCalendarMonths, previousCalendarDay, workingDayBreakdown } from "./calendar";
+import { workingDayBreakdown } from "./calendar";
 import type { PriorPeriodAdjustmentEvidence } from "./tod";
 import type {
   BillAllocationEvidence,
@@ -13,6 +13,7 @@ import type {
 } from "./contracts";
 import { resolveRuleCoverage } from "./groups";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { requestedTodPeriod, resolveTodPeriod, TodPeriodError, type TodPeriod } from "./tod-period";
 
 // TOD payment qualification (docs/TOD_LOGIC.md): an invoice counts only when
 // paid in full within 25 calendar days; receipts are read up to 45 days after
@@ -37,7 +38,7 @@ type RuleRow = {
   tod_benefit_basis: "percentage_of_eligible_value" | "amount_per_eligible_tonne" | null;
 };
 
-type RunContext = { schemeType?: unknown; ruleVersionId?: unknown; schemeVersionId?: unknown; salesVoucherId?: unknown; customerId?: unknown; batch?: unknown; periodStart?: unknown; periodEnd?: unknown; asOfDate?: unknown; evaluatedOn?: unknown; reviewRefreshForProposal?: unknown };
+type RunContext = { schemeType?: unknown; ruleVersionId?: unknown; schemeVersionId?: unknown; selectedSchemeVersionId?: unknown; salesVoucherId?: unknown; customerId?: unknown; batch?: unknown; periodStart?: unknown; periodEnd?: unknown; asOfDate?: unknown; evaluatedOn?: unknown; reviewRefreshForProposal?: unknown };
 
 export type EvaluationRunRecord = {
   id: string;
@@ -330,17 +331,6 @@ async function activeRuleIds(companyId: string, type: SchemeType, onDate: string
   return (data ?? []).map((row) => row.id);
 }
 
-function periodContaining(anchor: string, months: number, asOfDate: string) {
-  if (asOfDate < anchor) return null;
-  let start = anchor;
-  for (let guard = 0; guard < 1_000; guard += 1) {
-    const end = previousCalendarDay(addCalendarMonths(start, months));
-    if (asOfDate <= end) return { start, end };
-    start = addCalendarMonths(start, months);
-  }
-  throw new Error("Could not determine the TOD period from its configured anchor.");
-}
-
 async function chooseCdRule(companyId: string, customer: CustomerEvidence, invoiceDate: string) {
   for (const id of await activeRuleIds(companyId, "cd", invoiceDate)) {
     const rule = await loadRule(companyId, id) as FrozenCdRule;
@@ -349,41 +339,61 @@ async function chooseCdRule(companyId: string, customer: CustomerEvidence, invoi
   return null;
 }
 
-async function chooseTodRule(companyId: string, customer: CustomerEvidence, asOfDate: string) {
+export async function loadSelectedTodPeriod(companyId: string, context: RunContext) {
+  const asOfDate = dateText(context.asOfDate, utcToday());
+  const ids = await activeRuleIds(companyId, "tod", asOfDate);
+  if (!ids.length) throw new TodPeriodError("No active Turnover Discount rule is available for this date.");
+  if (ids.length > 1) throw new TodPeriodError("More than one active Turnover Discount rule covers this date.");
+  if (context.selectedSchemeVersionId !== undefined && context.selectedSchemeVersionId !== ids[0]) {
+    throw new TodPeriodError("The Turnover Discount rule changed. Reload the periods before calculating again.");
+  }
+  const rule = await loadRule(companyId, ids[0]) as FrozenTodRule;
+  return { rule, period: resolveTodPeriod(rule, asOfDate, requestedTodPeriod(context)), asOfDate };
+}
+
+async function assertNoTodAccountingOverlap(companyId: string, period: TodPeriod, customerIds?: string[]) {
+  // Old misaligned locks remain immutable. Do not recalculate overlapping
+  // entitlements that have any accounting attempt without a manual review.
+  const supabase = createSupabaseAdminClient();
+  let query = supabase.from("discount_proposals").select("id, credit_note_postings!inner(id)")
+    .eq("company_id", companyId).eq("scheme_type", "tod")
+    .lte("period_start", period.end).gte("period_end", period.start)
+    .or(`period_start.neq.${period.start},period_end.neq.${period.end}`).limit(1);
+  if (customerIds) query = query.in("customer_id", customerIds);
+  const { data, error } = await query;
+  if (error) throw error;
+  if (data?.length) throw new TodPeriodError("An overlapping Turnover Discount period has a Credit Note record. Review that accounting history before calculating this period; no records were changed.");
+}
+
+async function chooseTodRule(companyId: string, customer: CustomerEvidence, asOfDate: string, context: RunContext = {}) {
+  const selected = await loadSelectedTodPeriod(companyId, { ...context, asOfDate });
+  const period = selected.period;
   const supabase = createSupabaseAdminClient();
   const { data: locks, error: lockError } = await supabase
     .from("tod_customer_period_rule_locks")
     .select("scheme_version_id, period_start, period_end")
     .eq("company_id", companyId).eq("customer_id", customer.id)
-    .lte("period_start", asOfDate).gte("period_end", asOfDate);
+    .eq("period_start", period.start).eq("period_end", period.end);
   if (lockError) throw lockError;
-  if ((locks ?? []).length > 1) throw new Error("More than one immutable TOD rule lock matches this customer and date.");
+  if ((locks ?? []).length > 1) throw new TodPeriodError("More than one immutable TOD rule lock matches this customer period.");
+  await assertNoTodAccountingOverlap(companyId, period, [customer.id]);
   if (locks?.[0]) {
     return { rule: await loadRule(companyId, locks[0].scheme_version_id) as FrozenTodRule, periodStart: locks[0].period_start, periodEnd: locks[0].period_end, locked: true };
   }
-  for (const id of await activeRuleIds(companyId, "tod", asOfDate)) {
-    const rule = await loadRule(companyId, id) as FrozenTodRule;
-    const period = periodContaining(rule.periodAnchorDate, rule.periodMonths, asOfDate);
-    if (period && resolveRuleCoverage(rule, customer, asOfDate).state !== "not_in_scheme") return { rule, periodStart: period.start, periodEnd: period.end, locked: false };
-  }
+  const rule = selected.rule;
+  if (resolveRuleCoverage(rule, customer, asOfDate).state !== "not_in_scheme") return { rule, periodStart: period.start, periodEnd: period.end, locked: false };
   return null;
 }
 
 export async function loadLiveTodBatchContext(run: EvaluationRunRecord) {
-  const asOfDate = dateText(run.request_context.asOfDate, utcToday());
-  const ruleIds = await activeRuleIds(run.company_id, "tod", asOfDate);
-  if (!ruleIds.length) throw new Error("No active Turnover Discount rule is available for this date.");
-  if (ruleIds.length > 1) throw new Error("More than one active Turnover Discount rule covers this date.");
-  const ruleId = ruleIds[0];
-  const rule = await loadRule(run.company_id, ruleId) as FrozenTodRule;
-  const period = periodContaining(rule.periodAnchorDate, rule.periodMonths, asOfDate);
-  if (!period) throw new Error("The active Turnover Discount rule has not started yet.");
+  const { rule, period, asOfDate } = await loadSelectedTodPeriod(run.company_id, run.request_context);
+  await assertNoTodAccountingOverlap(run.company_id, period);
   const supabase = createSupabaseAdminClient();
   const [{ data: groups, error: groupError }, { data: locks, error: lockError }] = await Promise.all([
     supabase.from("customer_groups").select("id, tally_group_guid, name, is_available, parent_group_id").eq("company_id", run.company_id),
     supabase.from("tod_customer_period_rule_locks")
       .select("customer_id, scheme_version_id, period_start, period_end")
-      .eq("company_id", run.company_id).lte("period_start", asOfDate).gte("period_end", asOfDate),
+      .eq("company_id", run.company_id).eq("period_start", period.start).eq("period_end", period.end),
   ]);
   if (groupError || lockError) throw groupError ?? lockError;
   const groupsById = new Map((groups ?? []).map((group) => [group.id, group]));
@@ -447,7 +457,7 @@ export async function loadLiveTodBatchContext(run: EvaluationRunRecord) {
     batches.set(key, batch);
   }
   if (!batches.size) throw new Error("The active Turnover Discount rule does not cover any available Tally customers.");
-  return { groups: [...batches.values()], evaluatedOn: dateText(run.request_context.evaluatedOn, utcToday()) };
+  return { activeRule: rule, period, groups: [...batches.values()], evaluatedOn: dateText(run.request_context.evaluatedOn, utcToday()) };
 }
 
 export async function loadLiveTodContext(run: EvaluationRunRecord) {
@@ -466,8 +476,9 @@ export async function loadLiveTodContext(run: EvaluationRunRecord) {
     return { rule, periodStart: exactPeriodStart, periodEnd: exactPeriodEnd, locked: true, customer, evaluatedOn: dateText(run.request_context.evaluatedOn, utcToday()) };
   }
   const asOfDate = dateText(run.request_context.asOfDate, utcToday());
-  const candidate = await chooseTodRule(run.company_id, customer, asOfDate);
+  const candidate = await chooseTodRule(run.company_id, customer, asOfDate, run.request_context);
   if (!candidate) throw new Error("No active Turnover Discount rule covers this customer and date.");
+  if (typeof exactVersionId === "string" && candidate.rule.id !== exactVersionId) throw new TodPeriodError("The locked Turnover Discount rule changed after the Tally read. Calculate again; nothing was saved.");
   return { ...candidate, customer, evaluatedOn: dateText(run.request_context.evaluatedOn, utcToday()) };
 }
 
@@ -549,6 +560,8 @@ async function liveTodVoucherScope(run: EvaluationRunRecord) {
 export async function loadLiveTodLocalBootstrap(run: EvaluationRunRecord) {
   const context = await loadLiveTodBatchContext(run);
   return {
+    activeRule: context.activeRule,
+    period: context.period,
     evaluatedOn: context.evaluatedOn,
     batches: await Promise.all(context.groups.map(async (group) => ({
       rule: group.rule,
@@ -897,7 +910,7 @@ async function loadTod(run: EvaluationRunRecord): Promise<LoadedTodEvaluation> {
   if (typeof customerId !== "string") throw new Error("A TOD evaluation requires customerId.");
   const customer = await loadCustomer(run.company_id, customerId);
   const asOfDate = dateText(run.request_context.asOfDate, utcToday());
-  const candidate = await chooseTodRule(run.company_id, customer, asOfDate);
+  const candidate = await chooseTodRule(run.company_id, customer, asOfDate, run.request_context);
   if (!candidate) throw new Error("No active Turnover Discount rule covers this customer and date.");
   const vouchers = await loadVouchers(run.company_id, candidate.periodStart, candidate.periodEnd, customer.id);
   const inventoryLines = await loadInventoryLines(run.company_id, vouchers.map((item) => item.id));

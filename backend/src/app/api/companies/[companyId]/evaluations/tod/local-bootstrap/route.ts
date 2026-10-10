@@ -2,13 +2,10 @@ import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/authorization";
 import { loadLiveTodLocalBootstrap, type EvaluationRunRecord } from "@/lib/evaluation/evidence";
 import { isUuid } from "@/lib/security";
+import { isTodDate, requestedTodPeriod, TodPeriodError } from "@/lib/evaluation/tod-period";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
-
-function validDate(value: string | null): value is string {
-  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
-}
 
 function addMonths(value: string, months: number) {
   const [year, month, day] = value.split("-").map(Number);
@@ -47,29 +44,36 @@ export async function GET(request: Request, context: RouteContext) {
     const url = new URL(request.url);
     const today = new Date().toISOString().slice(0, 10);
     const requestedAsOfDate = url.searchParams.get("asOfDate");
-    const asOfDate = validDate(requestedAsOfDate) ? requestedAsOfDate : today;
+    if (requestedAsOfDate !== null && !isTodDate(requestedAsOfDate)) return jsonWithCors(request, { error: "Invalid asOfDate." }, { status: 400 });
+    const asOfDate = requestedAsOfDate ?? today;
+    const period = requestedTodPeriod({ periodStart: url.searchParams.get("periodStart") ?? undefined, periodEnd: url.searchParams.get("periodEnd") ?? undefined });
+    const selectedSchemeVersionId = url.searchParams.get("selectedSchemeVersionId") ?? undefined;
+    if (selectedSchemeVersionId !== undefined && !isUuid(selectedSchemeVersionId)) return jsonWithCors(request, { error: "Invalid rule version." }, { status: 400 });
     const syntheticRun: EvaluationRunRecord = {
       id: "local-preview",
       company_id: company.id,
       requested_by: null,
-      request_context: { schemeType: "tod", batch: true, asOfDate, evaluatedOn: today },
+      request_context: { schemeType: "tod", batch: true, asOfDate, evaluatedOn: today, ...(period ? { periodStart: period.start, periodEnd: period.end } : {}), ...(selectedSchemeVersionId ? { selectedSchemeVersionId } : {}) },
       tally_master_refresh_run_id: null,
       tally_voucher_refresh_run_id: null,
     };
     const bootstrap = await loadLiveTodLocalBootstrap(syntheticRun);
-    const activeRule = [...bootstrap.batches].sort((left, right) => right.rule.versionNumber - left.rule.versionNumber)[0]?.rule ?? null;
+    const activeRule = bootstrap.activeRule;
     const activeSchemeVersionId = activeRule?.id ?? null;
     return jsonWithCors(request, {
       evaluatedOn: bootstrap.evaluatedOn,
       expectedCompany: { name: company.tally_company_name, guid: company.tally_company_guid },
       activeSchemeVersionId,
+      periodStart: bootstrap.period.start,
+      periodEnd: bootstrap.period.end,
       periods: activeRule ? rulePeriods(activeRule, today) : [],
       batches: bootstrap.batches.map((batch) => ({
         ...batch,
         voucherScope: { ...batch.voucherScope, evaluationRunId: null },
       })),
-    }, { headers: { "Cache-Control": "private, max-age=30, stale-while-revalidate=120" } });
+    }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
+    if (error instanceof TodPeriodError) return jsonWithCors(request, { error: error.message }, { status: 422 });
     if (error instanceof MeenakshiAccessError) return jsonWithCors(request, { error: error.message }, { status: error.status });
     if (error instanceof Error && /^(No active Turnover Discount rule|More than one active Turnover Discount rule|The active Turnover Discount rule)/.test(error.message)) {
       return jsonWithCors(request, { error: error.message }, { status: 422 });

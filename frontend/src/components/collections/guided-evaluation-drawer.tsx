@@ -5,6 +5,7 @@ import { CheckCircle2, LoaderCircle } from "lucide-react";
 
 import { apiRequest, jsonBody } from "@/lib/api";
 import type { LocalTodPeriod } from "@/lib/local-tally";
+import type { TodPeriodSelection } from "@/lib/tod-results";
 import { userFacingError } from "@/lib/user-copy";
 
 import { useCompany } from "./company-context";
@@ -12,8 +13,8 @@ import type { EvaluationRun } from "./types";
 import { Button, Drawer, InlineMessage, StatusBadge } from "./ui";
 import { accessToken } from "./workspace";
 
-type TodPeriodOption = LocalTodPeriod & { calculated: boolean };
-type Props = { open: boolean; onClose: () => void; scheme: "cd" | "tod"; activeRun?: EvaluationRun | null; localPhase?: "reading" | "saving" | null; onComplete: (message: string, run: EvaluationRun) => Promise<void>; onError: (message: string | null) => void; onCashDiscountSubmit?: (evaluatedOn: string) => Promise<void>; onTurnoverDiscountSubmit?: (asOfDate: string) => Promise<void>; onTurnoverDiscountBatchSubmit?: (asOfDates: string[]) => Promise<void>; turnoverPeriods?: TodPeriodOption[] };
+type TodPeriodOption = LocalTodPeriod & { calculated: boolean; schemeVersionId: string };
+type Props = { open: boolean; onClose: () => void; scheme: "cd" | "tod"; activeRun?: EvaluationRun | null; localPhase?: "reading" | "saving" | null; onComplete: (message: string, run: EvaluationRun) => Promise<void>; onError: (message: string | null) => void; onCashDiscountSubmit?: (evaluatedOn: string) => Promise<void>; onTurnoverDiscountSubmit?: (period: TodPeriodSelection) => Promise<void>; onTurnoverDiscountBatchSubmit?: (periods: TodPeriodSelection[]) => Promise<void>; turnoverPeriods?: TodPeriodOption[] };
 const idempotencyKey = () => globalThis.crypto?.randomUUID?.() ?? `meenakshi-${Date.now()}`;
 const periodDate = (value: string) => new Date(`${value}T00:00:00`).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
 
@@ -55,7 +56,7 @@ export function GuidedEvaluationDrawer({ open, onClose, scheme, activeRun = null
       if (scheme === "tod" && onTurnoverDiscountSubmit) {
         const selected = turnoverPeriods.find((period) => period.key === String(fields.get("periodKey") || selectedPeriodKey));
         if (!selected || selected.state === "upcoming") throw new Error("Choose a completed or current calculation period.");
-        await onTurnoverDiscountSubmit(selected.state === "current" ? today : selected.end);
+        await onTurnoverDiscountSubmit({ start: selected.start, end: selected.end, asOfDate: selected.state === "current" ? today : selected.end, selectedSchemeVersionId: selected.schemeVersionId });
         return;
       }
       const token = await accessToken();
@@ -80,7 +81,7 @@ export function GuidedEvaluationDrawer({ open, onClose, scheme, activeRun = null
     setFormError(null);
     onError(null);
     try {
-      await onTurnoverDiscountBatchSubmit(duePeriods.map((period) => period.end));
+      await onTurnoverDiscountBatchSubmit(duePeriods.map((period) => ({ start: period.start, end: period.end, asOfDate: period.end, selectedSchemeVersionId: period.schemeVersionId })));
     } catch (cause) {
       const message = userFacingError(cause, "Could not calculate every due period.");
       setFormError(message);

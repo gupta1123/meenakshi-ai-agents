@@ -133,7 +133,7 @@ export async function GET(request: Request, context: RouteContext) {
       }),
       nextCursor,
       hasMore,
-    }, { headers: { "Cache-Control": "private, max-age=10, stale-while-revalidate=20" } });
+    }, { headers: { "Cache-Control": byPeriod ? "no-store" : "private, max-age=10, stale-while-revalidate=20" } });
   } catch (error) {
     if (error instanceof MeenakshiAccessError) return jsonWithCors(request, { error: error.message }, { status: error.status });
     console.error("Could not list evaluation proposals:", error);

@@ -1,3 +1,5 @@
+import { assertSelectedTodPeriod } from "./tod-results";
+
 const LOCAL_TALLY_BASE = "http://127.0.0.1:3219";
 
 export async function detectLocalTallyConnector(signal?: AbortSignal): Promise<string | null> {
@@ -71,6 +73,8 @@ export type LocalTodBootstrap = {
   evaluatedOn: string;
   expectedCompany: { name: string; guid: string };
   activeSchemeVersionId: string;
+  periodStart: string;
+  periodEnd: string;
   periods: LocalTodPeriod[];
   batches: LocalTodBatchBootstrap[];
 };
@@ -124,6 +128,7 @@ async function runLocalTurnoverDiscountBatch(bootstrap: LocalTodBootstrap, batch
   });
   const payload = await response.json().catch(() => ({})) as LocalTodResult & { error?: string };
   if (!response.ok) throw new Error(payload.error || "The local Tally connector could not complete the Turnover Discount calculation.");
+  assertSelectedTodPeriod({ start: batch.periodStart, end: batch.periodEnd }, [payload.evidence, ...payload.rows]);
   return payload;
 }
 
@@ -157,8 +162,9 @@ export async function runLocalTurnoverDiscount(bootstrap: LocalTodBootstrap, sig
       sourceFingerprint: results.map((result) => result.evidence.sourceFingerprint).join(":"),
       customerAggregates: results.flatMap((result, index) => result.evidence.customerAggregates.map((aggregate) => ({
         ...aggregate,
-        periodStart: bootstrap.batches[index].periodStart,
-        periodEnd: bootstrap.batches[index].periodEnd,
+        periodStart: result.evidence.periodStart,
+        periodEnd: result.evidence.periodEnd,
+        schemeVersionId: String(bootstrap.batches[index].rule.id),
       }))),
     },
     durationMs: results.reduce((total, result) => total + result.durationMs, 0),

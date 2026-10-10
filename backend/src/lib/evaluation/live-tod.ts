@@ -5,12 +5,14 @@ import { loadLiveTodContext, type EvaluationRunRecord } from "./evidence";
 import { fingerprintEvidence } from "./fingerprint";
 import { resolveRuleCoverage } from "./groups";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { assertTodEvidencePeriod } from "./tod-period";
 
 export type LiveTodAggregate = {
   mode: "live_tod_aggregate";
   evaluationRunId: string | null;
   periodStart: string;
   periodEnd: string;
+  schemeVersionId?: string;
   chunks: number;
   vouchersScanned: number;
   matchingVouchers: number;
@@ -74,7 +76,7 @@ export type LiveTodBatchAggregate = {
   chunks: number;
   vouchersScanned: number;
   matchingVouchers: number;
-  customerAggregates: Array<Omit<LiveTodAggregate, "mode" | "evaluationRunId" | "periodStart" | "periodEnd" | "chunks" | "vouchersScanned"> & { customerId: string; customerLedgerName: string }>;
+  customerAggregates: Array<Omit<LiveTodAggregate, "mode" | "evaluationRunId" | "periodStart" | "periodEnd" | "chunks" | "vouchersScanned"> & { customerId: string; customerLedgerName: string; periodStart?: string; periodEnd?: string }>;
   sourceFingerprint: string;
 };
 
@@ -104,7 +106,12 @@ export async function evaluateLiveTodAggregate(run: EvaluationRunRecord, aggrega
     && !aggregate.paymentChecks?.some((check) => check.tallyGuid === sale.tallyGuid && check.counted))) {
     throw new Error("TOD payment check required. Update the connector and calculate again; unchecked sales totals cannot be used.");
   }
-  const context = await loadLiveTodContext(run);
+  // Fan-out preserves the selected period on the request and each customer's
+  // server-validated locked rule in evidence. Never resolve it from an end date alone.
+  const context = await loadLiveTodContext(aggregate.schemeVersionId
+    ? { ...run, request_context: { ...run.request_context, schemeVersionId: aggregate.schemeVersionId } }
+    : run);
+  assertTodEvidencePeriod({ start: context.periodStart, end: context.periodEnd }, aggregate);
   if (aggregate.evaluationRunId !== run.id || aggregate.periodStart !== context.periodStart || aggregate.periodEnd !== context.periodEnd) {
     throw new Error("The live Tally result does not match this evaluation and period.");
   }
