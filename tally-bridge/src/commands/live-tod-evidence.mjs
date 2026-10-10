@@ -156,11 +156,15 @@ export async function fetchLiveTodEvidence(command, context) {
   // Cash Discount Credit Notes by "<customer>|<invoice number>", read from our
   // narration "Being Cash Discount allowed against Inv No. <n> dt. …".
   const cdCreditByInvoice = new Map();
+  const totalChunks = Math.max(1, Math.ceil((daysBetween(scope.dateFrom, readTo) + 1) / 31));
+  context.onProgress?.({ done: 0, total: totalChunks, from: scope.dateFrom, to: readTo });
   while (cursor) {
+    if (context.isCancelled?.()) throw new Error("This Tally read was stopped.");
     if (chunks >= MAX_CHUNKS) throw new Error("The requested Tally period is too large for one live calculation.");
     const result = await syncVouchers({ ...command, payload: { ...command.payload, syncRunId: command.payload.voucherSyncRunId, requestedScope: { ...scope, customerLedgerName: null, customers: null, dateTo: readTo, cursor } } }, context);
     chunks += 1;
     vouchersScanned += result.vouchers.length;
+    context.onProgress?.({ done: chunks, total: Math.max(totalChunks, chunks), nextDate: result.cursorTo ?? null, vouchersScanned });
     for (const voucher of result.vouchers) {
       const isTds = tdsJournal(voucher);
       if ((["receipt", "payment"].includes(voucher.voucherKind) || isTds) && voucher.status === "posted") {

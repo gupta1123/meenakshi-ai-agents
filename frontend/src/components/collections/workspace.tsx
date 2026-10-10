@@ -11,6 +11,7 @@ import { userFacingDetail, userFacingError, userLabel } from "@/lib/user-copy";
 import { supabase } from "@/lib/supabase";
 import { runLocalCashDiscount, runLocalTurnoverDiscount, type LocalCdBootstrap, type LocalCdInvoiceCheck, type LocalCdRow, type LocalTodBootstrap, type LocalTodRow } from "@/lib/local-tally";
 import { assertSelectedTodPeriod, loadTodPeriodResults, type TodPeriodSelection } from "@/lib/tod-results";
+import { canUseTodCloudFallback, runExclusiveTodCalculation, runTodPeriodsInOrder, waitForTodRun } from "@/lib/tod-calculation";
 
 import { AppShell, WorkspacePageHeader } from "./app-shell";
 import { useCompany } from "./company-context";
@@ -607,6 +608,9 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
   const [localTodBootstrap, setLocalTodBootstrap] = useState<LocalTodBootstrap | null>(null);
   const [localTodRows, setLocalTodRows] = useState<Proposal[]>([]);
   const [savingTod, setSavingTod] = useState(false);
+  // Held for the entire selected-period or all-due-period operation, even
+  // when the drawer closes or a cloud fallback takes over.
+  const todCalculationInFlight = useRef(false);
   const [calculationStartedAt, setCalculationStartedAt] = useState<string | null>(null);
   const [selectedTodPeriodKey, setSelectedTodPeriodKey] = useState<string | null>(null);
   const [selectedHistoryRun, setSelectedHistoryRun] = useState<EvaluationRun | null>(null);
@@ -768,72 +772,49 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     };
   };
 
-  const runLocalTodCalculation = async (selection: TodPeriodSelection) => {
+  const calculateTodPeriod = async (selection: TodPeriodSelection) => {
     const { asOfDate, start: periodStart, end: periodEnd, selectedSchemeVersionId } = selection;
-    let tallyReadFinished = false;
     setError(null);
     setSelectedHistoryRun(null);
     setHistoryTodRows(null);
-    setSavingTod(true);
     setCalculationStartedAt(new Date().toISOString());
+    // A lock preserves a rule only for the exact selected period, never an
+    // overlapping quarter with different boundaries.
+    const bootstrap = await preloadLocalTodBootstrap(selection);
+    lastSavedPeriodApplied.current = company.id;
+    setSelectedTodPeriodKey(`${periodStart}:${periodEnd}`);
+    const token = await accessToken();
+    if (!token) throw new Error("Your session has ended. Please sign in again.");
+    let response: { evaluationRun: EvaluationRun };
+    let result: Awaited<ReturnType<typeof runLocalTurnoverDiscount>> | null = null;
     try {
-      // A lock preserves a rule only for the exact selected period, never an
-      // overlapping quarter with different boundaries.
-      const bootstrap = await preloadLocalTodBootstrap(selection);
-      lastSavedPeriodApplied.current = company.id;
-      setSelectedTodPeriodKey(`${periodStart}:${periodEnd}`);
-      const result = await runLocalTurnoverDiscount(bootstrap);
-      tallyReadFinished = true;
+      result = await runLocalTurnoverDiscount(bootstrap);
+    } catch (cause) {
+      if (!canUseTodCloudFallback(cause)) {
+        if (cause instanceof Error && cause.name === "TimeoutError") {
+          throw new Error("The Tally read timed out. Keep the selected company open and try one period again after the active check stops.");
+        }
+        if (cause instanceof Error && /failed to fetch|networkerror|load failed/i.test(cause.message)) {
+          throw new Error("The Tally connection was interrupted. Reconnect and check Calculation history before trying again.");
+        }
+        throw cause;
+      }
+    }
+    if (result) {
       assertSelectedTodPeriod(selection, [result.evidence, ...result.rows]);
       // Keep the user on the progress view until every customer is saved;
       // showing unsaved rows (with no actions) made it look finished early.
       setShowEvaluationQueue(true);
       setEvaluationOpen(false);
       setNotice(`Calculated ${result.rows.length} customers from Tally. Saving each result — progress is shown below.`);
-      const token = await accessToken();
-      if (!token) return;
-      const response = await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/tod/local-result`, {
+      response = await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/tod/local-result`, {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey() },
         body: jsonBody({ asOfDate, periodStart, periodEnd, selectedSchemeVersionId, evaluatedOn: bootstrap.evaluatedOn, evidence: result.evidence }),
         timeoutMs: 60_000,
       });
-      setLatestRun(response.evaluationRun);
-      // Saving writes one result per customer; hundreds of customers can take
-      // several minutes, so keep waiting (up to 20 minutes) instead of giving
-      // up while the rows still say "Saving details…".
-      for (let attempt = 0; attempt <= 40; attempt += 1) {
-        if (attempt) await new Promise((resolve) => window.setTimeout(resolve, 30_000));
-        // An older proposal with identical values cannot confirm this run.
-        const saved = await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/runs/${response.evaluationRun.id}?detail=compact`, { cache: "no-store" });
-        setLatestRun(saved.evaluationRun);
-        if (["failed", "completed_with_issues", "cancelled"].includes(saved.evaluationRun.status)) {
-          setLocalTodRows([]);
-          setShowEvaluationQueue(true);
-          throw new Error("This calculation did not finish. Review Calculation history before starting another check.");
-        }
-        if (saved.evaluationRun.status === "completed") {
-          await refresh();
-          setPeriodRows(await loadPeriodRows(periodStart, periodEnd));
-          setPeriodRowsOwner(company.id);
-          setSelectedTodPeriodKey(`${periodStart}:${periodEnd}`);
-          setStatusFilter("all");
-          setQuery("");
-          setLocalTodRows([]);
-          setShowEvaluationQueue(false);
-          setNotice("Turnover Discount results are saved. Open any customer to view the calculation.");
-          window.setTimeout(() => setNotice(null), 6000);
-          return;
-        }
-      }
-      throw new Error("The customer results are still being finalized. Open Calculation history before trying again.");
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause);
-      const connectorNeedsUpgrade = !tallyReadFinished && /route not found|failed to fetch|networkerror|load failed/i.test(message);
-      if (!connectorNeedsUpgrade) throw cause;
-      const token = await accessToken();
-      if (!token) throw cause;
-      const response = await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/tod`, {
+    } else {
+      response = await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/tod`, {
         method: "POST",
         headers: { "Idempotency-Key": idempotencyKey() },
         body: jsonBody({ batch: true, asOfDate, periodStart, periodEnd, selectedSchemeVersionId, evaluatedOn: new Date().toISOString().slice(0, 10) }),
@@ -842,11 +823,39 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       setLatestRun(response.evaluationRun);
       setShowEvaluationQueue(true);
       setEvaluationOpen(false);
-      setNotice("The installed connector needs the latest update. The compatible calculation has started in the background.");
-    } finally { setSavingTod(false); }
+      setNotice("A compatible Tally check has started. Waiting for this period to finish before starting another.");
+    }
+    setLatestRun(response.evaluationRun);
+    // BOTH paths must finish saving before the batch advances. Polling is
+    // short; the Tally export itself never runs inside a Heroku web request.
+    await waitForTodRun(async () => {
+      const saved = await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/runs/${response.evaluationRun.id}?detail=compact`, { cache: "no-store" });
+      return saved.evaluationRun;
+    }, (run) => {
+      setLatestRun(run);
+      if (["failed", "completed_with_issues", "cancelled"].includes(run.status)) {
+        setLocalTodRows([]);
+        setShowEvaluationQueue(true);
+      }
+    });
+    await refresh();
+    setPeriodRows(await loadPeriodRows(periodStart, periodEnd));
+    setPeriodRowsOwner(company.id);
+    setSelectedTodPeriodKey(`${periodStart}:${periodEnd}`);
+    setStatusFilter("all");
+    setQuery("");
+    setLocalTodRows([]);
+    setShowEvaluationQueue(false);
+    setNotice("Turnover Discount results are saved. Open any customer to view the calculation.");
   };
+  const withTodCalculation = async (calculate: () => Promise<void>) => {
+    await runExclusiveTodCalculation(todCalculationInFlight, calculate, setSavingTod);
+  };
+  const runLocalTodCalculation = (selection: TodPeriodSelection) => withTodCalculation(() => calculateTodPeriod(selection));
   const runAllDueTodCalculations = async (periods: TodPeriodSelection[]) => {
-    for (const period of periods) await runLocalTodCalculation(period);
+    await withTodCalculation(() => runTodPeriodsInOrder(periods, calculateTodPeriod,
+      (cause) => userFacingError(cause, "The Tally check did not finish. Check the connection and Calculation history.")));
+    setNotice(`All ${periods.length} due periods are calculated and saved.`);
   };
   const statuses = Array.from(new Set(allRows.map((proposal) => proposal.status)));
   const tonnes = (proposal: Proposal) => Number(proposal.eligible_tonnes ?? "0") || 0;
@@ -1021,7 +1030,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     <Card><div className="card-title"><div><p className="eyebrow">Results</p><h2>{title} history</h2><p className="muted-copy">Filter results, then open one to see the calculation and the next step.</p></div><span className="table-count">{rows.length} shown</span></div><div className="queue-toolbar"><label className="queue-search"><span>Find customer or reference</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search customer" /></label><div className="segmented" aria-label={`${title} status filters`}><button className={statusFilter === "all" ? "selected" : ""} onClick={() => setStatusFilter("all")}>All</button>{statuses.map((status) => <button key={status} className={statusFilter === status ? "selected" : ""} onClick={() => setStatusFilter(status)}>{staffStatusLabel(status)}</button>)}</div></div>{rows.length ? <div className="data-table proposal-table"><div className="table-head"><span>Customer</span><span>Result</span><span>Last checked</span><span>Next step</span></div>{rows.map((proposal) => <article key={proposal.id}><div><strong>{customerNames.get(proposal.customer_id) ?? "Customer record"}</strong><small>{proposal.period_start && proposal.period_end ? `${proposal.period_start} to ${proposal.period_end}` : proposal.eligibility_deadline ? `Payment deadline ${proposal.eligibility_deadline}` : "Sales invoice result"}</small></div><div><strong>{formatMoney(proposal.calculated_discount_amount)}</strong><small>{scheme === "tod" ? `${formatTonnes(proposal.eligible_tonnes)} MT eligible${proposal.additional_tonnes_required ? ` · ${formatTonnes(proposal.additional_tonnes_required)} MT to next slab` : ""}` : proposal.shortfall_amount ? `Paid ${formatMoney(proposal.amount_paid_by_deadline)} · shortfall ${formatMoney(proposal.shortfall_amount)}` : "Calculated amount"}</small></div><div><StatusBadge status={proposal.status} /><small>{proposal.latestEvaluation?.freshForApproval ? "Up to date and ready to create" : proposal.latest_evaluated_at ? `Checked ${formatDate(proposal.latest_evaluated_at)}` : "Not checked yet"}</small></div><div className="queue-next"><small>{primaryAction(proposal)}</small><Button className="button-quiet" onClick={() => setSelected(proposal)}><Eye size={15} />Open</Button></div></article>)}</div> : <EmptyState title={allRows.length ? "No results match this view" : `No ${title} results yet`} detail={allRows.length ? "Clear or change the status filters to see every result." : `Start a ${scheme === "cd" ? "Sales invoice" : "customer period"} evaluation after Tally information is updated.`} action={allRows.length ? <Button className="button-secondary" onClick={() => { setQuery(""); setStatusFilter("all"); }}>Clear filters</Button> : <Button onClick={() => setEvaluationOpen(true)}>Start evaluation</Button>} />}</Card>
     </div>
     </div>
-    <GuidedEvaluationDrawer open={evaluationOpen} onClose={() => setEvaluationOpen(false)} scheme={scheme} onComplete={async (message, run) => { setLatestRun(run); setShowEvaluationQueue(true); setNotice(message); setEvaluationOpen(false); await refresh(); }} onError={setError} onTurnoverDiscountSubmit={scheme === "tod" ? runLocalTodCalculation : undefined} onTurnoverDiscountBatchSubmit={scheme === "tod" ? runAllDueTodCalculations : undefined} turnoverPeriods={scheme === "tod" ? turnoverPeriods : undefined} />
+    <GuidedEvaluationDrawer open={evaluationOpen} onClose={() => setEvaluationOpen(false)} scheme={scheme} localPhase={savingTod ? "reading" : null} onComplete={async (message, run) => { setLatestRun(run); setShowEvaluationQueue(true); setNotice(message); setEvaluationOpen(false); await refresh(); }} onError={setError} onTurnoverDiscountSubmit={scheme === "tod" ? runLocalTodCalculation : undefined} onTurnoverDiscountBatchSubmit={scheme === "tod" ? runAllDueTodCalculations : undefined} turnoverPeriods={scheme === "tod" ? turnoverPeriods : undefined} />
     <ProposalDrawer proposal={selected} onClose={() => setSelected(null)} onChanged={refresh} onError={setError} customerName={selected ? selected.customer_name ?? customerNames.get(selected.customer_id) : undefined} launchMode={data.launchControl?.mode} />
   </>;
 }

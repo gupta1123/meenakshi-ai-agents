@@ -1,3 +1,5 @@
+import { serializeTallyRequest, tallyTaskSignal } from "./read-coordinator.mjs";
+
 const DEFAULT_TIMEOUT_MS = 60_000;
 
 function escapeRegex(value) {
@@ -112,7 +114,11 @@ export function buildCollectionExportXml({ collectionName, tallyType, fetchField
   ].join("");
 }
 
-export async function postTallyXml(tallyUrl, xml, { timeoutMs = DEFAULT_TIMEOUT_MS, operation = "Tally request" } = {}) {
+export async function postTallyXml(tallyUrl, xml, { timeoutMs = DEFAULT_TIMEOUT_MS, operation = "Tally request", signal = tallyTaskSignal(tallyUrl) } = {}) {
+  return serializeTallyRequest(tallyUrl, () => sendTallyXml(tallyUrl, xml, { timeoutMs, operation, signal }), signal);
+}
+
+async function sendTallyXml(tallyUrl, xml, { timeoutMs, operation, signal }) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -120,7 +126,7 @@ export async function postTallyXml(tallyUrl, xml, { timeoutMs = DEFAULT_TIMEOUT_
       method: "POST",
       headers: { "content-type": "text/xml" },
       body: xml,
-      signal: controller.signal,
+      signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
     });
     const responseXml = await response.text();
     const lineError = getTagText(responseXml, "LINEERROR");
@@ -131,7 +137,8 @@ export async function postTallyXml(tallyUrl, xml, { timeoutMs = DEFAULT_TIMEOUT_
     }
     return responseXml;
   } catch (error) {
-    if (error?.name === "AbortError") throw new Error(`${operation} timed out after ${timeoutMs / 1000} seconds.`);
+    if (signal?.aborted) throw new Error("This Tally read was stopped.");
+    if (controller.signal.aborted) throw new Error(`${operation} timed out after ${timeoutMs / 1000} seconds.`);
     throw error;
   } finally {
     clearTimeout(timeout);

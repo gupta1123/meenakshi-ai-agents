@@ -1,5 +1,5 @@
 #define AppName "Meenakshi Tally Connector"
-#define AppVersion "0.3.5"
+#define AppVersion "0.3.6"
 #define AppPublisher "Meenakshi"
 #define AppInstallDir "C:\Meenakshi\tally-bridge"
 #define AppExeName "Meenakshi Tally Connector.exe"

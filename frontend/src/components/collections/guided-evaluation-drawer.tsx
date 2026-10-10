@@ -35,7 +35,6 @@ export function GuidedEvaluationDrawer({ open, onClose, scheme, activeRun = null
     if (!open) {
       setRun(null);
       setFormError(null);
-      setBatchBusy(false);
     } else if (scheme === "tod") {
       const preferred = turnoverPeriods.find((period) => period.state === "current") ?? [...turnoverPeriods].reverse().find((period) => period.state === "completed");
       setSelectedPeriodKey((current) => turnoverPeriods.some((period) => period.key === current && period.state !== "upcoming") ? current : preferred?.key ?? "");
@@ -43,6 +42,7 @@ export function GuidedEvaluationDrawer({ open, onClose, scheme, activeRun = null
   }, [open, scheme, turnoverPeriods]);
 
   async function submit(form: HTMLFormElement) {
+    if (busy || batchBusy || localPhase) return;
     const fields = new FormData(form);
     setBusy(true);
     setFormError(null);
@@ -76,7 +76,7 @@ export function GuidedEvaluationDrawer({ open, onClose, scheme, activeRun = null
 
   const duePeriods = turnoverPeriods.filter((period) => period.state === "completed" && !period.calculated);
   async function calculateDuePeriods() {
-    if (!onTurnoverDiscountBatchSubmit || !duePeriods.length) return;
+    if (busy || batchBusy || localPhase || !onTurnoverDiscountBatchSubmit || !duePeriods.length) return;
     setBatchBusy(true);
     setFormError(null);
     onError(null);

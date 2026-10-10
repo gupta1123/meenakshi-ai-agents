@@ -124,10 +124,14 @@ async function runLocalTurnoverDiscountBatch(bootstrap: LocalTodBootstrap, batch
     // A completed quarter can contain materially more vouchers than the live
     // projection. Give Tally enough time to finish its chunked read instead of
     // turning a healthy, long-running calculation into a false failure.
-    signal: signal ?? AbortSignal.timeout(180_000),
+    signal: signal ?? AbortSignal.timeout(1_200_000),
   });
   const payload = await response.json().catch(() => ({})) as LocalTodResult & { error?: string };
-  if (!response.ok) throw new Error(payload.error || "The local Tally connector could not complete the Turnover Discount calculation.");
+  if (!response.ok) {
+    const error = new Error(payload.error || "The local Tally connector could not complete the Turnover Discount calculation.");
+    if (response.status === 404) Object.assign(error, { code: "LOCAL_ROUTE_NOT_FOUND" });
+    throw error;
+  }
   assertSelectedTodPeriod({ start: batch.periodStart, end: batch.periodEnd }, [payload.evidence, ...payload.rows]);
   return payload;
 }

@@ -7,6 +7,7 @@ import { evaluateCashDiscountSettlements } from "./local-cd-settlement-evaluator
 import { evaluateLocalTurnoverDiscount } from "./local-tod-evaluator.mjs";
 import { probeActiveCompany } from "./tally/company-probe.mjs";
 import { readNoteEInvoice } from "./tally/einvoice.mjs";
+import { tallyActivity, tryAcquireTallyTask, recordVerifiedCompany, TALLY_BUSY_MESSAGE } from "./tally/read-coordinator.mjs";
 
 export const LOCAL_TALLY_PORT = 3219;
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
@@ -53,10 +54,11 @@ function readJson(request) {
       catch { reject(new Error("The local calculation request is invalid.")); }
     });
     request.on("error", reject);
+    request.on("aborted", () => reject(new Error("This Tally read was stopped.")));
   });
 }
 
-export function startLocalApi(config) {
+export function startLocalApi(config, { port = LOCAL_TALLY_PORT, probeCompany = probeActiveCompany, fetchCdEvidence = fetchLiveCdEvidence, fetchTodEvidence = fetchLiveTodEvidence } = {}) {
   let stopping = false;
   // Progress of the calculation in flight, read by the browser while it waits.
   let progress = null;
@@ -72,8 +74,15 @@ export function startLocalApi(config) {
       return;
     }
     if (request.method === "GET" && request.url === "/health") {
+      const task = tryAcquireTallyTask(config.tallyUrl, "connection_check");
+      if (!task) {
+        // Do not queue health probes behind long exports or report stale
+        // company identity as freshly verified.
+        respond(response, 503, { ready: false, busy: true, error: TALLY_BUSY_MESSAGE }, origin, config);
+        return;
+      }
       try {
-        const activeCompany = await probeActiveCompany(config.tallyUrl);
+        const activeCompany = await task.run(() => probeCompany(config.tallyUrl));
         respond(response, 200, { ready: true, activeCompany }, origin, config);
       } catch (error) {
         respond(response, 503, { ready: false, error: error instanceof Error ? error.message : String(error) }, origin, config);
@@ -87,22 +96,26 @@ export function startLocalApi(config) {
     if (request.method === "GET" && request.url === "/v1/identity") {
       // The connector ID is not a credential. It lets this browser choose
       // the connector running on this PC without exposing pairing secrets.
-      respond(response, 200, { connectorId: config.connectorId }, origin, config);
+      respond(response, 200, { connectorId: config.connectorId, busy: Boolean(tallyActivity(config.tallyUrl)) }, origin, config);
       return;
     }
     // IRN / Ack / signed QR of one Credit or Debit Note, for its PDF.
     if (request.method === "POST" && request.url === "/v1/einvoice") {
+      const task = tryAcquireTallyTask(config.tallyUrl, "einvoice_read");
+      if (!task) { respond(response, 409, { error: TALLY_BUSY_MESSAGE }, origin, config); return; }
       try {
-        const body = await readJson(request);
-        const expectedCompany = body.expectedCompany && typeof body.expectedCompany === "object" ? body.expectedCompany : {};
-        const activeCompany = await probeActiveCompany(config.tallyUrl);
-        const expectedGuid = String(expectedCompany.guid ?? "").trim();
-        const sameCompany = expectedGuid
-          ? normalized(activeCompany.guid) === normalized(expectedGuid)
-          : Boolean(expectedCompany.name) && normalized(activeCompany.name) === normalized(expectedCompany.name);
-        if (!sameCompany) throw new Error(`Open ${expectedCompany.name || "the selected company"} in Tally Prime first.`);
-        const einvoice = await readNoteEInvoice({ tallyUrl: config.tallyUrl, companyName: activeCompany.name, date: body.date, voucherNumber: body.voucherNumber, kind: body.kind });
-        respond(response, 200, { einvoice }, origin, config);
+        await task.run(async () => {
+          const body = await readJson(request);
+          const expectedCompany = body.expectedCompany && typeof body.expectedCompany === "object" ? body.expectedCompany : {};
+          const activeCompany = await probeCompany(config.tallyUrl);
+          const expectedGuid = String(expectedCompany.guid ?? "").trim();
+          const sameCompany = expectedGuid
+            ? normalized(activeCompany.guid) === normalized(expectedGuid)
+            : Boolean(expectedCompany.name) && normalized(activeCompany.name) === normalized(expectedCompany.name);
+          if (!sameCompany) throw new Error(`Open ${expectedCompany.name || "the selected company"} in Tally Prime first.`);
+          const einvoice = await readNoteEInvoice({ tallyUrl: config.tallyUrl, companyName: activeCompany.name, date: body.date, voucherNumber: body.voucherNumber, kind: body.kind });
+          respond(response, 200, { einvoice }, origin, config);
+        });
       } catch (error) {
         respond(response, 422, { error: error instanceof Error ? error.message : String(error) }, origin, config);
       }
@@ -114,40 +127,53 @@ export function startLocalApi(config) {
       respond(response, 404, { error: "Local connector route not found." }, origin, config);
       return;
     }
+    const cancellation = new AbortController();
+    const task = tryAcquireTallyTask(config.tallyUrl, isCashDiscount ? "cash_discount" : "turnover_discount", cancellation.signal);
+    if (!task) { respond(response, 409, { error: TALLY_BUSY_MESSAGE }, origin, config); return; }
+    const onClose = () => { if (!response.writableEnded) cancellation.abort(); };
+    response.on("close", onClose);
     const startedAt = performance.now();
     try {
-      const body = await readJson(request);
-      const expectedCompany = body.expectedCompany && typeof body.expectedCompany === "object" ? body.expectedCompany : {};
-      const activeCompany = await probeActiveCompany(config.tallyUrl);
-      const expectedGuid = String(expectedCompany.guid ?? "").trim();
-      const sameCompany = expectedGuid
-        ? normalized(activeCompany.guid) === normalized(expectedGuid)
-        : Boolean(expectedCompany.name) && normalized(activeCompany.name) === normalized(expectedCompany.name);
-      if (!sameCompany) {
-        throw new Error(`Open ${expectedCompany.name || "the selected company"} in Tally Prime before running this calculation.`);
-      }
-      const command = { payload: { evaluationRunId: null, voucherScope: body.voucherScope } };
-      progress = { task: isCashDiscount ? "cash_discount" : "turnover_discount", stage: "reading", done: 0, total: null, from: null, to: null, startedAt: new Date().toISOString() };
-      const onProgress = (update) => { progress = { ...progress, ...update }; };
-      const evidence = isCashDiscount
-        ? await fetchLiveCdEvidence(command, { config, activeCompany, isCancelled: () => false, onProgress }, null)
-        : await fetchLiveTodEvidence(command, { config, activeCompany, isCancelled: () => false });
-      onProgress({ stage: "calculating" });
-      const calculation = isCashDiscount
-        ? body.rule?.cdDiscountBasis === "amount_per_tonne"
-          ? evaluateCashDiscountSettlements(body.rule, body.evaluatedOn, evidence.invoices)
-          : evaluateLocalCashDiscount(body.rule, body.evaluatedOn, evidence.invoices)
-        : evaluateLocalTurnoverDiscount(body.rule, body.evaluatedOn, body.periodStart, body.periodEnd, evidence.customerAggregates);
-      respond(response, 200, { ...calculation, evidence, durationMs: Math.round(performance.now() - startedAt) }, origin, config);
+      await task.run(async () => {
+        progress = { task: isCashDiscount ? "cash_discount" : "turnover_discount", stage: "reading", done: 0, total: null, from: null, to: null, startedAt: new Date().toISOString() };
+        const body = await readJson(request);
+        const expectedCompany = body.expectedCompany && typeof body.expectedCompany === "object" ? body.expectedCompany : {};
+        const activeCompany = await probeCompany(config.tallyUrl);
+        const expectedGuid = String(expectedCompany.guid ?? "").trim();
+        const sameCompany = expectedGuid
+          ? normalized(activeCompany.guid) === normalized(expectedGuid)
+          : Boolean(expectedCompany.name) && normalized(activeCompany.name) === normalized(expectedCompany.name);
+        if (!sameCompany) {
+          throw new Error(`Open ${expectedCompany.name || "the selected company"} in Tally Prime before running this calculation.`);
+        }
+        recordVerifiedCompany(config.tallyUrl, activeCompany);
+        const command = { payload: { evaluationRunId: null, voucherScope: body.voucherScope } };
+        const onProgress = (update) => { progress = { ...progress, ...update }; };
+        const readContext = { config, activeCompany, isCancelled: () => cancellation.signal.aborted, onProgress };
+        const evidence = isCashDiscount
+          ? await fetchCdEvidence(command, readContext, null)
+          : await fetchTodEvidence(command, readContext);
+        cancellation.signal.throwIfAborted();
+        onProgress({ stage: "calculating" });
+        const calculation = isCashDiscount
+          ? body.rule?.cdDiscountBasis === "amount_per_tonne"
+            ? evaluateCashDiscountSettlements(body.rule, body.evaluatedOn, evidence.invoices)
+            : evaluateLocalCashDiscount(body.rule, body.evaluatedOn, evidence.invoices)
+          : evaluateLocalTurnoverDiscount(body.rule, body.evaluatedOn, body.periodStart, body.periodEnd, evidence.customerAggregates);
+        respond(response, 200, { ...calculation, evidence, durationMs: Math.round(performance.now() - startedAt) }, origin, config);
+      });
     } catch (error) {
       respond(response, 422, { error: error instanceof Error ? error.message : String(error), durationMs: Math.round(performance.now() - startedAt) }, origin, config);
+    } finally {
+      progress = null;
+      response.off("close", onClose);
     }
   });
   const listen = () => {
     if (stopping || server.listening) return;
-    server.listen(LOCAL_TALLY_PORT, "127.0.0.1");
+    server.listen(port, "127.0.0.1");
   };
-  server.on("listening", () => console.log(`MEENAKSHI_LOCAL_API http://127.0.0.1:${LOCAL_TALLY_PORT}`));
+  server.on("listening", () => console.log(`MEENAKSHI_LOCAL_API http://127.0.0.1:${server.address().port}`));
   server.on("error", (error) => {
     console.error(`Local calculation API failed; retrying: ${error instanceof Error ? error.message : String(error)}`);
     if (stopping || retryTimer) return;
@@ -158,6 +184,7 @@ export function startLocalApi(config) {
   });
   listen();
   return {
+    server,
     close() {
       stopping = true;
       if (retryTimer) clearTimeout(retryTimer);
