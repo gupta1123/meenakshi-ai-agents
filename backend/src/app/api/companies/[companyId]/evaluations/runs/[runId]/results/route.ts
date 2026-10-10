@@ -2,6 +2,7 @@ import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/authorization";
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { resultResetCutoff, visibleResults } from "@/lib/evaluation/result-visibility";
 
 type RouteContext = { params: Promise<{ companyId: string; runId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -12,11 +13,12 @@ export async function GET(request: Request, context: RouteContext) {
     if (!isUuid(companyId) || !isUuid(runId)) return jsonWithCors(request, { error: "Invalid calculation reference." }, { status: 400 });
     const { company } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
     const supabase = createSupabaseAdminClient();
-    const { data: runs, error } = await supabase.from("evaluation_runs")
+    const cutoff = await resultResetCutoff(company.id);
+    const { data: runs, error } = await visibleResults(supabase.from("evaluation_runs")
       .select("id, idempotency_key, scheme_version_id, period_start, period_end, status, request_context, summary, created_at, completed_at")
       .eq("company_id", company.id)
       .or(`id.eq.${runId},idempotency_key.like.${runId}:%`)
-      .order("created_at", { ascending: true });
+      .order("created_at", { ascending: true }), cutoff, "created_at");
     if (error) throw error;
     if (!runs?.length) return jsonWithCors(request, { error: "Calculation history was not found." }, { status: 404 });
     const customerIds = [...new Set(runs.map((run) => (run.request_context as Record<string, unknown> | null)?.customerId).filter((id): id is string => typeof id === "string" && isUuid(id)))];

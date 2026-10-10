@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import Decimal from "decimal.js";
 
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { resultResetCutoff, resultIsVisible } from "@/lib/evaluation/result-visibility";
 
 type ProposalRow = {
   id: string;
@@ -221,11 +222,14 @@ export async function buildCreditNoteApprovalInput(companyId: string, proposalId
   }
   const { data: reviewRefresh, error: reviewRefreshError } = await supabase
     .from("evaluation_runs")
-    .select("id, status, completed_at, request_context")
+    .select("id, status, completed_at, created_at, request_context")
     .eq("id", evaluation.evaluation_run_id)
     .eq("company_id", companyId)
     .maybeSingle();
   if (reviewRefreshError) throw reviewRefreshError;
+  if (!resultIsVisible(reviewRefresh?.created_at, await resultResetCutoff(companyId))) {
+    throw new Error("This calculation was archived. Calculate Turnover Discount again before creating a note.");
+  }
   const completedAt = reviewRefresh?.completed_at ? new Date(reviewRefresh.completed_at).getTime() : Number.NaN;
   if (
     reviewRefresh?.status !== "completed"

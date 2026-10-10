@@ -6,6 +6,7 @@ import { getCompanyLaunchControl } from "@/lib/launch-control";
 import { buildOperationsAlerts } from "@/lib/operations";
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { resultResetCutoff, visibleResults } from "@/lib/evaluation/result-visibility";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -20,7 +21,7 @@ function syncReadiness(sync: { status: string; completed_at: string | null; erro
   return { status: sync?.status === "completed" && !stale ? "current" : sync?.status === "completed" ? "stale" : sync?.status ?? "required", completedAt, stale, errorSummary: sync?.error_summary ?? null };
 }
 
-async function loadHealthFallback(company: { id: string; organization_id: string }, bindingRow: { id: string; connector_id: string; expected_tally_company_guid: string; expected_tally_company_name: string; observed_tally_company_guid: string | null; observed_tally_company_name: string | null; last_mismatch_at: string | null } | null) {
+async function loadHealthFallback(company: { id: string; organization_id: string }, bindingRow: { id: string; connector_id: string; expected_tally_company_guid: string; expected_tally_company_name: string; observed_tally_company_guid: string | null; observed_tally_company_name: string | null; last_mismatch_at: string | null } | null, cutoff: string | null) {
   const supabase = createSupabaseAdminClient();
   // Fallback: legacy 20 counts path (kept for pre-migration). New path uses get_operations_health_counts RPC.
   async function statusCounts(table: "integration_outbox" | "tally_commands" | "notification_messages", companyId: string, statuses: string[]) {
@@ -41,7 +42,7 @@ async function loadHealthFallback(company: { id: string; organization_id: string
     supabase.from("notification_messages").select("attempt_count, max_attempts, provider_metadata").eq("company_id", company.id).eq("status", "failed").limit(1_000),
     supabase.from("integration_outbox").select("id, status, correlation_id, created_at, last_error").eq("company_id", company.id).in("status", ["dead_letter", "failed"]).order("created_at", { ascending: true }).limit(1).maybeSingle(),
     supabase.from("tally_commands").select("id, status, correlation_id, created_at, failure_reason").eq("company_id", company.id).in("status", ["dead_letter", "failed"]).order("created_at", { ascending: true }).limit(1).maybeSingle(),
-    supabase.from("discount_proposals").select("id", { count: "exact", head: true }).eq("company_id", company.id).in("status", ["needs_review", "review_invalidated"]),
+    visibleResults(supabase.from("discount_proposals").select("id", { count: "exact", head: true }).eq("company_id", company.id).in("status", ["needs_review", "review_invalidated"]), cutoff, "latest_evaluated_at"),
     supabase.from("scheme_versions").select("id").eq("company_id", company.id).eq("status", "active").limit(1),
     supabase.from("whatsapp_templates").select("id").eq("organization_id", company.organization_id).eq("is_active", true).limit(1),
     getCompanyLaunchControl(company.id),
@@ -64,7 +65,9 @@ export async function GET(request: Request, context: RouteContext) {
     const { companyId } = await context.params;
     if (!isUuid(companyId)) return jsonWithCors(request, { error: "Invalid company id." }, { status: 400 });
     const { company } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
-    const cached = healthCache.get(company.id);
+    const cutoff = await resultResetCutoff(company.id);
+    const cacheKey = `${company.id}:${cutoff ?? "original"}`;
+    const cached = healthCache.get(cacheKey);
     if (cached && cached.expiresAt > Date.now()) {
       return jsonWithCors(request, cached.data, { headers: { "Cache-Control": "private, max-age=10, stale-while-revalidate=20", "X-Cache": "HIT" } });
     }
@@ -105,18 +108,23 @@ export async function GET(request: Request, context: RouteContext) {
       const terminalMessages = counts.terminalFailures ?? 0;
       const failedOutbox = failedOutboxResult.data as { id: string; correlation_id: string | null; created_at: string; last_error: string | null } | null;
       const failedCommand = failedCommandResult.data as { id: string; correlation_id: string | null; created_at: string; failure_reason: string | null } | null;
-      const proposalCount = counts.proposalCount ?? 0;
+      let proposalCount = counts.proposalCount ?? 0;
+      if (cutoff) {
+        const result = await visibleResults(supabase.from("discount_proposals").select("id", { count: "exact", head: true }).eq("company_id", company.id).in("status", ["needs_review", "review_invalidated"]), cutoff, "latest_evaluated_at");
+        if (result.error) throw result.error;
+        proposalCount = result.count ?? 0;
+      }
       const missingConfiguration = [...(activeVersionResult.data?.length ? [] : ["an active CD or TOD rule version"]), ...(templateResult.data?.length ? [] : ["an approved WhatsApp template"])];
       const sync = { masters: syncReadiness(mastersResult.data), vouchers: syncReadiness(vouchersResult.data) };
       const alerts = buildOperationsAlerts({ now: new Date().toISOString(), tally: { status: tallyStatus, lastMismatchAt: bindingRow?.last_mismatch_at }, outbox: { failed: outboxCounts.failed ?? 0, deadLetter: outboxCounts.dead_letter ?? 0, oldestFailure: failedOutbox ? { id: failedOutbox.id, correlationId: failedOutbox.correlation_id, createdAt: failedOutbox.created_at, lastError: failedOutbox.last_error } : null }, commands: { failed: commandCounts.failed ?? 0, deadLetter: commandCounts.dead_letter ?? 0, oldestFailure: failedCommand ? { id: failedCommand.id, correlationId: failedCommand.correlation_id, createdAt: failedCommand.created_at, failureReason: failedCommand.failure_reason } : null }, messages: { retrying: retryingMessages, terminalFailures: terminalMessages }, missingConfiguration, staleProposalCount: proposalCount, launchMode: launchControl.mode });
       const payload = { companyId: company.id, generatedAt: new Date().toISOString(), launchControl, tally: { status: tallyStatus, ready: tallyStatus === "ready", heartbeat: { at: connector?.last_heartbeat_at ?? null, stale: heartbeatStale }, wrongCompanyBinding: tallyStatus === "company_mismatch", sync }, outbox: { counts: outboxCounts, backlog: (outboxCounts.pending ?? 0) + (outboxCounts.processing ?? 0), failed: outboxCounts.failed ?? 0, deadLetter: outboxCounts.dead_letter ?? 0, sampledItems: Object.values(outboxCounts).reduce((total, count) => total + (count as number), 0) }, bridgeCommands: { counts: commandCounts, failed: commandCounts.failed ?? 0, deadLetter: commandCounts.dead_letter ?? 0, sampledItems: Object.values(commandCounts).reduce((total, count) => total + (count as number), 0) }, messages: { counts: messageCounts, queue: (messageCounts.queued ?? 0) + (messageCounts.sending ?? 0), retrying: retryingMessages, terminalFailures: terminalMessages, sampledItems: Object.values(messageCounts).reduce((total, count) => total + (count as number), 0) }, configuration: { missing: missingConfiguration }, proposals: { reviewInvalidatedOrNeedsReview: proposalCount }, alerts };
-      healthCache.set(company.id, { expiresAt: Date.now() + HEALTH_CACHE_TTL_MS, data: payload });
+      healthCache.set(cacheKey, { expiresAt: Date.now() + HEALTH_CACHE_TTL_MS, data: payload });
       return jsonWithCors(request, payload, { headers: { "Cache-Control": "private, max-age=10, stale-while-revalidate=20", "X-Cache": "MISS" } });
     }
 
     if (rpcError && !isMissingRpc) console.warn("get_operations_health_counts RPC failed, falling back:", rpcError);
     // Fallback path
-    const fallback = await loadHealthFallback(company, bindingRow);
+    const fallback = await loadHealthFallback(company, bindingRow, cutoff);
     const { connectorResult, mastersResult, vouchersResult, outboxCounts, commandCounts, messageCounts, retryingMessages, terminalMessages, failedOutboxResult, failedCommandResult, proposalResult, activeVersionResult, templateResult, launchControl, tallyStatus, heartbeatStale, connector } = fallback as unknown as { connectorResult: { data: unknown }; mastersResult: { data: unknown }; vouchersResult: { data: unknown }; outboxCounts: Record<string, number>; commandCounts: Record<string, number>; messageCounts: Record<string, number>; retryingMessages: number; terminalMessages: number; failedOutboxResult: { data: unknown }; failedCommandResult: { data: unknown }; proposalResult: { count: number | null; data: unknown }; activeVersionResult: { data: unknown[] }; templateResult: { data: unknown[] }; launchControl: unknown; tallyStatus: string; heartbeatStale: boolean; connector: Pick<TallyConnectorRow, "id" | "status" | "last_heartbeat_at"> | null };
     const failedOutbox = (failedOutboxResult as { data: { id: string; correlation_id: string | null; created_at: string; last_error: string | null } | null }).data;
     const failedCommand = (failedCommandResult as { data: { id: string; correlation_id: string | null; created_at: string; failure_reason: string | null } | null }).data;
@@ -137,7 +145,7 @@ export async function GET(request: Request, context: RouteContext) {
       messages: { counts: messageCounts, queue: messageCounts.queued + messageCounts.sending, retrying: retryingMessages, terminalFailures: terminalMessages, sampledItems: Object.values(messageCounts).reduce((total, count) => total + count, 0) },
       configuration: { missing: missingConfiguration }, proposals: { reviewInvalidatedOrNeedsReview: (proposalResult as { count: number | null }).count ?? 0 }, alerts,
     };
-    healthCache.set(company.id, { expiresAt: Date.now() + HEALTH_CACHE_TTL_MS, data: payload });
+    healthCache.set(cacheKey, { expiresAt: Date.now() + HEALTH_CACHE_TTL_MS, data: payload });
     return jsonWithCors(request, payload, { headers: { "Cache-Control": "private, max-age=10, stale-while-revalidate=20", "X-Cache": isMissingRpc ? "FALLBACK-MISSING-RPC" : "FALLBACK" } });
   } catch (error) {
     if (error instanceof MeenakshiAccessError) return jsonWithCors(request, { error: error.message }, { status: error.status });

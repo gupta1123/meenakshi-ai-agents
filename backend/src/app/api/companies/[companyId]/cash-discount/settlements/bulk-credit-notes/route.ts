@@ -4,6 +4,7 @@ import { requirePostingEnabled } from "@/lib/launch-control";
 import { RulebookRequestError } from "@/lib/rulebook/shared";
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { requireVisibleCdCandidate } from "@/lib/evaluation/result-visibility";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -31,6 +32,8 @@ export async function POST(request: Request, context: RouteContext) {
     const skipped: Array<{ candidateId: string; reason: string }> = [];
     // One at a time: each call locks its invoice and the connector picks them up in order.
     for (const candidateId of candidateIds) {
+      try { await requireVisibleCdCandidate(company.id, candidateId); }
+      catch (error) { skipped.push({ candidateId, reason: error instanceof Error ? error.message : "Result is unavailable." }); continue; }
       const { error } = await db.rpc("enqueue_meenakshi_cd_credit_note", {
         p_company_id: company.id, p_candidate_id: candidateId, p_actor_id: userId, p_idempotency_key: `cd-bulk:${batch}:${candidateId}`,
       });

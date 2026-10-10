@@ -3,6 +3,7 @@ import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/autho
 import { customerGroupsFor } from "@/lib/customer-groups";
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { resultResetCutoff, visibleResults } from "@/lib/evaluation/result-visibility";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -32,21 +33,22 @@ export async function GET(request: Request, context: RouteContext) {
     const from = `${fy}-04-01`;
     const to = `${fy + 1}-03-31`;
     const supabase = createSupabaseAdminClient();
+    const cutoff = await resultResetCutoff(company.id);
 
     const [cdRun, cdNotes, todNotes, proposals, messages, einvoices, todRun] = await Promise.all([
-      supabase.from("evaluation_runs").select("completed_at, summary").eq("company_id", company.id).eq("status", "completed")
-        .eq("summary->>cdDiscountBasis", "amount_per_tonne").order("completed_at", { ascending: false }).limit(1).maybeSingle(),
+      visibleResults(supabase.from("evaluation_runs").select("completed_at, summary").eq("company_id", company.id).eq("status", "completed")
+        .eq("summary->>cdDiscountBasis", "amount_per_tonne").order("completed_at", { ascending: false }), cutoff, "created_at").limit(1).maybeSingle(),
       supabase.from("cash_discount_debit_note_postings").select("id, status, amount, verified_amount, debit_note_date, debit_note_snapshot")
         .eq("company_id", company.id).eq("note_kind", "credit_note").neq("status", "cancelled").limit(20000),
       supabase.from("credit_note_postings").select("id, status, customer_id, proposal_id, credit_note_date, discount_amount, verified_amount, credit_note_snapshot")
         .eq("company_id", company.id).neq("status", "cancelled").limit(20000),
-      supabase.from("discount_proposals").select("id, customer_id, status, period_start, period_end, eligible_tonnes, calculated_discount_amount, achieved_tier_id, updated_at")
-        .eq("company_id", company.id).eq("scheme_type", "tod").lte("period_start", to).gte("period_end", from).limit(20000),
+      visibleResults(supabase.from("discount_proposals").select("id, customer_id, status, period_start, period_end, eligible_tonnes, calculated_discount_amount, achieved_tier_id, updated_at")
+        .eq("company_id", company.id).eq("scheme_type", "tod").lte("period_start", to).gte("period_end", from), cutoff, "latest_evaluated_at").limit(20000),
       supabase.from("notification_messages").select("event_type, status, sent_at, created_at, customer_contact_id, credit_note_posting_id, cash_discount_debit_note_posting_id")
         .eq("company_id", company.id).in("event_type", ["tod_credit_note_created", "cd_credit_note_created"]).limit(20000),
       supabase.from("note_einvoices").select("note_source, posting_id").eq("company_id", company.id).limit(20000),
-      supabase.from("evaluation_runs").select("completed_at").eq("company_id", company.id).eq("request_context->>schemeType", "tod").eq("status", "completed")
-        .order("completed_at", { ascending: false }).limit(1).maybeSingle(),
+      visibleResults(supabase.from("evaluation_runs").select("completed_at").eq("company_id", company.id).eq("request_context->>schemeType", "tod").eq("status", "completed")
+        .order("completed_at", { ascending: false }), cutoff, "created_at").limit(1).maybeSingle(),
     ]);
     for (const result of [cdRun, cdNotes, todNotes, proposals, messages, todRun]) if (result.error) throw result.error;
     // note_einvoices exists after migration 20260927180000; before it, nothing is e-invoiced.

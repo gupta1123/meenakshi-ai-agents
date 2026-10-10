@@ -3,6 +3,7 @@ import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/autho
 import { REVIEW_REFRESH_MAX_AGE_MS } from "@/lib/credit-notes";
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { resultResetCutoff, visibleResults } from "@/lib/evaluation/result-visibility";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -46,6 +47,8 @@ export async function GET(request: Request, context: RouteContext) {
     const schemeType = url.searchParams.get("schemeType");
     const status = url.searchParams.get("status");
     const activeOnly = url.searchParams.get("activeOnly") === "true";
+    // Credit Notes still need their historical proposal/accounting links.
+    const cutoff = url.searchParams.get("includeArchived") === "true" ? null : await resultResetCutoff(company.id);
     const requestedLimit = Number(url.searchParams.get("limit") ?? 250);
     const limit = Number.isFinite(requestedLimit) ? Math.min(500, Math.max(1, Math.floor(requestedLimit))) : 250;
     const cursor = url.searchParams.get("cursor");
@@ -61,6 +64,7 @@ export async function GET(request: Request, context: RouteContext) {
       .from("discount_proposals")
       .select("id, customer_id, scheme_version_id, scheme_type, source_sales_voucher_id, period_start, period_end, entitlement_key, status, source_fingerprint, last_live_refresh_at, eligibility_deadline, eligible_product_taxable_value, eligible_tonnes, achieved_tier_id, next_tier_tonnes, additional_tonnes_required, invoice_amount_due, amount_paid_by_deadline, discounted_settlement_target, shortfall_amount, discount_percentage, calculated_discount_amount, posted_discount_amount, reason_codes, latest_evaluated_at, updated_at")
       .eq("company_id", company.id);
+    query = visibleResults(query, cutoff, "latest_evaluated_at");
     // A period request pages by id so the id cursor is exact; the default list stays newest-updated first.
     query = byPeriod ? query.order("id", { ascending: false }) : query.order("updated_at", { ascending: false }).order("id", { ascending: false });
     query = query.limit(limit + 1);

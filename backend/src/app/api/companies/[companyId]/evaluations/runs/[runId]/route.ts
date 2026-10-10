@@ -4,6 +4,7 @@ import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { collapseEvaluationRuns } from "@/lib/evaluation/run-batches";
 import { compactSummaryColumns, restoreCompactSummary, type RunSummaryRow } from "@/lib/evaluation/run-summary";
+import { resultResetCutoff, resultIsVisible } from "@/lib/evaluation/result-visibility";
 
 type RouteContext = { params: Promise<{ companyId: string; runId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -21,6 +22,7 @@ export async function GET(request: Request, context: RouteContext) {
       .eq("id", runId).eq("company_id", company.id).returns<RunSummaryRow[]>().maybeSingle();
     if (error) throw error;
     if (!rawData) return jsonWithCors(request, { error: "Evaluation run not found." }, { status: 404 });
+    if (!resultIsVisible(rawData.created_at, await resultResetCutoff(company.id))) return jsonWithCors(request, { error: "This calculation was archived. Calculate again to view fresh results." }, { status: 404 });
     const data = compact ? restoreCompactSummary(rawData) : rawData;
     const { data: snapshot, error: snapshotError } = await supabase
       .from("proposal_evaluations")

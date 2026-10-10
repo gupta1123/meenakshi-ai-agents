@@ -4,6 +4,7 @@ import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { collapseEvaluationRuns } from "@/lib/evaluation/run-batches";
 import { compactSummaryColumns, restoreCompactSummary, type RunSummaryRow } from "@/lib/evaluation/run-summary";
+import { resultResetCutoff, visibleResults } from "@/lib/evaluation/result-visibility";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 type SchemeType = "cd" | "tod";
@@ -35,7 +36,8 @@ export async function GET(request: Request, context: RouteContext) {
     const limit = Number.isFinite(requestedLimit) ? Math.min(500, Math.max(1, Math.floor(requestedLimit))) : 100;
     const compact = searchParams.get("detail") === "compact";
     const fresh = searchParams.get("fresh") === "1";
-    const cacheKey = `${company.id}:${requestedScheme ?? "all"}:${limit}:${compact}`;
+    const cutoff = await resultResetCutoff(company.id);
+    const cacheKey = `${company.id}:${cutoff ?? "original"}:${requestedScheme ?? "all"}:${limit}:${compact}`;
     const cached = runsCache.get(cacheKey);
     if (!fresh && cached && cached.expiresAt > Date.now()) {
       return jsonWithCors(request, cached.data, { headers: { "Cache-Control": "private, max-age=5, stale-while-revalidate=10", "X-Cache": "HIT" } });
@@ -54,6 +56,7 @@ export async function GET(request: Request, context: RouteContext) {
       .not("idempotency_key", "like", childKey)
       .order("created_at", { ascending: false });
     if (requestedScheme) runsQuery = runsQuery.eq("request_context->>schemeType", requestedScheme);
+    runsQuery = visibleResults(runsQuery, cutoff, "created_at");
     const { data: rootData, error } = await runsQuery.limit(limit).returns<RunSummaryRow[]>();
     if (error) throw error;
     const rootRuns = (rootData ?? []).map(row => compact ? restoreCompactSummary(row) : row);

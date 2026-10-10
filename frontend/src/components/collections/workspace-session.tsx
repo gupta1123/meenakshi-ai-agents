@@ -92,7 +92,7 @@ export function WorkspaceSessionProvider({ email, signOut, children }: { email: 
         }
         if (pathname === "/credit-notes") {
           const [proposalData, creditNoteData, messageData, contactData, launchData, reference, cdCreditNoteData] = await Promise.all([
-            apiRequest<{ proposals: Proposal[] }>(token, `${base}/evaluations/proposals?schemeType=tod`),
+            apiRequest<{ proposals: Proposal[] }>(token, `${base}/evaluations/proposals?schemeType=tod&includeArchived=true`),
             apiRequest<{ creditNotePostings: CreditNotePosting[] }>(token, `${base}/credit-notes`),
             apiRequest<{ messages: NotificationMessage[] }>(token, `${base}/notifications?for=credit_notes`),
             apiRequest<{ contacts: Contact[] }>(token, `${base}/contacts`).catch(() => ({ contacts: [] })),

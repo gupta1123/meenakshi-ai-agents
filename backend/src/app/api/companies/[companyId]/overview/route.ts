@@ -4,6 +4,7 @@ import { tallyCompanyMatches, type TallyConnectorRow } from "@/lib/bridge";
 import { BRIDGE_HEARTBEAT_STALE_MS } from "@/lib/constants";
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { resultResetCutoff, visibleResults } from "@/lib/evaluation/result-visibility";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 type ProposalRow = { id: string; customer_id: string; status: string; calculated_discount_amount: string | number | null; latest_evaluated_at: string | null };
@@ -33,14 +34,14 @@ function setCachedOverview(companyId: string, data: unknown) {
 
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
 
-async function loadOverviewFallback(companyId: string) {
+async function loadOverviewFallback(companyId: string, cutoff: string | null = null) {
   // Fallback for environments where the get_company_overview RPC has not been applied yet.
   // Preserves exact previous semantics but keeps it out of the fast path.
   const supabase = createSupabaseAdminClient();
   const [bindingResult, recoveryResult, proposalResult, creditNoteCountResult, creditNoteAwaitingResult, queuedMessageCountResult, failedMessageResult, recentMessageResult] = await Promise.all([
     supabase.from("tally_connector_company_bindings").select("connector_id, expected_tally_company_guid, expected_tally_company_name, observed_tally_company_guid, observed_tally_company_name").eq("company_id", companyId).eq("is_active", true).maybeSingle(),
-    supabase.from("cash_discount_recovery_candidates").select("status, remaining_recovery").eq("company_id", companyId).eq("current_snapshot", true).in("status", ["action_required", "review_required", "posting"]),
-    supabase.from("discount_proposals").select("id, customer_id, status, calculated_discount_amount, latest_evaluated_at").eq("company_id", companyId).eq("scheme_type", "tod").order("updated_at", { ascending: false }).limit(250),
+    visibleResults(supabase.from("cash_discount_recovery_candidates").select("status, remaining_recovery").eq("company_id", companyId).eq("current_snapshot", true).in("status", ["action_required", "review_required", "posting"]), cutoff, "created_at"),
+    visibleResults(supabase.from("discount_proposals").select("id, customer_id, status, calculated_discount_amount, latest_evaluated_at").eq("company_id", companyId).eq("scheme_type", "tod").order("updated_at", { ascending: false }), cutoff, "latest_evaluated_at").limit(250),
     supabase.from("credit_note_postings").select("id", { count: "exact", head: true }).eq("company_id", companyId),
     supabase.from("credit_note_postings").select("id", { count: "exact", head: true }).eq("company_id", companyId).neq("status", "created_verified"),
     supabase.from("notification_messages").select("id", { count: "exact", head: true }).eq("company_id", companyId).eq("status", "queued"),
@@ -98,7 +99,9 @@ export async function GET(request: Request, context: RouteContext) {
     const { company } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
 
     // Serve from 10s in-memory cache before hitting PG
-    const cached = getCachedOverview(company.id);
+    const cutoff = await resultResetCutoff(company.id);
+    const cacheKey = `${company.id}:${cutoff ?? "original"}`;
+    const cached = getCachedOverview(cacheKey);
     if (cached) {
       return jsonWithCors(request, cached, {
         headers: { "Cache-Control": "private, max-age=10, stale-while-revalidate=20", "X-Cache": "HIT" },
@@ -108,10 +111,15 @@ export async function GET(request: Request, context: RouteContext) {
     const supabase = createSupabaseAdminClient();
 
     // Fast path: single PG round-trip via RPC (replaces 10 HTTP->PG hops + unbounded fetch)
+    if (cutoff) {
+      const data = await loadOverviewFallback(company.id, cutoff);
+      setCachedOverview(cacheKey, data);
+      return jsonWithCors(request, data, { headers: { "Cache-Control": "no-store" } });
+    }
     const { data: rpcData, error: rpcError } = await supabase.rpc("get_company_overview", { p_company_id: company.id });
 
     if (!rpcError && rpcData) {
-      setCachedOverview(company.id, rpcData);
+      setCachedOverview(cacheKey, rpcData);
       return jsonWithCors(request, rpcData, {
         headers: { "Cache-Control": "private, max-age=10, stale-while-revalidate=20", "X-Cache": "MISS" },
       });
@@ -130,7 +138,7 @@ export async function GET(request: Request, context: RouteContext) {
     }
 
     const fallback = await loadOverviewFallback(company.id);
-    setCachedOverview(company.id, fallback);
+    setCachedOverview(cacheKey, fallback);
     return jsonWithCors(request, fallback, {
       headers: { "Cache-Control": "private, max-age=10, stale-while-revalidate=20", "X-Cache": isMissingFunction ? "FALLBACK-MISSING-RPC" : "FALLBACK" },
     });

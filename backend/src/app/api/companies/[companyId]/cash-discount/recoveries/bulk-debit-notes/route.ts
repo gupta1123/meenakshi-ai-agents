@@ -2,6 +2,7 @@ import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/authorization";
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClientWithOptions } from "@/lib/supabase/admin";
+import { requireVisibleCdCandidate } from "@/lib/evaluation/result-visibility";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -22,6 +23,8 @@ export async function POST(request: Request, context: RouteContext) {
     const byId = new Map((candidates ?? []).map((candidate) => [candidate.id, candidate]));
     const results: Array<{ candidateId: string; status: "queued" | "skipped"; postingId?: string; error?: string }> = [];
     for (const candidateId of candidateIds) {
+      try { await requireVisibleCdCandidate(company.id, candidateId); }
+      catch (error) { results.push({ candidateId, status: "skipped", error: error instanceof Error ? error.message : "Result is unavailable." }); continue; }
       const candidate = byId.get(candidateId);
       if (!candidate || !candidate.current_snapshot || candidate.status !== "action_required" || Number(candidate.remaining_recovery) <= 0) {
         results.push({ candidateId, status: "skipped", error: "This recovery is no longer ready." });

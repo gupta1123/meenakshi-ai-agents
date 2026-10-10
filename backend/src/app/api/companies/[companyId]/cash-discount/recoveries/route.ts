@@ -2,6 +2,7 @@ import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/authorization";
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { resultResetCutoff, visibleResults } from "@/lib/evaluation/result-visibility";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 const recoveryFields = "id, source_run_id, evaluated_on, customer_name, invoice_number, invoice_date, bill_reference, net_invoice_amount, implied_gross_amount, amount_paid, granted_discount_percentage, earned_discount_percentage, recovery_required, already_recovered, remaining_recovery, missed_window_working_days, missed_window_deadline, next_window_working_days, next_window_percentage, status, reason_code, review_message, narration_checked, narration_mentioned, narration_matches, debit_note_references, updated_at";
@@ -32,6 +33,7 @@ export async function GET(request: Request, context: RouteContext) {
     // cursor = last id from previous page (keyset on remaining_recovery desc, id desc)
     const cursor = url.searchParams.get("cursor");
     const supabase = createSupabaseAdminClient();
+    const cutoff = await resultResetCutoff(company.id);
     // Several Cash Discount rules can be active; show one rule's results
     // (all versions of that rule) when the page selects it.
     const requestedRule = url.searchParams.get("ruleVersionId");
@@ -48,7 +50,8 @@ export async function GET(request: Request, context: RouteContext) {
         .eq("company_id", company.id).eq("current_snapshot", true)
         .in("status", ["action_required", "review_required", "posting"])
         .order("remaining_recovery", { ascending: false }).order("id", { ascending: false });
-      return ruleVersionIds ? query.in("rule_version_id", ruleVersionIds) : query;
+      const visible = visibleResults(query, cutoff, "created_at");
+      return ruleVersionIds ? visible.in("rule_version_id", ruleVersionIds) : visible;
     };
     const { data: cursorRow } = cursor && isUuid(cursor)
       ? await supabase.from("cash_discount_recovery_candidates").select("id").eq("id", cursor).eq("company_id", company.id).maybeSingle()
@@ -84,7 +87,8 @@ export async function GET(request: Request, context: RouteContext) {
       .order("evaluated_on", { ascending: false })
       .order("remaining_recovery", { ascending: false })
       .limit(250);
-    const priorRuleQuery = ruleVersionIds ? priorRuleBase.in("rule_version_id", ruleVersionIds) : priorRuleBase;
+    const visiblePrior = visibleResults(priorRuleBase, cutoff, "created_at");
+    const priorRuleQuery = ruleVersionIds ? visiblePrior.in("rule_version_id", ruleVersionIds) : visiblePrior;
     const postingsQuery = supabase
       .from("cash_discount_debit_note_postings")
       // note_kind: per-MT Cash Discount Credit Notes share this table (docs/CD_LOGIC.md).

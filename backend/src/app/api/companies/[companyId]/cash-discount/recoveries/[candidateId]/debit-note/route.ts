@@ -3,6 +3,7 @@ import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/autho
 import { isUuid } from "@/lib/security";
 import { readIdempotencyKey } from "@/lib/tally/contracts";
 import { createSupabaseAdminClientWithOptions } from "@/lib/supabase/admin";
+import { requireVisibleCdCandidate } from "@/lib/evaluation/result-visibility";
 
 type RouteContext = { params: Promise<{ companyId: string; candidateId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -18,6 +19,7 @@ export async function POST(request: Request, context: RouteContext) {
     const idempotencyKey = readIdempotencyKey(request);
     if (!idempotencyKey) return jsonWithCors(request, { error: "Idempotency-Key header is required." }, { status: 400 });
     const { company, userId } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
+    await requireVisibleCdCandidate(company.id, candidateId);
     const supabase = createSupabaseAdminClientWithOptions({ timeoutMs: 12_000 });
     const { data: candidate, error: candidateError } = await supabase.from("cash_discount_recovery_candidates")
       // The posting RPC owns the authoritative Tally-ledger validation. Do

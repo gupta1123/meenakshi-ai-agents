@@ -2,6 +2,7 @@ import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/authorization";
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { resultResetCutoff, visibleResults } from "@/lib/evaluation/result-visibility";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -16,15 +17,16 @@ export async function GET(request: Request, context: RouteContext) {
     if (!isUuid(companyId)) return jsonWithCors(request, { error: "Invalid company id." }, { status: 400 });
     const { company } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
     const supabase = createSupabaseAdminClient();
-    const { data: runs, error: runError } = await supabase.from("evaluation_runs")
+    const cutoff = await resultResetCutoff(company.id);
+    const { data: runs, error: runError } = await visibleResults(supabase.from("evaluation_runs")
       .select("id, status, scheme_version_id, period_start, period_end, completed_at, created_at, summary")
       .eq("company_id", company.id).eq("status", "completed").eq("summary->>cdDiscountBasis", "amount_per_tonne")
-      .order("completed_at", { ascending: false }).limit(1);
+      .order("completed_at", { ascending: false }), cutoff, "created_at").limit(1);
     if (runError) throw runError;
     const run = runs?.[0] ?? null;
     const [candidates, notes] = await Promise.all([
-      supabase.from("cash_discount_recovery_candidates").select("id, invoice_tally_guid, status, remaining_recovery, settlement_category")
-        .eq("company_id", company.id).eq("current_snapshot", true).eq("candidate_kind", "settlement"),
+      visibleResults(supabase.from("cash_discount_recovery_candidates").select("id, invoice_tally_guid, status, remaining_recovery, settlement_category")
+        .eq("company_id", company.id).eq("current_snapshot", true).eq("candidate_kind", "settlement"), cutoff, "created_at"),
       supabase.from("cash_discount_debit_note_postings").select("id, status, amount, verified_voucher_number, verified_at, failure_reason, created_at, updated_at, invoice:debit_note_snapshot->sourceInvoice->>guid")
         .eq("company_id", company.id).eq("note_kind", "credit_note").order("created_at", { ascending: false }).limit(5000),
     ]);
