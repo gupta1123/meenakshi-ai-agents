@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { busyTallySnapshot, recordVerifiedCompany, serializeTallyRequest, tallyActivity, tallyTaskSignal, tryAcquireTallyTask } from "../src/tally/read-coordinator.mjs";
+import { acquireTallyReadTask, busyTallySnapshot, recordVerifiedCompany, serializeTallyRequest, tallyActivity, tallyTaskSignal, tryAcquireTallyTask } from "../src/tally/read-coordinator.mjs";
 import { postTallyXml } from "../src/tally/xml.mjs";
 
 test("a local CD/TOD task excludes cloud commands and probes until completion", async () => {
@@ -85,4 +85,79 @@ test("busy heartbeat distinguishes cached company observations from fresh verifi
   assert.equal(snapshot.error, null);
   assert.equal(busyTallySnapshot({}, null).companyLoaded, false);
   assert.equal(busyTallySnapshot({}, { companyLoaded: false, activeCompany: known }).activeCompany, null);
+});
+
+for (const backgroundName of ["connection_check", "command_poll"]) {
+  test(`a calculation waits for ${backgroundName} and takes priority over the next probe`, async () => {
+    const url = `http://${backgroundName}.example:9000`;
+    const background = tryAcquireTallyTask(url, backgroundName);
+    const waiting = acquireTallyReadTask(`${url}/`, "turnover_discount");
+    assert.equal(await acquireTallyReadTask(url, "cash_discount"), null);
+    assert.equal(tallyActivity(url).name, backgroundName);
+    background.release();
+    assert.equal(tryAcquireTallyTask(url, "connection_check"), null);
+    const calculation = await waiting;
+    assert.equal(tallyActivity(url).name, "turnover_discount");
+    // A duplicate release must not release the new owner.
+    background.release();
+    assert.equal(tryAcquireTallyTask(url, "cloud_command"), null);
+    calculation.release();
+    assert.equal(tallyActivity(url), null);
+  });
+}
+
+test("real calculations and cloud jobs reject other reads immediately", async () => {
+  const url = "http://real-work.example:9000";
+  for (const name of ["cash_discount", "turnover_discount", "cloud_command", "einvoice_read"]) {
+    const owner = tryAcquireTallyTask(url, name);
+    assert.equal(await acquireTallyReadTask(url, "turnover_discount"), null);
+    owner.release();
+  }
+});
+
+test("claiming a real cloud job rejects the waiting read without releasing cloud ownership", async () => {
+  const url = "http://claimed-command.example:9000";
+  const poll = tryAcquireTallyTask(url, "command_poll");
+  const waiting = acquireTallyReadTask(url, "turnover_discount");
+  poll.setName("cloud_command");
+  assert.equal(await waiting, null);
+  assert.equal(tallyActivity(url).name, "cloud_command");
+  assert.equal(tryAcquireTallyTask(url, "cash_discount"), null);
+  poll.release();
+  const retry = await acquireTallyReadTask(url, "cash_discount");
+  assert.ok(retry); retry.release();
+});
+
+test("a slow background check has a bounded wait and keeps its own reservation", async () => {
+  const url = "http://slow-check.example:9000";
+  const probe = tryAcquireTallyTask(url, "connection_check");
+  assert.equal(await acquireTallyReadTask(url, "turnover_discount", undefined, { waitMs: 10 }), null);
+  assert.equal(tallyActivity(url).name, "connection_check");
+  probe.release();
+  const retry = await acquireTallyReadTask(url, "turnover_discount");
+  assert.ok(retry); retry.release();
+});
+
+test("aborting a queued read removes it without interrupting the background check", async () => {
+  const url = "http://queued-cancellation.example:9000";
+  const probe = tryAcquireTallyTask(url, "connection_check");
+  const controller = new AbortController();
+  const waiting = acquireTallyReadTask(url, "turnover_discount", controller.signal);
+  const rejected = assert.rejects(waiting, { name: "AbortError" });
+  controller.abort(); await rejected;
+  assert.equal(tallyActivity(url).name, "connection_check");
+  probe.release();
+  const next = tryAcquireTallyTask(url, "connection_check");
+  assert.ok(next); next.release();
+  await assert.rejects(acquireTallyReadTask(url, "turnover_discount", controller.signal), { name: "AbortError" });
+  assert.equal(tallyActivity(url), null);
+});
+
+test("a failed background check still hands ownership to the waiting calculation", async () => {
+  const url = "http://failed-check.example:9000";
+  const probe = tryAcquireTallyTask(url, "connection_check");
+  const waiting = acquireTallyReadTask(url, "turnover_discount");
+  await assert.rejects(probe.run(async () => { throw new Error("Probe failed"); }), /Probe failed/);
+  const next = await waiting;
+  assert.ok(next); next.release();
 });

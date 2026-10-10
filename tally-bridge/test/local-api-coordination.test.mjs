@@ -35,6 +35,7 @@ test("overlapping CD/TOD/einvoice calls are rejected; health stays responsive wi
   await reading;
   for (const path of ["/v1/turnover-discount", "/v1/cash-discount", "/v1/einvoice"]) {
     const response = await post(base, path); assert.equal(response.status, 409);
+    assert.equal((await (await fetch(`${base}/v1/progress`)).json()).progress.done, 1);
   }
   const health = await fetch(`${base}/health`);
   assert.equal(health.status, 503); assert.equal((await health.json()).busy, true);
@@ -94,4 +95,79 @@ test("successful CD checks clear progress just like TOD checks", async (t) => {
   assert.equal(response.status, 200);
   assert.equal(tallyActivity(config.tallyUrl), null);
   assert.equal((await (await fetch(`${base}/v1/progress`)).json()).progress, null);
+});
+
+for (const backgroundName of ["connection_check", "command_poll"]) {
+  test(`a TOD request waits for ${backgroundName}, then reads the original body exactly once`, async (t) => {
+    let probes = 0, reads = 0;
+    const { base, config } = await setup(t, {
+      probeCompany: async () => { probes++; return company; },
+      fetchTodEvidence: async () => { reads++; return { customerAggregates: [] }; },
+    });
+    const background = tryAcquireTallyTask(config.tallyUrl, backgroundName);
+    t.after(() => background.release());
+    const response = post(base, "/v1/turnover-discount");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(probes, 0);
+    assert.equal(reads, 0);
+    assert.equal((await post(base, "/v1/cash-discount")).status, 409);
+    background.release();
+    assert.equal((await response).status, 200);
+    assert.equal(probes, 1);
+    assert.equal(reads, 1);
+    assert.equal(tallyActivity(config.tallyUrl), null);
+  });
+}
+
+test("a CD request also waits behind a brief connection check", async (t) => {
+  let reads = 0;
+  const { base, config } = await setup(t, { fetchCdEvidence: async () => { reads++; return { invoices: [] }; } });
+  const background = tryAcquireTallyTask(config.tallyUrl, "connection_check");
+  t.after(() => background.release());
+  const response = post(base, "/v1/cash-discount", { expectedCompany: company, evaluatedOn: "2026-07-01", rule: { slabs: [], calendar: { activeHolidayDates: [], nonWorkingIsoWeekdays: [7] } } });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(reads, 0);
+  background.release();
+  assert.equal((await response).status, 200);
+  assert.equal(reads, 1);
+});
+
+test("a waiting browser request is rejected when the poll claims an actual cloud job", async (t) => {
+  const { base, config } = await setup(t, { probeCompany: async () => assert.fail("claimed cloud job owns Tally") });
+  const poll = tryAcquireTallyTask(config.tallyUrl, "command_poll");
+  t.after(() => poll.release());
+  const response = post(base, "/v1/turnover-discount");
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  poll.setName("cloud_command");
+  assert.equal((await response).status, 409);
+  assert.equal(tallyActivity(config.tallyUrl).name, "cloud_command");
+  assert.equal((await (await fetch(`${base}/v1/progress`)).json()).progress, null);
+});
+
+test("closing a queued browser request prevents a delayed calculation from starting", async (t) => {
+  const { base, config } = await setup(t, { probeCompany: async () => assert.fail("cancelled request must never probe Tally") });
+  const background = tryAcquireTallyTask(config.tallyUrl, "connection_check");
+  t.after(() => background.release());
+  const controller = new AbortController();
+  const request = post(base, "/v1/turnover-discount", body, controller.signal);
+  const rejected = assert.rejects(request, { name: "AbortError" });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  controller.abort(); await rejected;
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(tallyActivity(config.tallyUrl).name, "connection_check");
+  background.release();
+  assert.equal(tallyActivity(config.tallyUrl), null);
+  const next = tryAcquireTallyTask(config.tallyUrl, "cloud_command");
+  assert.ok(next); next.release();
+});
+
+test("a queued read still verifies the actual company before reading any evidence", async (t) => {
+  const { base, config } = await setup(t, { fetchTodEvidence: async () => assert.fail("wrong company must never be read") });
+  const background = tryAcquireTallyTask(config.tallyUrl, "connection_check");
+  t.after(() => background.release());
+  const response = post(base, "/v1/turnover-discount", { ...body, expectedCompany: { name: "Wrong", guid: "wrong-guid" } });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  background.release();
+  assert.equal((await response).status, 422);
+  assert.equal(tallyActivity(config.tallyUrl), null);
 });

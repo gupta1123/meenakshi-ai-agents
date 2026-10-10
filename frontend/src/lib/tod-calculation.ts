@@ -1,4 +1,37 @@
 type RunStatus = { status: string; error_summary?: string | null };
+const sleepDefault = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+export function isTransientTodReadError(cause: unknown) {
+  if (!(cause instanceof Error) || cause.name === "AbortError") return false;
+  if ("status" in cause && typeof cause.status === "number") {
+    return [408, 429].includes(cause.status) || (cause.status >= 500 && cause.status < 600);
+  }
+  return cause.name === "TimeoutError" || /failed to fetch|fetch failed|networkerror|network error|load failed/i.test(cause.message);
+}
+
+// Use ONLY for GET/read operations. Never retry starting a Tally calculation
+// or saving its result: a failed response does not prove the write failed.
+export async function retryTodRead<T>(
+  read: () => Promise<T>, sleep = sleepDefault, onRetry: () => void = () => {},
+) {
+  for (let attempt = 0; ; attempt += 1) {
+    try { return await read(); }
+    catch (cause) {
+      if (!isTransientTodReadError(cause) || attempt >= 2) throw cause;
+      onRetry();
+      await sleep(2_000 * 2 ** attempt);
+    }
+  }
+}
+
+// Display refresh is not part of calculation success. Confirmed saved results
+// must not be counted as failed or stop the next period because a list GET failed.
+export async function refreshSavedTodResults(refresh: () => Promise<void>, onFailure: (cause: unknown) => void) {
+  try { await refresh(); return true; }
+  catch (cause) { onFailure(cause); return false; }
+}
+
+export type TodBatchProgress = { index: number; total: number; completed: number; start: string; end: string };
 
 // A failed browser request does not prove that the connector is outdated.
 // The original read may still be running, so never start a second cloud read
@@ -20,11 +53,17 @@ export function tallyReadErrorMessage(value: string | null | undefined): string 
 export async function waitForTodRun<T extends RunStatus>(
   read: () => Promise<T>,
   onStatus: (run: T) => void,
-  sleep: (milliseconds: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  sleep: (milliseconds: number) => Promise<void> = sleepDefault,
+  onReadRetry: () => void = () => {},
 ) {
   for (let attempt = 0; attempt <= 40; attempt += 1) {
     if (attempt) await sleep(30_000);
-    const run = await read();
+    let run: T;
+    try { run = await retryTodRead(read, sleep, onReadRetry); }
+    catch (cause) {
+      if (!isTransientTodReadError(cause)) throw cause;
+      throw new Error("Could not confirm whether this period finished saving. It may still finish in the background. Check Run history before calculating again.");
+    }
     onStatus(run);
     if (["failed", "completed_with_issues", "cancelled"].includes(run.status)) {
       throw new Error(tallyReadErrorMessage(run.error_summary) ?? "This calculation did not finish. Review Calculation history before starting another check.");
@@ -36,14 +75,17 @@ export async function waitForTodRun<T extends RunStatus>(
 
 export async function runTodPeriodsInOrder<T extends { start: string; end: string }>(
   periods: T[], calculate: (period: T) => Promise<void>, describeError: (cause: unknown) => string,
+  onProgress: (progress: TodBatchProgress) => void = () => {},
 ) {
   let completed = 0;
   for (const period of periods) {
+    onProgress({ index: completed + 1, total: periods.length, completed, start: period.start, end: period.end });
     try { await calculate(period); }
     catch (cause) {
       throw new Error(`${completed} of ${periods.length} periods completed. Stopped at ${period.start} to ${period.end}. ${describeError(cause)} Remaining periods were not started.`);
     }
     completed += 1;
+    onProgress({ index: completed, total: periods.length, completed, start: period.start, end: period.end });
   }
 }
 

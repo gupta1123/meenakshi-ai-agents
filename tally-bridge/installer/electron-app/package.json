@@ -1,7 +1,7 @@
 {
   "name": "meenakshi-tally-connector-shell",
   "private": true,
-  "version": "0.3.6",
+  "version": "0.3.7",
   "type": "module",
   "main": "main.mjs",
   "scripts": {

@@ -7,7 +7,7 @@ import { evaluateCashDiscountSettlements } from "./local-cd-settlement-evaluator
 import { evaluateLocalTurnoverDiscount } from "./local-tod-evaluator.mjs";
 import { probeActiveCompany } from "./tally/company-probe.mjs";
 import { readNoteEInvoice } from "./tally/einvoice.mjs";
-import { tallyActivity, tryAcquireTallyTask, recordVerifiedCompany, TALLY_BUSY_MESSAGE } from "./tally/read-coordinator.mjs";
+import { acquireTallyReadTask, tallyActivity, tryAcquireTallyTask, recordVerifiedCompany, TALLY_BUSY_MESSAGE } from "./tally/read-coordinator.mjs";
 
 export const LOCAL_TALLY_PORT = 3219;
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
@@ -128,13 +128,15 @@ export function startLocalApi(config, { port = LOCAL_TALLY_PORT, probeCompany = 
       return;
     }
     const cancellation = new AbortController();
-    const task = tryAcquireTallyTask(config.tallyUrl, isCashDiscount ? "cash_discount" : "turnover_discount", cancellation.signal);
-    if (!task) { respond(response, 409, { error: TALLY_BUSY_MESSAGE }, origin, config); return; }
     const onClose = () => { if (!response.writableEnded) cancellation.abort(); };
     response.on("close", onClose);
     const startedAt = performance.now();
+    let task = null;
     try {
+      task = await acquireTallyReadTask(config.tallyUrl, isCashDiscount ? "cash_discount" : "turnover_discount", cancellation.signal);
+      if (!task) { respond(response, 409, { error: TALLY_BUSY_MESSAGE }, origin, config); return; }
       await task.run(async () => {
+        cancellation.signal.throwIfAborted();
         progress = { task: isCashDiscount ? "cash_discount" : "turnover_discount", stage: "reading", done: 0, total: null, from: null, to: null, startedAt: new Date().toISOString() };
         const body = await readJson(request);
         const expectedCompany = body.expectedCompany && typeof body.expectedCompany === "object" ? body.expectedCompany : {};
@@ -163,9 +165,10 @@ export function startLocalApi(config, { port = LOCAL_TALLY_PORT, probeCompany = 
         respond(response, 200, { ...calculation, evidence, durationMs: Math.round(performance.now() - startedAt) }, origin, config);
       });
     } catch (error) {
-      respond(response, 422, { error: error instanceof Error ? error.message : String(error), durationMs: Math.round(performance.now() - startedAt) }, origin, config);
+      if (!response.destroyed) respond(response, 422, { error: error instanceof Error ? error.message : String(error), durationMs: Math.round(performance.now() - startedAt) }, origin, config);
     } finally {
-      progress = null;
+      // A rejected second request must not erase the first read's progress.
+      if (task) progress = null;
       response.off("close", onClose);
     }
   });

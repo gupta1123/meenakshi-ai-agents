@@ -182,11 +182,12 @@ function tallyCompaniesMatch(expectedCompany, activeCompany) {
 
 async function processOneCommand(config, activeCompany) {
   if (!activeCompany) return false;
-  const task = tryAcquireTallyTask(config.tallyUrl, "cloud_command");
+  const task = tryAcquireTallyTask(config.tallyUrl, "command_poll");
   if (!task) return false;
   return task.run(async () => {
     const { command } = await claimNextCommand(config);
     if (!command) return false;
+    task.setName("cloud_command");
     commandActivity(command, "running");
     const lease = commandLease(config, command, activeCompany);
     try {

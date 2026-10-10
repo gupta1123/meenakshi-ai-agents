@@ -11,7 +11,7 @@ import { userFacingDetail, userFacingError, userLabel } from "@/lib/user-copy";
 import { supabase } from "@/lib/supabase";
 import { runLocalCashDiscount, runLocalTurnoverDiscount, type LocalCdBootstrap, type LocalCdInvoiceCheck, type LocalCdRow, type LocalTodBootstrap, type LocalTodRow } from "@/lib/local-tally";
 import { assertSelectedTodPeriod, loadTodPeriodResults, type TodPeriodSelection } from "@/lib/tod-results";
-import { canUseTodCloudFallback, runExclusiveTodCalculation, runTodPeriodsInOrder, waitForTodRun } from "@/lib/tod-calculation";
+import { canUseTodCloudFallback, refreshSavedTodResults, retryTodRead, runExclusiveTodCalculation, runTodPeriodsInOrder, waitForTodRun, type TodBatchProgress } from "@/lib/tod-calculation";
 
 import { AppShell, WorkspacePageHeader } from "./app-shell";
 import { useCompany } from "./company-context";
@@ -608,6 +608,9 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
   const [localTodBootstrap, setLocalTodBootstrap] = useState<LocalTodBootstrap | null>(null);
   const [localTodRows, setLocalTodRows] = useState<Proposal[]>([]);
   const [savingTod, setSavingTod] = useState(false);
+  const [todBatchProgress, setTodBatchProgress] = useState<(TodBatchProgress & { state: "running" | "completed" | "stopped" }) | null>(null);
+  const [todReadWarning, setTodReadWarning] = useState<string | null>(null);
+  const [todResultsWarning, setTodResultsWarning] = useState<string | null>(null);
   // Held for the entire selected-period or all-due-period operation, even
   // when the drawer closes or a cloud fallback takes over.
   const todCalculationInFlight = useRef(false);
@@ -772,7 +775,24 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     };
   };
 
-  const calculateTodPeriod = async (selection: TodPeriodSelection) => {
+  const refreshCompletedTodPeriod = async (selection: TodPeriodSelection) => {
+    setTodResultsWarning(null);
+    return refreshSavedTodResults(async () => {
+      await refresh();
+      const loaded = await retryTodRead(() => loadPeriodRows(selection.start, selection.end));
+      setPeriodRows(loaded);
+      setPeriodRowsOwner(company.id);
+      setSelectedTodPeriodKey(`${selection.start}:${selection.end}`);
+      setStatusFilter("all");
+      setQuery("");
+      setLocalTodRows([]);
+      setShowEvaluationQueue(false);
+    }, () => {
+      setTodResultsWarning("The calculation is saved, but the customer list could not be refreshed. Your saved results are unchanged. Open View results in Run history to load them again.");
+      setShowEvaluationQueue(true);
+    });
+  };
+  const calculateTodPeriod = async (selection: TodPeriodSelection, refreshResults = true) => {
     const { asOfDate, start: periodStart, end: periodEnd, selectedSchemeVersionId } = selection;
     setError(null);
     setSelectedHistoryRun(null);
@@ -780,7 +800,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     setCalculationStartedAt(new Date().toISOString());
     // A lock preserves a rule only for the exact selected period, never an
     // overlapping quarter with different boundaries.
-    const bootstrap = await preloadLocalTodBootstrap(selection);
+    const bootstrap = await retryTodRead(() => preloadLocalTodBootstrap(selection));
     lastSavedPeriodApplied.current = company.id;
     setSelectedTodPeriodKey(`${periodStart}:${periodEnd}`);
     const token = await accessToken();
@@ -829,33 +849,55 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     // BOTH paths must finish saving before the batch advances. Polling is
     // short; the Tally export itself never runs inside a Heroku web request.
     await waitForTodRun(async () => {
-      const saved = await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/runs/${response.evaluationRun.id}?detail=compact`, { cache: "no-store" });
+      const currentToken = await accessToken();
+      if (!currentToken) throw new Error("Your session has ended. Please sign in again.");
+      const saved = await apiRequest<{ evaluationRun: EvaluationRun }>(currentToken, `/api/companies/${company.id}/evaluations/runs/${response.evaluationRun.id}?detail=compact`, { cache: "no-store" });
       return saved.evaluationRun;
     }, (run) => {
+      setTodReadWarning(null);
       setLatestRun(run);
       if (["failed", "completed_with_issues", "cancelled"].includes(run.status)) {
         setLocalTodRows([]);
         setShowEvaluationQueue(true);
       }
-    });
-    await refresh();
-    setPeriodRows(await loadPeriodRows(periodStart, periodEnd));
-    setPeriodRowsOwner(company.id);
-    setSelectedTodPeriodKey(`${periodStart}:${periodEnd}`);
-    setStatusFilter("all");
-    setQuery("");
-    setLocalTodRows([]);
-    setShowEvaluationQueue(false);
-    setNotice("Turnover Discount results are saved. Open any customer to view the calculation.");
+    }, undefined, () => setTodReadWarning("Temporarily unable to check saving progress. Retrying the status check; no new calculation is being started."));
+    if (refreshResults) {
+      await refreshCompletedTodPeriod(selection);
+      setNotice("Turnover Discount results are saved. Open any customer to view the calculation.");
+    }
   };
   const withTodCalculation = async (calculate: () => Promise<void>) => {
     await runExclusiveTodCalculation(todCalculationInFlight, calculate, setSavingTod);
   };
-  const runLocalTodCalculation = (selection: TodPeriodSelection) => withTodCalculation(() => calculateTodPeriod(selection));
+  const runLocalTodCalculation = (selection: TodPeriodSelection) => withTodCalculation(async () => {
+    setTodBatchProgress(null);
+    setTodReadWarning(null);
+    setTodResultsWarning(null);
+    await calculateTodPeriod(selection);
+  });
   const runAllDueTodCalculations = async (periods: TodPeriodSelection[]) => {
-    await withTodCalculation(() => runTodPeriodsInOrder(periods, calculateTodPeriod,
-      (cause) => userFacingError(cause, "The Tally check did not finish. Check the connection and Calculation history.")));
-    setNotice(`All ${periods.length} due periods are calculated and saved.`);
+    await withTodCalculation(async () => {
+      setTodReadWarning(null);
+      setTodResultsWarning(null);
+      try {
+        // The batch owns completion. History polling must not refresh/hide the
+        // queue between periods; display reads happen once after the batch.
+        await runTodPeriodsInOrder(periods, (period) => calculateTodPeriod(period, false),
+          (cause) => userFacingError(cause, "The Tally check did not finish. Check the connection and Calculation history."),
+          (progress) => {
+            setTodBatchProgress({ ...progress, state: "running" });
+            setShowEvaluationQueue(true);
+            setNotice(`Period ${progress.index} of ${progress.total}: ${formatBusinessDate(progress.start)} – ${formatBusinessDate(progress.end)}. ${progress.completed} saved.`);
+          });
+        setTodBatchProgress((progress) => progress ? { ...progress, state: "completed" } : null);
+        if (periods.length) await refreshCompletedTodPeriod(periods[periods.length - 1]);
+        setNotice(`All ${periods.length} due periods are calculated and saved.`);
+      } catch (cause) {
+        setTodReadWarning(null);
+        setTodBatchProgress((progress) => progress ? { ...progress, state: "stopped" } : null);
+        throw cause;
+      }
+    });
   };
   const statuses = Array.from(new Set(allRows.map((proposal) => proposal.status)));
   const tonnes = (proposal: Proposal) => Number(proposal.eligible_tonnes ?? "0") || 0;
@@ -948,6 +990,9 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     return "View details";
   };
   return <><WorkspacePageHeader eyebrow="" title={title} detail="" />
+    {scheme === "tod" && todBatchProgress && <InlineMessage tone={todBatchProgress.state === "stopped" ? "warning" : "info"}><span role="status" aria-live="polite">{todBatchProgress.state === "completed" ? `All ${todBatchProgress.total} due periods are calculated and saved.` : todBatchProgress.state === "stopped" ? `Batch stopped after ${todBatchProgress.completed} of ${todBatchProgress.total} periods were saved. Check the error and Run history before trying again.` : `Period ${todBatchProgress.index} of ${todBatchProgress.total}: ${formatBusinessDate(todBatchProgress.start)} – ${formatBusinessDate(todBatchProgress.end)}. ${todBatchProgress.completed} saved. The next period starts automatically after this one is saved. Keep this page open.`}</span></InlineMessage>}
+    {scheme === "tod" && todReadWarning && <InlineMessage tone="warning">{todReadWarning}</InlineMessage>}
+    {scheme === "tod" && todResultsWarning && <InlineMessage tone="warning">{todResultsWarning}</InlineMessage>}
     {scheme === "tod" ? <div className="tod-overview" aria-label="Turnover Discount summary"><div className="tod-overview-meta"><div className="tod-period-context"><StatusBadge status={savingTod ? "saving" : historicalTodView ? "historical" : "ready"} />{todPeriodOptions.length > 1 && !selectedHistoryRun
           ? <select className="tod-period-select" aria-label="Turnover Discount period" value={selectedTodPeriodKey ?? todPeriodOptions[0]} onChange={(event) => { setSelectedTodPeriodKey(event.target.value); setQuery(""); }}>{todPeriodOptions.map((key) => { const [start, end] = key.split(":"); return <option key={key} value={key}>{formatBusinessDate(start)} – {formatBusinessDate(end)} · {periodHasEnded(end) ? "ended" : "in progress"}</option>; })}</select>
           : <strong>{periodLabel}</strong>}<span className={periodEnded ? "is-ready" : ""}><CircleAlert size={13} />{savingTod ? "Checking fresh Tally data…" : historicalTodView ? "Earlier-rule results · read-only" : periodKeys.size > 1 ? "Includes completed and active periods" : periodEnded ? "Period ended" : periodRow?.period_end ? `Projected until ${formatBusinessDate(periodRow.period_end)}` : "No period calculated yet"}</span></div><div className="tod-overview-actions"><span>{savingTod && calculationStartedAt ? `Started ${formatDate(calculationStartedAt)}` : lastChecked ? `Calculated ${formatDate(lastChecked)}` : "Not calculated yet"}</span><Button className="button-secondary" disabled={savingTod} onClick={() => { setSelectedHistoryRun(null); setHistoryTodRows(null); setNotice(null); setEvaluationOpen(true); }}><RefreshCw size={15} />{savingTod ? "Checking Tally…" : "Calculate period"}</Button><div className="segmented tod-inline-tabs" aria-label={`${title} views`}><button className={!showEvaluationQueue ? "selected" : ""} onClick={() => { setSelectedHistoryRun(null); setHistoryTodRows(null); setNotice(null); setShowEvaluationQueue(false); void refresh(); }}>Customers</button><button className={showEvaluationQueue ? "selected" : ""} onClick={() => setShowEvaluationQueue(true)}>Run history</button></div></div></div>{!showEvaluationQueue && allRows.length > 0 && <div className="cd-action-cards tod-action-cards" role="tablist" aria-label="Turnover Discount customers">{todBuckets.map((bucket) => {
@@ -1002,6 +1047,9 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       }
       setShowEvaluationQueue(false);
     }} onSettled={async (run) => {
+      // A selected-period/batch operation already polls and owns this run.
+      // Avoid a second completion handler changing views during the hand-off.
+      if (todCalculationInFlight.current) return;
       await refresh();
       setLatestRun(null);
       if (run.status === "completed") {
