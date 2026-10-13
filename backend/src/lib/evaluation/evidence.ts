@@ -351,20 +351,29 @@ async function chooseCdRule(companyId: string, customer: CustomerEvidence, invoi
 
 async function chooseTodRule(companyId: string, customer: CustomerEvidence, asOfDate: string) {
   const supabase = createSupabaseAdminClient();
-  const { data: locks, error: lockError } = await supabase
-    .from("tod_customer_period_rule_locks")
-    .select("scheme_version_id, period_start, period_end")
-    .eq("company_id", companyId).eq("customer_id", customer.id)
-    .lte("period_start", asOfDate).gte("period_end", asOfDate);
-  if (lockError) throw lockError;
-  if ((locks ?? []).length > 1) throw new Error("More than one immutable TOD rule lock matches this customer and date.");
-  if (locks?.[0]) {
-    return { rule: await loadRule(companyId, locks[0].scheme_version_id) as FrozenTodRule, periodStart: locks[0].period_start, periodEnd: locks[0].period_end, locked: true };
-  }
+  const candidates: { rule: FrozenTodRule; period: { start: string; end: string } }[] = [];
   for (const id of await activeRuleIds(companyId, "tod", asOfDate)) {
     const rule = await loadRule(companyId, id) as FrozenTodRule;
     const period = periodContaining(rule.periodAnchorDate, rule.periodMonths, asOfDate);
-    if (period && resolveRuleCoverage(rule, customer, asOfDate).state !== "not_in_scheme") return { rule, periodStart: period.start, periodEnd: period.end, locked: false };
+    if (period) candidates.push({ rule, period });
+  }
+  // Older misaligned locks can overlap this date. Only a lock for the exact
+  // current period applies, so those old locks never block a calculation.
+  if (candidates.length) {
+    const { period } = candidates[0];
+    const { data: locks, error: lockError } = await supabase
+      .from("tod_customer_period_rule_locks")
+      .select("scheme_version_id, period_start, period_end")
+      .eq("company_id", companyId).eq("customer_id", customer.id)
+      .eq("period_start", period.start).eq("period_end", period.end);
+    if (lockError) throw lockError;
+    if ((locks ?? []).length > 1) throw new Error("More than one immutable TOD rule lock matches this customer period.");
+    if (locks?.[0]) {
+      return { rule: await loadRule(companyId, locks[0].scheme_version_id) as FrozenTodRule, periodStart: locks[0].period_start, periodEnd: locks[0].period_end, locked: true };
+    }
+  }
+  for (const { rule, period } of candidates) {
+    if (resolveRuleCoverage(rule, customer, asOfDate).state !== "not_in_scheme") return { rule, periodStart: period.start, periodEnd: period.end, locked: false };
   }
   return null;
 }
@@ -383,7 +392,7 @@ export async function loadLiveTodBatchContext(run: EvaluationRunRecord) {
     supabase.from("customer_groups").select("id, tally_group_guid, name, is_available, parent_group_id").eq("company_id", run.company_id),
     supabase.from("tod_customer_period_rule_locks")
       .select("customer_id, scheme_version_id, period_start, period_end")
-      .eq("company_id", run.company_id).lte("period_start", asOfDate).gte("period_end", asOfDate),
+      .eq("company_id", run.company_id).eq("period_start", period.start).eq("period_end", period.end),
   ]);
   if (groupError || lockError) throw groupError ?? lockError;
   const groupsById = new Map((groups ?? []).map((group) => [group.id, group]));
