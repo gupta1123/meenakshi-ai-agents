@@ -137,3 +137,5 @@
   .spin { animation-duration: 3s; }
   .advanced summary svg { transition: none; }
 }
+.olderToggle { justify-self: start; padding: 0; border: 0; color: var(--ink-soft); background: none; font-size: .72rem; font-weight: 650; text-decoration: underline; cursor: pointer; }
+.olderToggle:hover { color: var(--ink); }

@@ -25,4 +25,6 @@ export const TALLY_OUTBOX_EVENT_TYPES = [
 ] as const;
 
 export const BRIDGE_HEARTBEAT_STALE_MS = 90_000;
-export const TALLY_SYNC_STALE_MS = 24 * 60 * 60 * 1_000;
+// Tally master data (customers, groups, products) changes rarely: a sync counts
+// as current for 30 days. Refresh from the Tally page when something changes.
+export const TALLY_SYNC_STALE_MS = 30 * 24 * 60 * 60 * 1_000;

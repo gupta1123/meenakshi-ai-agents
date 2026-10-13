@@ -9,7 +9,7 @@ const rule = {
   id: "rule-1",
   cdDiscountBasis: "amount_per_tonne",
   calendar,
-  segments: [{ label: "3 working days", allowedWorkingDays: 3, amountPerTonne: "500" }],
+  segments: [{ label: "3 days", allowedWorkingDays: 3, amountPerTonne: "500" }],
   customerSegments: { "cust-1": 0 },
 };
 // ₹1,00,000 invoice of 10 MT → discount ₹5,000; discounted target ₹95,000.
@@ -29,9 +29,18 @@ test("the backend's copy of the settlement evaluator is identical", async () => 
   assert.equal(backendText, await readFile(here, "utf8"), "Copy tally-bridge/src/local-cd-settlement-evaluator.mjs to backend/src/lib/evaluation/cd-settlement.mjs");
 });
 
-test("working-day deadline skips Sundays and holidays", () => {
-  // Fri 3 Oct → Sat 4 (1), Sun 5 skipped, Mon 6 (2), Tue 7 holiday, Wed 8 (3).
-  assert.equal(workingDayDeadline(calendar, "2025-10-03", 3), "2025-10-08");
+test("deadline counts every day and moves only when it lands on a Sunday or holiday", () => {
+  const calendar = { nonWorkingIsoWeekdays: [7], activeHolidayDates: ["2025-10-20"] };
+  // Fri 3 Oct + 3 days = Mon 6 Oct (the Sunday in between still counts).
+  assert.equal(workingDayDeadline(calendar, "2025-10-03", 3), "2025-10-06");
+  // Thu 2 Oct + 3 days = Sun 5 Oct -> moves to Mon 6 Oct.
+  assert.equal(workingDayDeadline(calendar, "2025-10-02", 3), "2025-10-06");
+  // Fri 17 Oct + 3 days = Mon 20 Oct (Deepavali) -> Tue 21 Oct.
+  assert.equal(workingDayDeadline(calendar, "2025-10-17", 3), "2025-10-21");
+  // Sun 19 + holiday 20 in a row: Thu 16 Oct + 3 = Sun 19 -> Tue 21 Oct.
+  assert.equal(workingDayDeadline(calendar, "2025-10-16", 3), "2025-10-21");
+  // 10 days: Wed 1 Oct + 10 = Sat 11 Oct (a working day, unchanged).
+  assert.equal(workingDayDeadline(calendar, "2025-10-01", 10), "2025-10-11");
 });
 
 test("GST Credit Note last date is 30 November after the financial year", () => {
@@ -39,27 +48,36 @@ test("GST Credit Note last date is 30 November after the financial year", () => 
   assert.equal(gstCreditNoteLastDate("2026-02-10"), "2026-11-30");
 });
 
-test("categories: full, discounted, more than 90%, not eligible", () => {
+test("categories: full, discounted, short up to ₹10,000, not eligible", () => {
   const run = (payments, evaluatedOn = "2025-10-20") => evaluateCashDiscountSettlements(rule, evaluatedOn, [invoice(payments)]);
   const full = run([["2025-10-06", "100000"]]);
   assert.equal(full.results[0].category, "full_payment");
-  assert.equal(full.candidates.length, 0, "full payment gets no Credit Note");
+  assert.equal(full.candidates.length, 1, "full payment on time still earns the discount");
+  assert.equal(full.candidates[0].status, "action_required");
+  assert.equal(full.results[0].creditAmount, full.results[0].discountAmount);
 
-  const discounted = run([["2025-10-08", "94999.60"]]);
+  const discounted = run([["2025-10-06", "94999.60"]]);
   assert.equal(discounted.results[0].category, "discounted_payment", "within ₹1 of invoice − discount");
   assert.equal(discounted.candidates[0].status, "action_required");
   assert.equal(discounted.candidates[0].creditAmount, "5000.00");
 
-  const ninety = run([["2025-10-08", "91000"]]);
+  const ninety = run([["2025-10-06", "91000"]]);
   assert.equal(ninety.results[0].category, "over_ninety_percent");
   assert.equal(ninety.candidates[0].status, "review_required");
   assert.equal(ninety.candidates[0].creditAmount, "5000.00", "capped at the discount although ₹9,000 is short");
 
-  const smallShort = run([["2025-10-08", "97000"]]);
+  // The limit is a flat ₹10,000: ₹10,000 short still counts, ₹10,001 does not.
+  assert.equal(run([["2025-10-06", "90000"]]).results[0].category, "over_ninety_percent");
+  assert.equal(run([["2025-10-06", "89999"]]).results[0].category, "not_eligible");
+  // On a big bill, 95% paid is far more than ₹10,000 short: no longer eligible.
+  const big = evaluateCashDiscountSettlements(rule, "2025-10-20", [invoice([["2025-10-06", "950000"]], { grossAmount: "1000000" })]);
+  assert.equal(big.results[0].category, "not_eligible", "₹50,000 short on ₹10,00,000");
+
+  const smallShort = run([["2025-10-06", "97000"]]);
   assert.equal(smallShort.results[0].category, "over_ninety_percent");
   assert.equal(smallShort.candidates[0].creditAmount, "3000.00", "only what is short when below the discount");
 
-  const late = run([["2025-10-09", "95000"]]);
+  const late = run([["2025-10-07", "95000"]]);
   assert.equal(late.results[0].category, "not_eligible", "discounted payment after the deadline earns nothing");
   assert.equal(late.candidates.length, 0);
 

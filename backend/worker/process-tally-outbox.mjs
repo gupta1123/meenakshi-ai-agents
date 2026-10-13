@@ -1,4 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
+import { getObsoleteEvaluationReadReason, retireEvaluationRead } from "../src/lib/evaluation/refresh-commands.mjs";
 
 const SUPABASE_URL = (process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL || "").replace(/\/rest\/v1\/?$/i, "").replace(/\/+$/, "");
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY;
@@ -40,6 +41,19 @@ async function findBoundConnector(outbox) {
 }
 async function dispatch(outbox) {
   try {
+    if (outbox.event_type === "tally_targeted_refresh") {
+      const read = { company_id: outbox.company_id, command_type: "fetch_meenakshi_evidence", payload: outbox.payload };
+      const reason = await getObsoleteEvaluationReadReason(supabase, read);
+      if (reason) {
+        await retireEvaluationRead(supabase, read, reason);
+        const { error } = await supabase.from("integration_outbox").update({
+          status: "completed", completed_at: new Date().toISOString(), last_error: reason,
+          locked_at: null, locked_by: null, lease_expires_at: null,
+        }).eq("id", outbox.id).eq("status", "processing");
+        if (error) throw error;
+        return;
+      }
+    }
     if (outbox.event_type === "tally_credit_note_pdf") {
       const { data: document, error: documentError } = await supabase.from("credit_note_documents")
         .select("status,storage_path").eq("credit_note_posting_id", outbox.aggregate_id).maybeSingle();

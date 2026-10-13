@@ -66,7 +66,7 @@ function normalizedSegments(source: VersionDetail | null): SegmentEdit[] {
   if (source && source.version.schemeType === "cd") {
     return [{ key: rowKey(), label: "All customers", days: String(source.version.allowedWorkingDays ?? 3), amount: "", groupIds: source.configuration.customerGroups.map((group) => group.customer_group_id) }];
   }
-  return [emptySegment("3 working days", "3"), emptySegment("10 working days", "10")];
+  return [emptySegment("3 days", "3"), emptySegment("10 days", "10")];
 }
 const segmentSignature = (segments: SegmentEdit[]) => JSON.stringify(segments.map((segment) => [segment.label.trim(), Number(segment.days), Number(segment.amount), [...segment.groupIds].sort()]));
 const emptyTier = (): TodTierEdit => ({ key: rowKey(), minimumTonnes: "", benefitValue: "" });
@@ -183,7 +183,7 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
     if (ruleType === "cd") {
       const bad = segments.findIndex((segment) => !segment.label.trim() || !(Number(segment.days) >= 1 && Number(segment.days) <= 60 && Number.isInteger(Number(segment.days))) || !(Number(segment.amount) > 0) || !segment.groupIds.length);
       if (!segments.length || bad >= 0) {
-        setEditorError({ message: segments.length ? `Complete segment ${bad + 1}: a name, 1–60 working days, a ₹ per MT amount and at least one customer group.` : "Add at least one segment.", area: "general" });
+        setEditorError({ message: segments.length ? `Complete segment ${bad + 1}: a name, 1–60 days, a ₹ per MT amount and at least one customer group.` : "Add at least one segment.", area: "general" });
         return;
       }
       if (!selectedStockTargets.length) {
@@ -302,7 +302,8 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
         const nextUnits = new Set(cdConversionRows.map((row) => row.unitId));
         await Promise.all([
           ...draft.configuration.conversions.filter((item) => !nextUnits.has(item.source_uom_id)).map((item) => apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/conversions`, { method: "DELETE", body: jsonBody({ sourceUomId: item.source_uom_id }) })),
-          ...cdConversionRows.map((row) => apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/conversions`, { method: "POST", body: jsonBody({ sourceUomId: row.unitId, tonnesPerSourceUnit: row.factor, isBuiltin: row.factor === row.standard && (row.standard === "1" || row.standard === "0.001") }) })),
+          // Only new or changed conversions; unchanged ones are already saved.
+          ...cdConversionRows.filter((row) => { const saved = draft.configuration.conversions.find((item) => item.source_uom_id === row.unitId); return !saved || Number(saved.tonnes_per_source_unit) !== Number(row.factor); }).map((row) => apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/conversions`, { method: "POST", body: jsonBody({ sourceUomId: row.unitId, tonnesPerSourceUnit: row.factor, isBuiltin: row.factor === row.standard && (row.standard === "1" || row.standard === "0.001") }) })),
         ]);
       } else {
         const savedGroupIds = new Set(source?.configuration.customerGroups.map((group) => group.customer_group_id) ?? []);
@@ -337,10 +338,13 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
         return;
       }
       if (!scheme) throw new Error("The rule could not be identified. Refresh Rulebook before retrying.");
-      await apiRequest(token, `/api/companies/${company.id}/schemes/${scheme.id}`, {
-        method: "PATCH",
-        body: jsonBody({ name: fields.get("name"), description: scheme.description }),
-      });
+      // Rename only when the name changed (saves a request on every save).
+      if (String(fields.get("name") ?? "").trim() !== scheme.name.trim()) {
+        await apiRequest(token, `/api/companies/${company.id}/schemes/${scheme.id}`, {
+          method: "PATCH",
+          body: jsonBody({ name: fields.get("name"), description: scheme.description }),
+        });
+      }
       await apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/activate`, {
         method: "POST",
         headers: { "Idempotency-Key": globalThis.crypto.randomUUID() },
@@ -567,9 +571,9 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
             {segments.map((segment, index) => <div className="cd-segment-card" key={segment.key}>
               <div className="cd-segment-fields">
                 <span className="cd-slab-index">{index + 1}</span>
-                <label className="cd-segment-name"><span className="sr-only">Segment {index + 1} name</span><input value={segment.label} maxLength={80} placeholder="e.g. 3-day customers" onChange={(event) => updateSegment(segment.key, { label: event.target.value })} /></label>
-                <label><span className="sr-only">Working days, segment {index + 1}</span><div className="input-with-suffix"><input type="number" min="1" max="60" value={segment.days} onChange={(event) => updateSegment(segment.key, { days: event.target.value })} /><span>working days</span></div></label>
-                <label><span className="sr-only">Discount per MT, segment {index + 1}</span><div className="input-with-suffix"><input inputMode="decimal" value={segment.amount} placeholder="500" onChange={(event) => updateSegment(segment.key, { amount: event.target.value })} /><span>₹ / MT</span></div></label>
+                <label className="cd-segment-name"><span className="cd-segment-field-label">Segment name <span className="sr-only">{index + 1}</span></span><input value={segment.label} maxLength={80} placeholder="e.g. 3-day customers" onChange={(event) => updateSegment(segment.key, { label: event.target.value })} /></label>
+                <label className="cd-segment-days"><span className="cd-segment-field-label">Days <span className="sr-only">for segment {index + 1}</span></span><input type="number" min="1" max="60" value={segment.days} onChange={(event) => updateSegment(segment.key, { days: event.target.value })} /></label>
+                <label><span className="cd-segment-field-label">Discount per MT <span className="sr-only">for segment {index + 1}</span></span><div className="input-with-suffix"><input inputMode="decimal" value={segment.amount} placeholder="500" onChange={(event) => updateSegment(segment.key, { amount: event.target.value })} /><span>₹ / MT</span></div></label>
                 <IconButton label={`Remove segment ${index + 1}`} disabled={segments.length === 1} onClick={() => setSegments((current) => current.filter((item) => item.key !== segment.key))}><Trash2 size={16} /></IconButton>
               </div>
               <div className="cd-segment-groups">
@@ -578,7 +582,7 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
               </div>
             </div>)}
           </div>
-          <p className="rule-editor-calendar-note">Working days skip Sundays and holidays from the business calendar. Invoices go out at full price; a Credit Note gives the discount when the customer pays the discounted amount within the window.</p>
+          <p className="rule-editor-calendar-note">Every day counts from the invoice date; if the last day is a Sunday or a holiday, the deadline moves to the next working day. Invoices go out at full price; a Credit Note gives the discount when the customer pays the discounted amount within the window.</p>
         </section>
 
         <section className="rule-editor-section tod-edit-section">

@@ -3,18 +3,18 @@
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, ArrowRight, BellRing, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronsUpDown, ChevronUp, CircleAlert, ClipboardCheck, Eye, FileCheck2, RefreshCw, Send, Square } from "lucide-react";
+import { CalendarDays, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, ChevronsUpDown, CircleAlert, Eye, List, RefreshCw, Search, Send, Square, Users } from "lucide-react";
 
 import { apiRequest, jsonBody } from "@/lib/api";
 import { staffStatusLabel } from "@/lib/staff-status";
 import { userFacingDetail, userFacingError, userLabel } from "@/lib/user-copy";
 import { supabase } from "@/lib/supabase";
-import { runLocalCashDiscount, runLocalTurnoverDiscount, type LocalCdBootstrap, type LocalCdInvoiceCheck, type LocalCdRow, type LocalTodBootstrap, type LocalTodRow } from "@/lib/local-tally";
+import { runLocalCashDiscount, runLocalTurnoverDiscount, type LocalCdBootstrap, type LocalCdInvoiceCheck, type LocalCdRow, type LocalTodBootstrap } from "@/lib/local-tally";
 
 import { AppShell, WorkspacePageHeader } from "./app-shell";
 import { useCompany } from "./company-context";
 import { RulebookWorkspace } from "./rulebook-workspace";
-import { TallyReadiness, workspaceCanCalculateLive } from "./tally-readiness";
+import { TallyReadiness, syncIsCurrent, workspaceCanCalculateLive } from "./tally-readiness";
 import { useWorkspaceSession, type WorkspaceData } from "./workspace-session";
 import { MessagesWorkspace } from "./messages-workspace";
 import { GuidedEvaluationQueue } from "./guided-evaluation-queue";
@@ -22,16 +22,20 @@ import { GuidedEvaluationDrawer } from "./guided-evaluation-drawer";
 import { VerifiedCreditNoteDocument } from "./verified-credit-note-document";
 import { CreditNotesLoadingContent, MessagesLoadingContent, TodPageSkeleton } from "./workspace-loading-shell";
 import { CashDiscountSettlementsPage } from "./cash-discount-settlements";
+import { DiscountLoading } from "./workspace-loading-shell";
+import { CreditNotePanel, type CreditNotePanelNote } from "./credit-note-panel";
+import { FinanceDashboard } from "./finance-dashboard";
+import { PeriodFilter, defaultPeriod, inPeriod, periodLabel, type Period } from "./period-filter";
 import { WhatsAppSendDrawer, type WhatsAppTarget } from "./whatsapp-send-drawer";
-import type { CashDiscountDebitNoteHistory, CashDiscountInvoiceCheck, CashDiscountLiveResult, CashDiscountRecovery, CollectionsPage, Contact, CreditNotePosting, EvaluationRun, LaunchControl, MessageTemplate, NotificationHealth, NotificationMessage, OperationsHealth, Proposal, ProposalDetail, ReferenceData, TallyHealth, Voucher } from "./types";
-import { Button, Card, Dialog, Drawer, EmptyState, IconButton, InlineMessage, MetricCard, SectionHeading, Skeleton, StatusBadge, formatDate, formatMoney, formatTonnes, labelFor, safePhone } from "./ui";
+import type { CashDiscountDebitNoteHistory, CashDiscountInvoiceCheck, CashDiscountRecovery, CollectionsPage, CreditNotePosting, EvaluationRun, LaunchControl, Proposal, ProposalDetail, ReferenceData, TallyHealth } from "./types";
+import { Button, Card, Dialog, Drawer, EmptyState, IconButton, InlineMessage, Skeleton, StatusBadge, formatDate, formatMoney, formatTonnes, labelFor } from "./ui";
 
 const idempotencyKey = () => globalThis.crypto?.randomUUID?.() ?? `meenakshi-${Date.now()}`;
 const formatBusinessDate = (value: string | null | undefined, fallback = "Not set") => {
   if (!value) return fallback;
   const dateOnly = value.slice(0, 10);
   const date = new Date(`${dateOnly}T00:00:00`);
-  return Number.isNaN(date.getTime()) ? fallback : date.toLocaleDateString(undefined, { dateStyle: "medium" });
+  return Number.isNaN(date.getTime()) ? fallback : date.toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
 };
 const formatPercentage = (value: string | number | null | undefined) => Number(value ?? 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
 const recoveryCaseLabel = (row: CashDiscountRecovery) => row.recovery_case ?? (row.status === "review_required" ? "review" : Number(row.amount_paid ?? 0) <= 0 ? "not_paid" : Number(row.amount_paid ?? 0) < Number(row.net_invoice_amount ?? 0) ? "partially_paid" : "paid_late");
@@ -60,6 +64,12 @@ function ResultPagination({ page, totalItems, onPageChange, pageSize = RESULT_PA
   </nav>;
 }
 
+// Long lists (a big customer has hundreds of vouchers or invoices) render in steps of 50.
+function ShowMore<T>({ items, render, step = 50 }: { items: T[]; render: (item: T) => React.ReactNode; step?: number }) {
+  const [shown, setShown] = useState(step);
+  return <>{items.slice(0, shown).map(render)}{items.length > shown && <button type="button" className="button button-secondary tod-show-more" onClick={() => setShown((value) => value + step)}>Show {Math.min(step, items.length - shown)} more · {items.length - shown} left</button>}</>;
+}
+
 function CashDiscountRecoverySkeleton() {
   return <div className="cd-recovery-skeleton" aria-label="Loading recovery results">{Array.from({ length: 6 }, (_, index) => <div className="cd-recovery-skeleton-row" key={index}><Skeleton lines={1} style={{ width: 16, height: 16 }} /><div><Skeleton lines={1} style={{ width: `${58 + (index % 3) * 8}%`, height: 13 }} /><Skeleton lines={1} style={{ width: "72%", height: 9 }} /><Skeleton lines={1} style={{ width: "54%", height: 9 }} /></div><div><Skeleton lines={1} style={{ width: "72%", height: 12 }} /><Skeleton lines={1} style={{ width: "52%", height: 9 }} /></div><Skeleton lines={1} style={{ width: 78, height: 13 }} /><Skeleton lines={1} style={{ width: 70, height: 32 }} /></div>)}</div>;
 }
@@ -86,9 +96,11 @@ function Workspace({ page, email, signOut, tallyHealth }: { page: CollectionsPag
   const [notice, setNotice] = useState<string | null>(null);
   const customerNames = useMemo(() => new Map(data.reference?.masters.customers.map((customer) => [customer.id, labelFor(customer)]) ?? []), [data.reference]);
   const pageProps = { data, refresh, setNotice, setError, customerNames, isAdministrator };
-  const hasLoadedWorkspace = Boolean(data.overview || data.operations || data.launchControl || data.reference || data.proposals.length || data.creditNotes.length || data.debitNotes.length || data.messages.length);
+  // Cash Discount owns its data loading; the shared session intentionally
+  // returns empty data for it. A page-level error must not unmount it.
+  const hasLoadedWorkspace = page === "cash-discount" || Boolean(data.overview || data.operations || data.launchControl || data.reference || data.proposals.length || data.creditNotes.length || data.debitNotes.length || data.messages.length);
   const tallyEvidenceCurrent = page === "rulebook"
-    ? Boolean(tallyHealth?.ready && tallyHealth.sync?.masters.status === "current")
+    ? Boolean(tallyHealth?.ready && syncIsCurrent(tallyHealth.sync?.masters))
     : workspaceCanCalculateLive(tallyHealth);
   const companyMismatch = tallyHealth?.status === "company_mismatch";
 
@@ -170,118 +182,61 @@ export type PageProps = { data: WorkspaceData; refresh: () => Promise<void>; set
 
 function OverviewPage({ data, isAdministrator, refresh }: PageProps) {
   const overview = data.overview;
-  const recoveryActions = overview?.recoveries.actionCount ?? 0;
-  const recoveryReviews = overview?.recoveries.reviewCount ?? 0;
-  const recoveryAmount = overview?.recoveries.amount ?? 0;
-  const todReviewCount = overview?.turnoverDiscount.reviewCount ?? 0;
-  const messagesNeedingAction = (overview?.messages.retrying ?? 0) + (overview?.messages.terminalFailures ?? 0) + (overview?.messages.queued ?? 0);
-  const tallyNeedsAttention = Boolean(overview && !overview.tally.ready);
-  const actionCount = recoveryActions + recoveryReviews + (todReviewCount > 0 ? 1 : 0) + (messagesNeedingAction > 0 ? 1 : 0) + (tallyNeedsAttention ? 1 : 0);
-  const activity = overview?.activity ?? [];
-
+  // The dashboard itself (financial year, quarters, groups) loads its own data.
   return <>
-    <WorkspacePageHeader eyebrow="Control Centre" title="Overview" action={<IconButton label="Refresh workspace" onClick={() => void refresh()}><RefreshCw size={16} /></IconButton>} />
+    <WorkspacePageHeader eyebrow="" title="Overview" action={<IconButton label="Refresh workspace" onClick={() => void refresh()}><RefreshCw size={16} /></IconButton>} />
     {!isAdministrator && <InlineMessage tone="info"><strong>Finance workspace:</strong> Manage discounts, approvals, and WhatsApp notifications. Rules and system configurations are Administrator-controlled.</InlineMessage>}
-    <div className="readiness-strip">
-      <StatusBadge status={overview?.tally.status ?? "required"} />
-      <span>Tally {overview?.tally.ready ? "Connected" : "Attention"}</span>
-      {overview?.tally.heartbeatAt && <span>Synced {formatDate(overview.tally.heartbeatAt)}</span>}
-      <span className={actionCount ? "actions-badge active" : "actions-badge"}>
-        {actionCount === 0 ? "✨ All clear" : `${actionCount} open action${actionCount === 1 ? "" : "s"}`}
-      </span>
-    </div>
-
-    <div className="metric-grid">
-      <MetricCard
-        label="Debit Notes to prepare"
-        value={recoveryActions}
-        detail={recoveryAmount > 0 ? `${formatMoney(recoveryAmount)} pending recovery` : "No pending recoveries"}
-        tone={recoveryActions ? "danger" : "good"}
-        icon={<FileCheck2 size={19} />}
-      />
-      <MetricCard
-        label="Turnover Discount"
-        value={todReviewCount}
-        detail={
-          (overview?.turnoverDiscount.projectedAmount ?? 0) > 0
-            ? `${formatMoney(overview?.turnoverDiscount.projectedAmount ?? 0)} projected`
-            : overview?.turnoverDiscount.resultCount
-              ? `${overview.turnoverDiscount.resultCount} customer results`
-              : "No active calculations"
-        }
-        tone={todReviewCount ? "attention" : "good"}
-        icon={<ClipboardCheck size={19} />}
-      />
-      <MetricCard
-        label="Credit Notes"
-        value={overview?.creditNotes.total ?? 0}
-        detail={(overview?.creditNotes.awaiting ?? 0) > 0 ? `${overview?.creditNotes.awaiting} awaiting completion` : "All credit notes processed"}
-        tone={overview?.creditNotes.awaiting ? "attention" : "good"}
-        icon={<Activity size={19} />}
-      />
-      <MetricCard
-        label="Messages needing action"
-        value={messagesNeedingAction}
-        detail={messagesNeedingAction > 0 ? `${overview?.messages.terminalFailures ?? 0} failed · ${overview?.messages.retrying ?? 0} retrying` : "All messages delivered"}
-        tone={messagesNeedingAction ? "attention" : "good"}
-        icon={<BellRing size={19} />}
-      />
-    </div>
-
-    <div className="overview-grid">
-      <Card>
-        <div className="card-title">
-          <h2>Needs Attention</h2>
-          <span className="muted-copy">{actionCount ? `${actionCount} open` : "All clear"}</span>
-        </div>
-        <div className="attention-list">
-          {recoveryActions > 0 ? <article><span className="alert-dot critical" /><div><strong>Prepare {recoveryActions} Debit Note{recoveryActions === 1 ? "" : "s"}</strong><p>{formatMoney(recoveryAmount)} recovery required from expired discounts.</p><small>Review affected invoices in Cash Discount.</small></div><Link href="/cash-discount?view=recoveries" aria-label="Open Cash Discount recoveries"><ArrowRight size={16} /></Link></article> : null}
-          {recoveryReviews > 0 ? <article><span className="alert-dot warning" /><div><strong>Review {recoveryReviews} Cash Discount result{recoveryReviews === 1 ? "" : "s"}</strong><p>Decision needed prior to Debit Note preparation.</p><small>Inspect in Cash Discount.</small></div><Link href="/cash-discount" aria-label="Review Cash Discount results"><ArrowRight size={16} /></Link></article> : null}
-          {todReviewCount > 0 ? <article><span className="alert-dot warning" /><div><strong>Review {todReviewCount} Turnover Discount result{todReviewCount === 1 ? "" : "s"}</strong><p>Qualified customer results ready for Credit Note creation.</p><small>Inspect in Turnover Discount.</small></div><Link href="/turnover-discount" aria-label="Open Turnover Discount"><ArrowRight size={16} /></Link></article> : null}
-          {messagesNeedingAction > 0 ? <article><span className="alert-dot info" /><div><strong>Check {messagesNeedingAction} customer message{messagesNeedingAction === 1 ? "" : "s"}</strong><p>WhatsApp delivery queued or retrying.</p><small>Review in Messages.</small></div><Link href="/messages" aria-label="Open Messages"><ArrowRight size={16} /></Link></article> : null}
-          {tallyNeedsAttention ? <article><span className="alert-dot critical" /><div><strong>Tally connection needs attention</strong><p>Meenakshi can't reach Tally Prime right now.</p><small>Open Tally connection to reconnect.</small></div><Link href="/tally" aria-label="Open Tally connection"><ArrowRight size={16} /></Link></article> : null}
-          {actionCount === 0 ? (
-            <div className="all-clear-box">
-              <CheckCircle2 size={20} />
-              <div>
-                <strong>Everything up to date</strong>
-                <p>No open items require Finance attention.</p>
-              </div>
-            </div>
-          ) : null}
-        </div>
-      </Card>
-
-      <Card>
-        <div className="card-title">
-          <h2>Recent Updates</h2>
-        </div>
-        <div className="timeline">
-          {activity.length ? (
-            activity.map((item) => (
-              <article key={item.id}>
-                <span />
-                <div>
-                  <strong>{item.title}</strong>
-                  <p>{item.detail}</p>
-                  <small>{formatDate(item.at)}</small>
-                </div>
-              </article>
-            ))
-          ) : (
-            <div className="quiet-empty-state">No recent activity recorded</div>
-          )}
-        </div>
-      </Card>
-    </div>
+    {overview && !overview.tally.ready && <InlineMessage tone="warning"><strong>Tally needs attention.</strong> Meenakshi cannot reach Tally Prime right now. <Link href="/tally">Open Tally connection</Link></InlineMessage>}
+    <FinanceDashboard />
   </>;
 }
 
 function DiscountPage(props: PageProps & { scheme: "cd" | "tod" }) {
-  return props.scheme === "cd" ? <CashDiscountRecoveryPage {...props} /> : <DiscountPageBody {...props} />;
+  return props.scheme === "cd" ? <CashDiscountPage {...props} /> : <DiscountPageBody {...props} />;
 }
 
-function CashDiscountRecoveryPage({ data, setNotice, setError, isAdministrator }: PageProps & { scheme: "cd" | "tod" }) {
+type CdRuleOption = { id: string; name: string; versionNumber: number; discountPercentage: string; allowedWorkingDays: number | null; cdDiscountBasis?: "percentage_of_bill" | "amount_per_tonne" };
+
+// Resolve the CD workflow before mounting it. Returning a different page from
+// inside the recovery component used to leave all its polling effects alive.
+// Last answer per company, so coming back to the page opens it at once while the rules are re-checked quietly.
+const cdRulesSeen = new Map<string, CdRuleOption[]>();
+
+function CashDiscountPage(props: PageProps & { scheme: "cd" | "tod" }) {
+  const { company, companyKey } = useCompany();
+  const [state, setState] = useState<{ companyKey: number; rules: CdRuleOption[] } | null>(() => {
+    const seen = cdRulesSeen.get(company.id);
+    return seen ? { companyKey, rules: seen } : null;
+  });
+  const [error, setError] = useState<string | null>(null);
+  const [retry, setRetry] = useState(0);
+  useEffect(() => { props.setError(null); }, [companyKey, props.setError]);
+  useEffect(() => {
+    let cancelled = false;
+    setError(null);
+    void (async () => {
+      try {
+        const token = await accessToken();
+        if (!token) throw new Error("Sign in again to load Cash Discount rules.");
+        const response = await apiRequest<{ rules: CdRuleOption[] }>(token, `/api/companies/${company.id}/evaluations/cd/rules`, { cache: "no-store" });
+        cdRulesSeen.set(company.id, response.rules);
+        // Same answer as before: keep the page as it is instead of remounting it.
+        if (!cancelled) setState((current) => current && current.companyKey === companyKey && JSON.stringify(current.rules) === JSON.stringify(response.rules) ? current : { companyKey, rules: response.rules });
+      } catch (cause) {
+        if (!cancelled) setError(userFacingError(cause, "Could not load Cash Discount rules. Try again."));
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [company.id, companyKey, retry]);
+  if (!state || state.companyKey !== companyKey) return <>
+    {error ? <><WorkspacePageHeader title="Cash Discount" /><EmptyState title="Cash Discount rules unavailable" detail={error} action={<Button onClick={() => setRetry((value) => value + 1)}>Try again</Button>} /></> : <DiscountLoading />}
+  </>;
+  return state.rules.some((rule) => rule.cdDiscountBasis === "amount_per_tonne")
+    ? <CashDiscountSettlementsPage isAdministrator={props.isAdministrator} setNotice={props.setNotice} />
+    : <CashDiscountRecoveryPage {...props} cdRules={state.rules} />;
+}
+
+function CashDiscountRecoveryPage({ data, setNotice, setError, isAdministrator, cdRules }: PageProps & { scheme: "cd" | "tod"; cdRules: CdRuleOption[] }) {
   const { company, companyKey } = useCompany();
   const searchParams = useSearchParams();
   const [evaluationOpen, setEvaluationOpen] = useState(false);
@@ -315,19 +270,10 @@ function CashDiscountRecoveryPage({ data, setNotice, setError, isAdministrator }
   const postingKeys = useRef(new Map<string, string>());
   const recoveryFilterInitialized = useRef(false);
   // Several Cash Discount rules can be active; each keeps its own results.
-  type CdRuleOption = { id: string; name: string; versionNumber: number; discountPercentage: string; allowedWorkingDays: number | null; cdDiscountBasis?: "percentage_of_bill" | "amount_per_tonne" };
-  const [cdRules, setCdRules] = useState<CdRuleOption[]>([]);
-  const [selectedRuleId, setSelectedRuleId] = useState<string | null>(null);
+  const [selectedRuleId, setSelectedRuleId] = useState<string | null>(() => cdRules[0]?.id ?? null);
   useEffect(() => {
-    void (async () => {
-      const token = await accessToken(); if (!token) return;
-      try {
-        const response = await apiRequest<{ rules: CdRuleOption[] }>(token, `/api/companies/${company.id}/evaluations/cd/rules`, { cache: "no-store" });
-        setCdRules(response.rules);
-        setSelectedRuleId((current) => current && response.rules.some((rule) => rule.id === current) ? current : response.rules[0]?.id ?? null);
-      } catch { setCdRules([]); }
-    })();
-  }, [company.id]);
+    setSelectedRuleId((current) => current && cdRules.some((rule) => rule.id === current) ? current : cdRules[0]?.id ?? null);
+  }, [company.id, cdRules]);
 
   const loadRecoveries = useCallback(async (caseFilter: "all" | "not_paid" | "partially_paid" | "paid_late" | "review" = "all", search = "") => {
     const requestId = ++recoveryRequest.current;
@@ -395,6 +341,7 @@ function CashDiscountRecoveryPage({ data, setNotice, setError, isAdministrator }
   useEffect(() => {
     if (!run || !running) return;
     let busy = false;
+    let cancelled = false;
     const update = async () => {
       if (busy || document.visibilityState !== "visible") return;
       busy = true;
@@ -402,13 +349,14 @@ function CashDiscountRecoveryPage({ data, setNotice, setError, isAdministrator }
         const token = await accessToken();
         if (!token) return;
         const response = await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/runs/${run.id}`);
+        if (cancelled) return;
         setRun(response.evaluationRun);
         if (["completed", "completed_with_issues", "failed", "cancelled"].includes(response.evaluationRun.status)) await loadRecoveries();
-      } catch (cause) { setError(userFacingError(cause, "Could not update the Cash Discount recovery check.")); }
+      } catch (cause) { if (!cancelled) setError(userFacingError(cause, "Could not update the Cash Discount recovery check.")); }
       finally { busy = false; }
     };
     const timer = window.setInterval(() => { void update(); }, 3_000);
-    return () => window.clearInterval(timer);
+    return () => { cancelled = true; window.clearInterval(timer); };
   }, [company.id, loadRecoveries, run, running, setError]);
 
   // Cases whose Debit Note is being created or exists are tracked in Debit Notes.
@@ -588,9 +536,6 @@ function CashDiscountRecoveryPage({ data, setNotice, setError, isAdministrator }
   const activity = running ? run?.status === "queued" ? "Waiting to begin" : run?.status === "evaluating" ? "Calculating recoveries" : "Reading invoices, receipts, and Debit Notes" : run?.completed_at ? `Latest check completed ${formatDate(run.completed_at)}` : "No completed check yet";
   const checkHeadline = running ? "Checking current Tally data" : !run ? "Run a Tally check to calculate Cash Discounts" : invoicesChecked === 0 ? "No invoices matched the active rule" : `${invoicesChecked} Sales invoice${invoicesChecked === 1 ? "" : "s"} evaluated`;
 
-  // A per-MT rule (docs/CD_LOGIC.md) gives the discount by Credit Note, not by Debit Note recovery.
-  if (cdRules.some((rule) => rule.cdDiscountBasis === "amount_per_tonne")) return <CashDiscountSettlementsPage isAdministrator={isAdministrator} setNotice={setNotice} setError={setError} />;
-
   if (loadingLatest) return <>
     <WorkspacePageHeader eyebrow="" title="Cash Discount" detail="" />
     <section className="cd-check-summary cd-check-summary-loading" aria-label="Loading latest Cash Discount check"><Skeleton lines={3} /><Skeleton lines={1} style={{ width: 180, height: 32 }} /></section>
@@ -716,7 +661,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
         setHistoryTodRows(response.results.map((result) => ({
           id: `history:${result.id}`, customer_id: result.customerId, customer_name: result.customerName, scheme_type: "tod", status: result.outcome,
           period_start: result.periodStart ?? run.period_start ?? null, period_end: result.periodEnd ?? run.period_end ?? null, eligibility_deadline: result.periodEnd ?? run.period_end ?? null,
-          calculated_discount_amount: result.calculatedDiscountAmount, scheme_version_id: result.schemeVersionId ?? run.scheme_version_id,
+          calculated_discount_amount: result.calculatedDiscountAmount, scheme_version_id: result.schemeVersionId ?? run.scheme_version_id ?? undefined,
           source_sales_voucher_id: null, entitlement_key: `history:${run.id}:${result.customerId}`, eligible_product_taxable_value: null,
           achieved_tier_id: Number(result.calculatedDiscountAmount) > 0 ? `history:${result.id}` : null, next_tier_tonnes: null, additional_tonnes_required: null,
           invoice_amount_due: "0", amount_paid_by_deadline: "0", discounted_settlement_target: "0", discount_percentage: null,
@@ -735,6 +680,35 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
   // Rows fetched for one period by "View results" (the page's initial list is
   // capped at 250 recent rows). They fill the gaps; the page's own (refreshed) data wins.
   const [periodRows, setPeriodRows] = useState<Proposal[]>([]);
+  // The page's own list holds only the 250 most recently updated customers, which would undercount
+  // a period's Ready / Not qualified totals. Load the whole selected period (current rule) once.
+  const loadedPeriods = useRef(new Set<string>());
+  const activeTodRuleId = localTodBootstrap?.activeSchemeVersionId ?? null;
+  const latestRunId = latestRun?.id ?? null;
+  useEffect(() => {
+    if (scheme !== "tod" || !selectedTodPeriodKey || selectedHistoryRun || !activeTodRuleId) return;
+    const key = `${company.id}:${selectedTodPeriodKey}:${activeTodRuleId}:${latestRunId ?? ""}`;
+    if (loadedPeriods.current.has(key)) return;
+    loadedPeriods.current.add(key);
+    const [periodStart, periodEnd] = selectedTodPeriodKey.split(":");
+    void (async () => {
+      try {
+        const token = await accessToken();
+        if (!token) throw new Error("signed out");
+        const loaded: Proposal[] = [];
+        let cursor: string | null = null;
+        for (let page = 0; page < 10; page += 1) {
+          const params = new URLSearchParams({ schemeType: "tod", periodStart, periodEnd, schemeVersionId: activeTodRuleId, limit: "500" });
+          if (cursor) params.set("cursor", cursor);
+          const response: { proposals: Proposal[]; nextCursor: string | null; hasMore: boolean } = await apiRequest(token, `/api/companies/${company.id}/evaluations/proposals?${params}`, { cache: "no-store" });
+          loaded.push(...response.proposals.filter((proposal) => proposal.status !== "not_in_scheme"));
+          if (!response.hasMore || !response.nextCursor) break;
+          cursor = response.nextCursor;
+        }
+        setPeriodRows((current) => { const merged = new Map(current.map((proposal) => [proposal.id, proposal])); for (const proposal of loaded) merged.set(proposal.id, proposal); return [...merged.values()]; });
+      } catch { loadedPeriods.current.delete(key); }
+    })();
+  }, [activeTodRuleId, company.id, latestRunId, scheme, selectedHistoryRun, selectedTodPeriodKey]);
   const allSchemeRows = useMemo(() => {
     const merged = new Map(periodRows.map((proposal) => [proposal.id, proposal]));
     for (const proposal of data.proposals) merged.set(proposal.id, proposal);
@@ -746,10 +720,6 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       ? allSavedRows.filter((proposal) => `${proposal.period_start}:${proposal.period_end}` === selectedTodPeriodKey)
       : allSavedRows;
   const localKeys = new Set(localTodRows.map((proposal) => proposal.entitlement_key).filter(Boolean));
-  // Periods with saved or freshly calculated results, newest first, for the period selector.
-  const todPeriodOptions = scheme === "tod"
-    ? [...new Set([...localTodRows, ...allSavedRows].flatMap((proposal) => periodKeyOf(proposal) ?? []))].sort().reverse()
-    : [];
   const localPeriodRows = selectedTodPeriodKey ? localTodRows.filter((proposal) => periodKeyOf(proposal) === selectedTodPeriodKey) : localTodRows;
   const allRows = scheme === "tod" && selectedHistoryRun && historyTodRows
     ? historyTodRows
@@ -763,10 +733,11 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     setStatusFilter("ready");
   }, [data, openReadyView]);
 
-  const preloadLocalTodBootstrap = useCallback(async (asOfDate?: string) => {
+  const preloadLocalTodBootstrap = useCallback(async (asOfDate?: string, fresh = false) => {
     const token = await accessToken();
     if (!token) throw new Error("Sign in again before calculating Turnover Discounts.");
-    const suffix = asOfDate ? `?asOfDate=${encodeURIComponent(asOfDate)}` : "";
+    const query = [asOfDate ? `asOfDate=${encodeURIComponent(asOfDate)}` : "", fresh ? "fresh=1" : ""].filter(Boolean).join("&");
+    const suffix = query ? `?${query}` : "";
     const bootstrap = await apiRequest<LocalTodBootstrap>(token, `/api/companies/${company.id}/evaluations/tod/local-bootstrap${suffix}`);
     setLocalTodBootstrap(bootstrap);
     // The period shown on load is chosen from the last saved result (below),
@@ -792,40 +763,6 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     void preloadLocalTodBootstrap().catch(() => {});
   }, [company.id, preloadLocalTodBootstrap, scheme]);
 
-  const provisionalTodProposal = (row: LocalTodRow): Proposal => {
-    const existing = savedRows.find((proposal) => proposal.entitlement_key === row.entitlementKey);
-    const preservedPosting = existing?.creditNotePosting ?? null;
-    const status = preservedPosting?.status === "created_verified" ? "already_credited" : row.status;
-    return {
-      id: `local:${row.customerId}:${row.periodStart}`,
-      customer_id: row.customerId,
-      customer_name: row.customerName,
-      scheme_type: "tod",
-      status,
-      period_start: row.periodStart,
-      period_end: row.periodEnd,
-      eligibility_deadline: row.eligibilityDeadline,
-      calculated_discount_amount: row.calculatedDiscountAmount,
-      scheme_version_id: row.schemeVersionId,
-      source_sales_voucher_id: null,
-      entitlement_key: row.entitlementKey,
-      eligible_product_taxable_value: row.eligibleProductTaxableValue,
-      achieved_tier_id: row.achievedTierId,
-      next_tier_tonnes: row.nextTierTonnes,
-      additional_tonnes_required: row.additionalTonnesRequired,
-      invoice_amount_due: "0.0000",
-      amount_paid_by_deadline: "0.0000",
-      discounted_settlement_target: "0.0000",
-      discount_percentage: row.discountPercentage,
-      eligible_tonnes: row.eligibleTonnes,
-      shortfall_amount: "0.0000",
-      latest_evaluated_at: new Date().toISOString(),
-      reason_codes: row.reasonCodes,
-      latestEvaluation: null,
-      creditNotePosting: preservedPosting,
-    };
-  };
-
   const runLocalTodCalculation = async (asOfDate: string) => {
     setError(null);
     setSelectedHistoryRun(null);
@@ -836,7 +773,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       // Rule periods can differ between customers because a prior TOD result
       // locks its period. Always refresh the lightweight bootstrap before
       // reading Tally so each group is calculated against the right period.
-      const bootstrap = await preloadLocalTodBootstrap(asOfDate);
+      const bootstrap = await preloadLocalTodBootstrap(asOfDate, true);
       const result = await runLocalTurnoverDiscount(bootstrap);
       if (result.rows[0]) setSelectedTodPeriodKey(`${result.rows[0].periodStart}:${result.rows[0].periodEnd}`);
       // Keep the user on the progress view until every customer is saved;
@@ -871,6 +808,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
           setLocalTodRows([]);
           setShowEvaluationQueue(false);
           setNotice("Turnover Discount results are saved. Open any customer to view the calculation.");
+          window.setTimeout(() => setNotice(null), 6000);
           return;
         }
       }
@@ -986,9 +924,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     return "View details";
   };
   return <><WorkspacePageHeader eyebrow="" title={title} detail="" />
-    {scheme === "tod" ? <div className="tod-overview" aria-label="Turnover Discount summary"><div className="tod-overview-meta"><div className="tod-period-context"><StatusBadge status={savingTod ? "saving" : selectedHistoryRun ? "historical" : "ready"} />{todPeriodOptions.length > 1 && !selectedHistoryRun
-          ? <select className="tod-period-select" aria-label="Turnover Discount period" value={selectedTodPeriodKey ?? todPeriodOptions[0]} onChange={(event) => { setSelectedTodPeriodKey(event.target.value); setQuery(""); }}>{todPeriodOptions.map((key) => { const [start, end] = key.split(":"); return <option key={key} value={key}>{formatBusinessDate(start)} – {formatBusinessDate(end)} · {periodHasEnded(end) ? "ended" : "in progress"}</option>; })}</select>
-          : <strong>{periodLabel}</strong>}<span className={periodEnded ? "is-ready" : ""}><CircleAlert size={13} />{savingTod ? "Checking fresh Tally data…" : selectedHistoryRun ? "Historical calculation snapshot" : periodKeys.size > 1 ? "Includes completed and active periods" : periodEnded ? "Ready to create Credit Notes" : periodRow?.period_end ? `Projected until ${formatBusinessDate(periodRow.period_end)}` : "No period calculated yet"}</span></div><div className="tod-overview-actions"><span>{savingTod && calculationStartedAt ? `Started ${formatDate(calculationStartedAt)}` : lastChecked ? `Calculated ${formatDate(lastChecked)}` : "Not calculated yet"}</span><Button className="button-secondary" disabled={savingTod} onClick={() => { setSelectedHistoryRun(null); setHistoryTodRows(null); setNotice(null); setEvaluationOpen(true); }}><RefreshCw size={15} />{savingTod ? "Checking Tally…" : "Calculate period"}</Button><div className="segmented tod-inline-tabs" aria-label={`${title} views`}><button className={!showEvaluationQueue ? "selected" : ""} onClick={() => { setSelectedHistoryRun(null); setHistoryTodRows(null); setNotice(null); setShowEvaluationQueue(false); }}>Customers</button><button className={showEvaluationQueue ? "selected" : ""} onClick={() => setShowEvaluationQueue(true)}>Run history</button></div></div></div>{!showEvaluationQueue && allRows.length > 0 && <div className="cd-action-cards tod-action-cards" role="tablist" aria-label="Turnover Discount customers">{todBuckets.map((bucket) => {
+    {scheme === "tod" ? <div className="tod-overview" aria-label="Turnover Discount summary"><div className="tod-overview-meta"><div className="tod-period-context"><StatusBadge status={savingTod ? "saving" : selectedHistoryRun ? "historical" : "ready"} /><strong>{periodLabel}</strong><span className={periodEnded ? "is-ready" : ""}><CircleAlert size={13} />{savingTod ? "Checking fresh Tally data…" : selectedHistoryRun ? "Historical calculation snapshot" : periodKeys.size > 1 ? "Includes completed and active periods" : periodEnded ? "Period ended" : periodRow?.period_end ? `Projected until ${formatBusinessDate(periodRow.period_end)}` : "No period calculated yet"}</span></div><div className="tod-overview-actions"><span>{savingTod && calculationStartedAt ? `Started ${formatDate(calculationStartedAt)}` : lastChecked ? `Calculated ${formatDate(lastChecked)}` : "Not calculated yet"}</span><Button className="button-secondary" disabled={savingTod} onClick={() => { setSelectedHistoryRun(null); setHistoryTodRows(null); setNotice(null); setEvaluationOpen(true); }}><RefreshCw size={15} />{savingTod ? "Checking Tally…" : "Calculate period"}</Button><div className="segmented tod-inline-tabs" aria-label={`${title} views`}><button className={!showEvaluationQueue ? "selected" : ""} onClick={() => { setSelectedHistoryRun(null); setHistoryTodRows(null); setNotice(null); setShowEvaluationQueue(false); }}>Customers</button><button className={showEvaluationQueue ? "selected" : ""} onClick={() => setShowEvaluationQueue(true)}>Run history</button></div></div></div>{!showEvaluationQueue && allRows.length > 0 && <div className="cd-action-cards tod-action-cards" role="tablist" aria-label="Turnover Discount customers">{todBuckets.map((bucket) => {
       const count = todCount(bucket);
       const card = {
         ready: { label: "Ready to create", value: formatMoney(todAmount("ready")), detail: `${count} customer${count === 1 ? "" : "s"}` },
@@ -997,11 +933,11 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
         qualified: { label: "Qualified so far", value: formatMoney(todAmount("qualified")), detail: `${count} customer${count === 1 ? "" : "s"} · projected` },
         close: { label: "Close to next tier", value: String(count), detail: "fewest MT needed first" },
         no_activity: { label: "No purchases", value: String(count), detail: "this period" },
-        review: { label: "Needs review", value: String(count), detail: count ? "your decision" : "nothing to decide" },
+        review: { label: "Needs review", value: String(count), detail: count ? "your decision" : "none" },
       }[bucket as "ready"]!;
-      return <button key={bucket} type="button" role="tab" aria-selected={statusFilter === bucket} className={`cd-action-card${statusFilter === bucket ? " selected" : ""}${bucket === "review" && count ? " has-attention" : ""}`} onClick={() => { setStatusFilter(bucket); setQuery(""); }}><span>{card.label}</span><strong>{card.value}</strong><small>{card.detail}</small></button>;
+      return <button key={bucket} type="button" role="tab" aria-selected={statusFilter === bucket} className={`cd-action-card${statusFilter === bucket ? " selected" : ""}${bucket === "review" && count ? " has-attention" : ""}${!count && statusFilter !== bucket ? " is-empty" : ""}`} onClick={() => { setStatusFilter(bucket); setQuery(""); }}><span>{card.label}</span><strong>{card.value}</strong><small>{card.detail}</small></button>;
     })}</div>}</div> : <><div className="summary-bar"><span><StatusBadge status="ready" />Tally information</span><span><strong>{allRows.length}</strong> results</span><span><strong>{readyToFinalize}</strong> ready to finalize</span><span><strong>{reviewing}</strong> need review</span></div><div className="segmented evaluation-view-tabs" aria-label={`${title} views`}><button className={!showEvaluationQueue ? "selected" : ""} onClick={() => setShowEvaluationQueue(false)}>Customer results</button><button className={showEvaluationQueue ? "selected" : ""} onClick={() => setShowEvaluationQueue(true)}>Calculation history</button></div></>}
-    {showEvaluationQueue && <GuidedEvaluationQueue scheme={scheme} latestRun={latestRun} onError={setError} onRetry={() => setEvaluationOpen(true)} onViewResults={(run, isLatest) => {
+    {showEvaluationQueue && <GuidedEvaluationQueue scheme={scheme} ruleVersionId={scheme === "tod" ? localTodBootstrap?.activeSchemeVersionId ?? null : null} latestRun={latestRun} onError={setError} onRetry={() => setEvaluationOpen(true)} onViewResults={(run, isLatest) => {
       // The newest completed calculation is the live result: open the normal
       // Customers view, where Credit Notes can be created, not a read-only copy.
       if (scheme === "tod" && isLatest && run.period_start && run.period_end) {
@@ -1282,7 +1218,6 @@ function TodResults({ scaleByRule, reference, rows: filteredRows, allRows, query
       {groupSummaries.map((group) => {
         const rules = group.id === "none" ? [] : rulesFor(group.id);
         const todRules = rules.filter((rule) => rule.schemeType === "tod");
-        const cdRules = rules.filter((rule) => rule.schemeType === "cd");
         const share = group.total ? Math.round((group.customers / group.total) * 100) : 0;
         return <button type="button" role="listitem" className={`tod-group-card tod-group-card-${filter}`} key={group.id} onClick={() => setGroupFilter(group.id)} aria-label={`Open ${group.name}: ${group.customers} of ${group.total} customers ${cardCopy.count.toLowerCase()}`}>
           <span className="tod-group-card-head">
@@ -1298,9 +1233,8 @@ function TodResults({ scaleByRule, reference, rows: filteredRows, allRows, query
             {cardCopy.amount ? <span><small>MT counted</small><strong>{formatTonnes(group.tonnes)} MT</strong></span> : <span><small>Avg per customer</small><strong>{formatTonnes(group.customers ? group.tonnes / group.customers : 0)} MT</strong></span>}
           </span>
           <span className="tod-group-meter" role="presentation" title={`${share}% of the group`}><span style={{ width: `${share}%` }} /></span>
-          {!groupRulesLoaded ? <span className="tod-group-rules" aria-hidden="true"><DrawerLoadingBlock className="sk sk-rule" /><DrawerLoadingBlock className="sk sk-rule short" /></span> : <span className="tod-group-rules">
+          {!groupRulesLoaded ? <span className="tod-group-rules" aria-hidden="true"><DrawerLoadingBlock className="sk sk-rule" /></span> : <span className="tod-group-rules">
             <span><em className="is-tod">TOD</em><span title={todRules.map(ruleLabel).join(", ")}>{todRules.length ? todRules.map(ruleLabel).join(", ") : <i>No active rule</i>}</span></span>
-            <span><em className="is-cd">CD</em><span title={cdRules.map(ruleLabel).join(", ")}>{cdRules.length ? cdRules.map(ruleLabel).join(", ") : <i>No active rule</i>}</span></span>
           </span>}
         </button>;
       })}
@@ -1328,7 +1262,7 @@ function TodResults({ scaleByRule, reference, rows: filteredRows, allRows, query
       const tierValue = rateLabel(tier) ?? (inferredRate > 0 ? `₹${formatTonnes(inferredRate)}/MT` : "Qualified");
       const tierPosition = tier && tier.count > 1 ? tier.index / (tier.count - 1) : 0;
       const tierTone = proposal.achieved_tier_id ? (tierPosition >= 0.75 ? "top" : tierPosition >= 0.35 ? "middle" : "entry") : "none";
-      const nextTier = proposal.next_tier_tonnes ? tierList.find((item) => item.minimumTonnes === Number(proposal.next_tier_tonnes)) : null;
+        const nextTier = proposal.next_tier_tonnes ? tierList.find((item) => item.minimumTonnes === Number(proposal.next_tier_tonnes)) : null;
       const nextLabel = remainingTonnes > 0 ? `${formatTonnes(remainingTonnes)} MT to ${rateLabel(nextTier) ?? "next slab"}` : currentTonnes > 0 && proposal.achieved_tier_id ? "Top slab" : null;
       const usesPercentage = tier?.percentage != null;
       const formula = !proposal.achieved_tier_id ? null : usesPercentage ? `${formatMoney(proposal.eligible_product_taxable_value)} × ${formatTonnes(tier!.percentage!)}%` : `${formatTonnes(currentTonnes)} MT × ${tierValue}`;
@@ -1376,8 +1310,6 @@ function TodResults({ scaleByRule, reference, rows: filteredRows, allRows, query
   </Card>;
 }
 
-function EvaluationRunProgress({ run }: { run: EvaluationRun }) { const { company } = useCompany(); const [current, setCurrent] = useState(run); useEffect(() => { if (["completed", "failed"].includes(current.status)) return; const interval = window.setInterval(() => { void (async () => { const token = await accessToken(); if (!token) return; try { const response = await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/runs/${current.id}`); setCurrent(response.evaluationRun); } catch { /* keep the last safe state visible */ } })(); }, 4_000); return () => window.clearInterval(interval); }, [company.id, current.id, current.status]); return <div className="run-progress"><CircleDashedIcon /><div><StatusBadge status={current.status} /><h3>{current.status === "completed" ? "Evaluation completed" : "Live evidence is being processed"}</h3><p>{current.error_summary ?? "This run updates only after the bridge returns its scoped Tally result."}</p><small>Started {formatDate(current.created_at)}</small></div></div>; }
-function CircleDashedIcon() { return <span className="run-icon"><RefreshCw size={22} /></span>; }
 
 function DrawerLoadingBlock({ className = "" }: { className?: string }) {
   return <span aria-hidden="true" className={`workspace-loading-block ${className}`} />;
@@ -1398,7 +1330,7 @@ function TurnoverResultDrawerLoading() {
   </div>;
 }
 
-function ProposalDrawer({ proposal, onClose, onChanged, onError, customerName, launchMode }: { proposal: Proposal | null; onClose: () => void; onChanged: () => Promise<void>; onError: (value: string | null) => void; customerName?: string; launchMode?: "review_only" | "posting_enabled" }) {
+function ProposalDrawer({ proposal, onClose, onChanged, onError, customerName, launchMode, onBackToNote }: { proposal: Proposal | null; onClose: () => void; onChanged: () => Promise<void>; onError: (value: string | null) => void; customerName?: string; launchMode?: "review_only" | "posting_enabled"; onBackToNote?: () => void }) {
   const { company, isAdministrator } = useCompany();
   const [detail, setDetail] = useState<ProposalDetail | null>(null);
   const [loading, setLoading] = useState(false);
@@ -1416,15 +1348,34 @@ function ProposalDrawer({ proposal, onClose, onChanged, onError, customerName, l
   const [drawerView, setDrawerView] = useState<"summary" | "evidence" | "payments" | "audit">("summary");
   const refreshRunId = refreshRun?.id;
   const refreshRunStatus = refreshRun?.status;
+  // Keyed by the proposal id, so a list refresh that rebuilds the same row doesn't re-fetch it.
+  const proposalId = proposal?.id;
   const loadDetail = useCallback(async () => {
-    if (!proposal) return;
+    if (!proposalId) return;
     const token = await accessToken(); if (!token) return;
     setLoading(true);
-    try { setDetail(await apiRequest<ProposalDetail>(token, `/api/companies/${company.id}/evaluations/proposals/${proposal.id}`)); }
+    // The first screen only needs counts; the long lists load when a sub-view needs them.
+    try { setDetail(await apiRequest<ProposalDetail>(token, `/api/companies/${company.id}/evaluations/proposals/${proposalId}?slim=1`)); }
     catch (cause) { onError(userFacingError(cause, "Could not open the result details.")); }
     finally { setLoading(false); }
-  }, [company.id, onError, proposal]);
+  }, [company.id, onError, proposalId]);
   useEffect(() => { setDetail(null); setReason(""); void loadDetail(); }, [loadDetail]);
+  const detailIsLight = Boolean((detail?.latestEvaluation?.formula_snapshot as Record<string, unknown> | undefined)?.light);
+  const [fullLoading, setFullLoading] = useState(false);
+  useEffect(() => {
+    if (!detailIsLight || !proposalId || (drawerView !== "evidence" && drawerView !== "payments")) return;
+    let cancelled = false;
+    setFullLoading(true);
+    void (async () => {
+      const token = await accessToken(); if (!token) return;
+      try {
+        const full = await apiRequest<ProposalDetail>(token, `/api/companies/${company.id}/evaluations/proposals/${proposalId}`);
+        if (!cancelled) setDetail(full);
+      } catch (cause) { if (!cancelled) onError(userFacingError(cause, "Could not load the full list.")); }
+      finally { if (!cancelled) setFullLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [company.id, detailIsLight, drawerView, onError, proposalId]);
   // While Tally is creating/verifying the Credit Note, re-read the status so
   // the drawer moves from "Queued" to the verified number without a reload.
   const postingStatus = detail?.creditNotePosting?.status;
@@ -1543,9 +1494,8 @@ function ProposalDrawer({ proposal, onClose, onChanged, onError, customerName, l
   }
   const record = detail?.proposal ?? proposal;
   const message = detail?.notification;
-  const evaluationTime = detail?.latestEvaluation?.evaluated_at ?? record?.latestEvaluation?.evaluated_at;
-  const latestEvaluationAge = evaluationTime ? Date.now() - new Date(evaluationTime).getTime() : Number.POSITIVE_INFINITY;
-  const freshForCreation = (refreshCompleted || Boolean(record?.latestEvaluation?.freshForApproval) || Boolean(proposal?.latestEvaluation?.freshForApproval)) && latestEvaluationAge >= 0 && latestEvaluationAge <= 5 * 24 * 60 * 60 * 1_000;
+  // The latest saved calculation can be used however old; Tally is only re-read on request.
+  const freshForCreation = refreshCompleted || Boolean(record?.latestEvaluation?.freshForApproval) || Boolean(proposal?.latestEvaluation?.freshForApproval);
   const refreshIsActive = Boolean(refreshRun && !["completed", "failed", "completed_with_issues"].includes(refreshRun.status));
   const stillCreatable = record?.status === "eligible" && !detail?.creditNotePosting;
   useEffect(() => {
@@ -1565,19 +1515,14 @@ function ProposalDrawer({ proposal, onClose, onChanged, onError, customerName, l
     const formula = detail?.latestEvaluation?.formula_snapshot ?? {};
     const perMtRate = typeof formula.achievedTierRatePerMt === "string" || typeof formula.achievedTierRatePerMt === "number" ? String(formula.achievedTierRatePerMt) : null;
     const usesAmountPerMt = formula.todBenefitBasis === "amount_per_eligible_tonne" || perMtRate !== null;
-    const achievedTierLabel = usesAmountPerMt ? `${perMtRate ?? "—"} ₹/MT` : `${record.discount_percentage ?? "0"}%`;
-    const discountPercentage = Number(record.discount_percentage ?? "0") || 0;
-    const tierTone = record.achieved_tier_id ? (discountPercentage >= 5 ? "top" : discountPercentage >= 3 ? "middle" : "entry") : "none";
     const eligibleTonnes = Number(record.eligible_tonnes ?? "0") || 0;
     const remainingTonnes = Number(record.additional_tonnes_required ?? "0") || 0;
     const periodEnded = record.period_end ? new Date(`${record.period_end.slice(0, 10)}T23:59:59`).getTime() < Date.now() : false;
     const createReady = periodEnded && record.status === "eligible" && !detail?.creditNotePosting;
     const creationAvailableOn = record.period_end ? formatBusinessDate(record.period_end) : "the end of the rule period";
-    const nextStep = record.achieved_tier_id
-      ? periodEnded ? "Check the latest Tally calculation, then create the Credit Note." : `Keep tracking this customer until ${formatBusinessDate(record.period_end)}. The discount is projected until then.`
-      : remainingTonnes > 0 ? `${formatTonnes(remainingTonnes)} MT more is needed to reach the next discount slab.` : "No discount slab has been reached for this period.";
     const tallyEvidence = detail?.tallyEvidence;
     const evidenceVouchers = tallyEvidence?.vouchers ?? [];
+    const evidenceVoucherCount = tallyEvidence?.voucherCount ?? evidenceVouchers.length;
     const evidenceLines = tallyEvidence?.lines ?? [];
     const blockedLines = evidenceLines.filter((line) => line.blockingReason);
     const productSummary = [...evidenceLines.reduce((products, line) => {
@@ -1608,25 +1553,56 @@ function ProposalDrawer({ proposal, onClose, onChanged, onError, customerName, l
     // Present on calculations made with the 25-day payment rule; older results have none.
     const paymentChecks = Array.isArray(formula.paymentChecks) ? formula.paymentChecks as TodPaymentCheckRow[] : null;
     const countedInvoices = paymentChecks?.filter((check) => check.counted).length ?? 0;
-    const drawerTitle = drawerView === "evidence" ? "Tally evidence" : drawerView === "payments" ? "Payment check" : drawerView === "audit" ? "Audit information" : customerName ?? record.customer_name ?? "Customer result";
+    const missedChecks = (paymentChecks ?? []).filter((check) => !check.counted);
+    const countedChecks = (paymentChecks ?? []).filter((check) => check.counted);
+    const missedTonnes = missedChecks.reduce((total, check) => total + (Number(check.tonnes) || 0), 0);
+    const shortDate = (value: string) => new Date(`${value.slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+    const dayGap = (from: string, to: string) => Math.round((new Date(`${to.slice(0, 10)}T00:00:00`).getTime() - new Date(`${from.slice(0, 10)}T00:00:00`).getTime()) / 86_400_000);
+    // Plain words for one invoice: when it was due and how it was paid.
+    const paymentWords = (check: TodPaymentCheckRow) => {
+      const due = `Due ${shortDate(check.dueDate)}${check.shiftedFor.length ? ` (moved from ${shortDate(check.nominalDueDate)}, ${check.shiftedFor.map((item) => item.reason === "holiday" ? "holiday" : "Sunday").join(", ")})` : ""}`;
+      const gap = check.paidInFullOn ? dayGap(check.dueDate, check.paidInFullOn) : null;
+      const paid = check.paidInFullOn
+        ? `Paid in full ${shortDate(check.paidInFullOn)} · ${gap! > 0 ? `${gap} day${gap === 1 ? "" : "s"} late` : gap === 0 ? "on the due date" : `${-gap!} day${gap === -1 ? "" : "s"} early`}`
+        : Number(check.paidTotal) > 0 ? `Paid ${formatMoney(check.paidTotal)} · ${formatMoney(Math.max(0, Number(check.invoiceAmount) - Number(check.paidTotal)))} short` : "No payment yet";
+      return { due, paid };
+    };
+    const verdictLabel = (check: TodPaymentCheckRow) => check.counted ? "Counted" : check.reason === "paid_after_due_date" ? "Paid late" : check.reason === "partly_paid" ? "Partly paid" : "Not paid";
+    const paymentRow = (check: TodPaymentCheckRow) => {
+      const words = paymentWords(check);
+      return <article key={check.tallyGuid} className={check.counted ? "is-counted" : "is-excluded"}>
+        <div><strong>{check.voucherNumber || "Sales invoice"}</strong><small>{formatBusinessDate(check.invoiceDate)} · {formatMoney(check.invoiceAmount)}</small></div>
+        <div className="tod-payment-days"><small>{words.due}</small><small className={check.counted ? undefined : "is-problem"}>{words.paid}</small></div>
+        <strong className="tod-payment-mt">{formatTonnes(check.tonnes)} MT</strong>
+        <span className={`tod-payment-verdict ${check.counted ? "is-counted" : "is-excluded"}`}>{verdictLabel(check)}</span>
+      </article>;
+    };
+    const whoFor = customerName ?? record.customer_name ?? "Customer";
+    const drawerTitle = drawerView === "evidence" ? `${whoFor} · Tally evidence` : drawerView === "payments" ? `${whoFor} · Payment check` : drawerView === "audit" ? `${whoFor} · Audit` : customerName ?? record.customer_name ?? "Customer result";
     // Creating a Credit Note is a step inside the drawer (with Back), not a modal on top of it.
-    return <><Drawer open={Boolean(proposal)} onClose={onClose} onBack={createOpen ? () => setCreateOpen(false) : drawerView === "summary" ? undefined : () => setDrawerView("summary")} title={createOpen ? "Create Credit Note" : drawerTitle} description=""><div className="drawer-stack tod-customer-drawer">
-      {createOpen ? <CreditNoteCreationPanel customerName={customerName ?? record.customer_name ?? undefined} proposal={record} busy={busy} onBack={() => setCreateOpen(false)} onConfirm={() => void action("create")} /> : drawerView === "evidence" ? <div className="tod-drawer-subview">
+    return <><Drawer open={Boolean(proposal)} onClose={onClose} onBack={createOpen ? () => setCreateOpen(false) : drawerView === "summary" ? onBackToNote : () => setDrawerView("summary")} title={createOpen ? "Create Credit Note" : drawerTitle} description=""><div className="drawer-stack tod-customer-drawer">
+      {createOpen ? <CreditNoteCreationPanel customerName={customerName ?? record.customer_name ?? undefined} proposal={record} busy={busy} onBack={() => setCreateOpen(false)} onConfirm={() => void action("create")} /> : (drawerView === "evidence" || drawerView === "payments") && detailIsLight ? <div className="tod-drawer-subview" aria-busy={fullLoading}><Skeleton lines={5} /></div> : drawerView === "evidence" ? <div className="tod-drawer-subview">
         <div className="tod-subview-summary"><span>{evidenceVouchers.length} voucher{evidenceVouchers.length === 1 ? "" : "s"}</span><span>{productSummary.length} product{productSummary.length === 1 ? "" : "s"}</span><span>{formatTonnes(record.eligible_tonnes)} MT</span></div>
-        <section><p className="eyebrow">Transactions</p>{evidenceVouchers.length ? <div className="tod-evidence-list">{evidenceVouchers.map((voucher) => <article key={`${voucher.tallyVoucherId}-${voucher.contributionType}`}><div><strong>{voucher.voucherNumber || voucher.voucherTypeName || "Tally voucher"}</strong><small>{formatBusinessDate(voucher.voucherDate)} · {userLabel(voucher.voucherKind)}</small></div><div><strong className={Number(voucher.tonneContribution) < 0 ? "is-negative" : ""}>{formatTonnes(voucher.tonneContribution)} MT</strong><small>{formatMoney(voucher.taxableValueContribution)}</small></div></article>)}</div> : <EmptyState title="No voucher breakdown" detail="Run the calculation again to capture transaction evidence." />}</section>
+        <section><p className="eyebrow">Transactions</p>{evidenceVouchers.length ? <div className="tod-evidence-list"><ShowMore items={evidenceVouchers} render={(voucher) => <article key={`${voucher.tallyVoucherId}-${voucher.contributionType}`}><div><strong>{voucher.voucherNumber || voucher.voucherTypeName || "Tally voucher"}</strong><small>{formatBusinessDate(voucher.voucherDate)} · {userLabel(voucher.voucherKind)}</small></div><div><strong className={Number(voucher.tonneContribution) < 0 ? "is-negative" : ""}>{formatTonnes(voucher.tonneContribution)} MT</strong><small>{formatMoney(voucher.taxableValueContribution)}</small></div></article>} /></div> : <EmptyState title="No voucher breakdown" detail="Run the calculation again to capture transaction evidence." />}</section>
         {productSummary.length ? <section><p className="eyebrow">Products counted</p><div className="tod-evidence-list">{productSummary.map((product) => <article key={product.name}><div><strong>{product.name}</strong><small>{product.group || "Tally stock item"}</small></div><div><strong>{formatTonnes(product.tonnes)} MT</strong><small>{formatMoney(product.value)}</small></div></article>)}</div></section> : null}
         {blockedLines.length ? <InlineMessage tone="warning">{blockedLines.length} Tally item line{blockedLines.length === 1 ? " was" : "s were"} excluded because quantity or unit information needs attention.</InlineMessage> : null}
       </div> : drawerView === "payments" ? <div className="tod-drawer-subview">
-        <div className="tod-subview-summary"><span>{countedInvoices} of {paymentChecks?.length ?? 0} invoices counted</span><span>Paid in full within 25 days</span></div>
-        <p className="muted-copy">Due date = invoice date + 25 days (holidays included). If that day is a Sunday or a holiday, the next working day. Only invoices paid 100% (with GST) by the due date add to the MT.</p>
-        {paymentChecks?.length ? <div className="tod-payment-list">{paymentChecks.map((check) => <article key={check.tallyGuid} className={check.counted ? "is-counted" : "is-excluded"}>
-          <div><strong>{check.voucherNumber || "Sales invoice"}</strong><small>{formatBusinessDate(check.invoiceDate)} · {formatMoney(check.invoiceAmount)} · {formatTonnes(check.tonnes)} MT</small></div>
-          <div className="tod-payment-days">
-            <small>Day {check.dueDays}: {formatBusinessDate(check.nominalDueDate)}{check.shiftedFor.length ? ` → ${formatBusinessDate(check.dueDate)} (${check.shiftedFor.map((item) => `${formatBusinessDate(item.date)} ${item.reason === "holiday" ? "holiday" : "Sunday/off day"}`).join(", ")})` : ""}</small>
-            <small>{check.paidInFullOn ? `Paid in full ${formatBusinessDate(check.paidInFullOn)} · ${check.daysTaken} days` : `Paid ${formatMoney(check.paidTotal)} of ${formatMoney(check.invoiceAmount)}`}</small>
+        {paymentChecks?.length ? <>
+          <div className="tod-payment-summary">
+            <div><strong>{countedInvoices} of {paymentChecks.length}</strong><small>invoices counted</small></div>
+            <div><strong>{formatTonnes(eligibleTonnes)} MT</strong><small>counted</small></div>
+            <div className={missedChecks.length ? "is-problem" : undefined}><strong>{formatTonnes(missedTonnes)} MT</strong><small>not counted ({missedChecks.length})</small></div>
           </div>
-          <span className={`tod-payment-verdict ${check.counted ? "is-counted" : "is-excluded"}`}>{check.counted ? "Counted" : check.reason === "paid_after_due_date" ? "Paid late" : check.reason === "partly_paid" ? "Partly paid" : "Not paid"}</span>
-        </article>)}</div> : <EmptyState title="No payment check recorded" detail="This result was calculated before the 25-day payment rule. Run the calculation again to see it." />}
+          {missedChecks.length > 0 && remainingTonnes > 0 && <p className={`tod-payment-impact${missedTonnes >= remainingTonnes ? " is-problem" : ""}`}>{missedTonnes >= remainingTonnes
+            ? `Paid on time, these ${missedChecks.length} invoices would have reached the next slab (${formatTonnes(remainingTonnes)} MT needed).`
+            : `Even counted, these would not reach the next slab: ${formatTonnes(remainingTonnes)} MT is needed.`}</p>}
+          <p className="tod-payment-rule">Counts only invoices paid in full within 25 days. A due date on a Sunday or holiday moves to the next working day.</p>
+          {missedChecks.length > 0 && <section><p className="eyebrow">Not counted · {missedChecks.length}</p><div className="tod-payment-list"><ShowMore items={missedChecks} render={paymentRow} /></div></section>}
+          {countedChecks.length > 0 && <details className="tod-payment-counted" open={!missedChecks.length}>
+            <summary>Counted · {countedChecks.length} invoice{countedChecks.length === 1 ? "" : "s"} · {formatTonnes(countedChecks.reduce((total, check) => total + (Number(check.tonnes) || 0), 0))} MT</summary>
+            <div className="tod-payment-list"><ShowMore items={countedChecks} render={paymentRow} /></div>
+          </details>}
+        </> : <EmptyState title="No payment check recorded" detail="This result was calculated before the 25-day payment rule. Run the calculation again to see it." />}
       </div> : drawerView === "audit" ? <div className="tod-drawer-subview">
         <dl className="tod-audit-grid"><div><dt>Rule</dt><dd>{ruleVersion ? `Version ${ruleVersion}` : "Active Turnover Discount rule"}</dd></div><div><dt>Effective from</dt><dd>{formatBusinessDate(typeof detail?.latestEvaluation?.rule_snapshot?.effectiveFrom === "string" ? detail.latestEvaluation.rule_snapshot.effectiveFrom : null)}</dd></div><div><dt>Customer group</dt><dd>{groupLabel || "Rule-covered customer group"}</dd></div><div><dt>Last calculated</dt><dd>{formatDate(record.latest_evaluated_at)}</dd></div></dl>
         {detail?.reviews.length ? <section><p className="eyebrow">Action history</p><div>{detail.reviews.map((review) => <div className="history-row" key={review.id}><StatusBadge status={review.status} /><span>{review.review_reason || review.invalidation_reason || "Recorded using the latest Tally information"}</span><small>{formatDate(review.reviewed_at)}</small></div>)}</div></section> : <EmptyState title="No administrator actions" detail="Decisions and review notes will appear here." />}
@@ -1651,7 +1627,7 @@ function ProposalDrawer({ proposal, onClose, onChanged, onError, customerName, l
       </div>
       {refreshMessage && <InlineMessage tone={refreshRun?.status === "failed" || refreshRun?.status === "completed_with_issues" ? "error" : freshForCreation ? "success" : "info"}>{refreshRun?.error_summary ?? refreshMessage}</InlineMessage>}
       {tallyEvidence?.tiers.length ? <section className="tod-slab-progress"><p className="eyebrow">Discount slab</p><div className="tod-slab-track">{tallyEvidence.tiers.map((tier) => { const minimum = Number(tier.minimum_tonnes); const reached = eligibleTonnes >= minimum; const active = tier.id === record.achieved_tier_id; const label = usesAmountPerMt ? `₹${tier.discount_amount_per_tonne ?? "—"}/MT` : `${tier.discount_percentage}%`; return <div className={`${reached ? "is-reached" : ""} ${active ? "is-active" : ""}`} key={tier.id}><span>{minimum} MT</span><strong>{label}</strong></div>; })}</div></section> : null}
-      <div className="tod-drawer-destinations"><button onClick={() => setDrawerView("evidence")}><span><strong>Tally evidence</strong><small>{evidenceVouchers.length} {evidenceVouchers.length === 1 ? "voucher" : "vouchers"} · {productSummary.length} {productSummary.length === 1 ? "product" : "products"}</small></span><ChevronRight size={16} /></button><button onClick={() => setDrawerView("payments")}><span><strong>Payment check</strong><small>{paymentChecks ? `${countedInvoices} of ${paymentChecks.length} invoices paid within 25 days` : "Day calculation per invoice"}</small></span><ChevronRight size={16} /></button>{isAdministrator && <button onClick={() => setDrawerView("audit")}><span><strong>Audit information</strong><small>Rule, customer group and action history</small></span><ChevronRight size={16} /></button>}</div>
+      <div className="tod-drawer-destinations"><button onClick={() => setDrawerView("evidence")}><span><strong>Tally evidence</strong><small>{evidenceVoucherCount} {evidenceVoucherCount === 1 ? "voucher" : "vouchers"} · {productSummary.length} {productSummary.length === 1 ? "product" : "products"}</small></span><ChevronRight size={16} /></button><button onClick={() => setDrawerView("payments")}><span><strong>Payment check</strong><small>{paymentChecks ? `${countedInvoices} of ${paymentChecks.length} invoices paid within 25 days` : typeof formula.paymentCheckTotal === "number" ? `${formula.paymentCheckCounted ?? 0} of ${formula.paymentCheckTotal} invoices paid within 25 days` : "Day calculation per invoice"}</small></span><ChevronRight size={16} /></button>{isAdministrator && <button onClick={() => setDrawerView("audit")}><span><strong>Audit information</strong><small>Rule, customer group and action history</small></span><ChevronRight size={16} /></button>}</div>
       {detail?.openIssues.length ? <section><h3>Needs attention</h3>{detail.openIssues.map((issue) => <OpenIssueSummary issue={issue} key={issue.id} />)}{tierDropIssue && canManage ? <div className="drawer-actions"><label>Finance review note<textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Why no correction message is needed" /></label><Button className="button-secondary" disabled={busy || reason.trim().length < 3} onClick={() => void action("resolve_tod_tier_review")}>Mark reviewed — no correction sent</Button><small>Closing this review never sends a WhatsApp. It only allows a future, genuinely new tier to be evaluated normally.</small></div> : null}</section> : null}
       {detail?.creditNotePosting && <section><h3>Credit Note progress</h3><CreditNoteLifecycle posting={detail.creditNotePosting} message={message} /><div className="tod-credit-note-summary"><div><span>Status</span><strong>{staffStatusLabel(detail.creditNotePosting.status)}</strong></div><div><span>Amount</span><strong>{formatMoney(detail.creditNotePosting.verified_amount ?? detail.creditNotePosting.discount_amount)}</strong></div><div><span>Tally number</span><strong>{detail.creditNotePosting.verified_voucher_number ?? "Waiting for confirmation"}</strong></div></div>{detail.creditNotePosting.document?.available && <Button className="button-secondary" onClick={() => void openDocument()}>Open Credit Note PDF</Button>}{canManage && detail.creditNotePosting.status === "created_verified" ? <Button className="button-quiet" disabled={busy || Boolean(noteReconciliationRunId)} onClick={() => void action("reconcile_credit_note")}><RefreshCw size={14} />{noteReconciliationRunId ? "Checking Tally…" : "Verify in Tally"}</Button> : null}{canManage && ["failed", "correction_required"].includes(detail.creditNotePosting.status) ? <div className="drawer-actions"><label>Reason for checking again<textarea value={reason} onChange={(event) => setReason(event.target.value)} placeholder="What was checked or corrected before retrying" /></label><Button disabled={busy || reason.trim().length < 3 || postingDisabled} onClick={() => void action("retry")}>{busy ? "Checking existing voucher…" : "Check existing Tally voucher again"}</Button><small>The permanent reference is reused, so this cannot create a duplicate Credit Note.</small></div> : null}</section>}
       {detail?.creditNotePosting?.status === "created_verified" && !detail.creditNotePosting.document?.available && <section><h3>Credit Note PDF</h3><p className="muted-copy">A reference PDF can be prepared from this verified Tally voucher. Templates requiring a document cannot be sent until it is ready.</p>{["pending", "exporting", "attached"].includes(detail.creditNotePosting.document?.status ?? "") && <InlineMessage tone="info">Preparing the reference PDF.</InlineMessage>}{detail.creditNotePosting.document?.failureReason && <InlineMessage tone="warning">{detail.creditNotePosting.document.failureReason}</InlineMessage>}{canManage && detail.creditNotePosting.verified_tally_guid && <Button className="button-secondary" disabled={busy} onClick={() => void action("request_pdf")}>{busy ? "Requesting…" : "Prepare PDF"}</Button>}</section>}
@@ -1961,82 +1937,237 @@ function PostingSwitch({ launchControl, onChanged, onError, show = "any" }: { la
   </>;
 }
 
+type NoteScheme = "all" | "tod" | "cd";
+type NoteView = "all" | "not_sent" | "sent" | "creating" | "attention";
+/** One Credit Note row, whichever scheme created it. */
+type NoteRow = {
+  key: string; scheme: "tod" | "cd"; customer: string; amount: number; voucherNumber: string | null; status: string;
+  noteDate: string | null; about: string | null; problem: string | null; fix: string | null;
+  whatsapp: { status: string; at: string | null; recipient: string | null } | null;
+  request: { kind: "credit_note" | "debit_note"; postingId: string }; proposal: Proposal | null;
+  why: string | null; invoiceGuid: string | null; messages: CreditNotePanelNote["messages"];
+  customerKey: string; group: string | null;
+};
+const CD_CATEGORY_WHY: Record<string, string> = { full_payment: "Full bill paid on time", discounted_payment: "Discounted amount paid on time", over_ninety_percent: "Paid on time, short by up to ₹10,000" };
+const NOTE_SENT = ["sent", "delivered", "read", "whatsapp_sent"];
+const NOTE_CREATING = ["queued", "sending", "verification_pending", "sending_to_tally"];
+
+/** What went wrong in Tally, and what to do about it, in plain words. */
+function noteProblem(status: string, reason: string | null, companyName: string) {
+  if (!["failed", "correction_required", "reconciliation_required"].includes(status)) return { problem: null, fix: null };
+  const text = reason ?? "Tally could not confirm this Credit Note.";
+  if (/active Tally company does not match/i.test(text)) return { problem: "Tally had another company open.", fix: `Open ${companyName} in Tally, then create it again.` };
+  if (/GST ledger/i.test(text)) return { problem: text, fix: "Remove the GST ledger from the Credit Note setup in the rule, then create it again." };
+  return { problem: text, fix: status === "reconciliation_required" ? "Check the voucher in Tally, then confirm or cancel it." : "Open it to retry safely." };
+}
+
+function noteView(row: NoteRow): Exclude<NoteView, "all"> {
+  if (row.problem) return "attention";
+  if (NOTE_CREATING.includes(row.status)) return "creating";
+  if (row.status !== "created_verified") return "attention";
+  if (row.whatsapp && ["failed", "suppressed"].includes(row.whatsapp.status)) return "attention";
+  return row.whatsapp && NOTE_SENT.includes(row.whatsapp.status) ? "sent" : "not_sent";
+}
+
 function CreditNotesPage({ data, customerNames, refresh, setError, setNotice }: PageProps) {
-  const [filter, setFilter] = useState("all");
+  const { company } = useCompany();
+  const [scheme, setScheme] = useState<NoteScheme>("all");
+  const [view, setView] = useState<NoteView>("all");
+  const [query, setQuery] = useState("");
+  const [shown, setShown] = useState(50);
   const [selected, setSelected] = useState<Proposal | null>(null);
-  const [selectedMessageIds, setSelectedMessageIds] = useState<Set<string>>(new Set());
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [sendTargets, setSendTargets] = useState<WhatsAppTarget[] | null>(null);
-  const messageForPosting = (postingId: string) => data.messages.find((message) => message.credit_note_posting_id === postingId) ?? null;
+  const [detailKey, setDetailKey] = useState<string | null>(null);
+  const [backToNoteKey, setBackToNoteKey] = useState<string | null>(null);
+  const [groupFilter, setGroupFilter] = useState("all");
+  const [layout, setLayout] = useState<"notes" | "customers">("notes");
+  const [period, setPeriod] = useState<Period>(defaultPeriod);
+  const [openCustomers, setOpenCustomers] = useState<Set<string>>(new Set());
   const readyCount = readyTodCreditNotes(data).length;
-  const tallyActiveStatuses = ["queued", "sending", "verification_pending", "sending_to_tally"];
-  const failedStatuses = ["failed", "correction_required"];
-  const deliveredStatuses = ["sent", "delivered", "read", "whatsapp_sent"];
-  const tallyActiveCount = data.creditNotes.filter((posting) => tallyActiveStatuses.includes(posting.status)).length;
-  const notSent = (posting: CreditNotePosting) => { const message = messageForPosting(posting.id); return posting.status === "created_verified" && (!message || !deliveredStatuses.includes(message.status ?? "")); };
-  const whatsappPendingCount = data.creditNotes.filter(notSent).length;
-  const completedCount = data.creditNotes.filter((posting) => posting.status === "created_verified" && !notSent(posting)).length;
-  const needsAttentionCount = data.creditNotes.filter((posting) => failedStatuses.includes(posting.status) || ["failed", "suppressed"].includes(messageForPosting(posting.id)?.status ?? "")).length;
-  const filtered = data.creditNotes.filter((posting) => {
-    const message = messageForPosting(posting.id);
-    if (filter === "all") return true;
-    if (filter === "tally") return tallyActiveStatuses.includes(posting.status);
-    if (filter === "whatsapp") return notSent(posting);
-    if (filter === "completed") return posting.status === "created_verified" && !notSent(posting);
-    if (filter === "reconciliation") return posting.status === "correction_required";
-    if (filter === "attention") return failedStatuses.includes(posting.status) || ["failed", "suppressed"].includes(message?.status ?? "");
-    return false;
+  const messageForPosting = (postingId: string) => data.messages.find((message) => message.credit_note_posting_id === postingId) ?? null;
+
+  // Each customer's Tally group, as in Tally (from the reference masters).
+  const groupOfCustomer = (customerId: string) => {
+    const groupId = data.reference?.masters.customers.find((customer) => customer.id === customerId)?.current_customer_group_id;
+    return groupId ? data.reference?.masters.customerGroups.find((group) => group.id === groupId)?.name ?? null : null;
+  };
+  // Turnover Discount and Cash Discount Credit Notes as one list.
+  const rows: NoteRow[] = useMemo(() => {
+    const tod = data.creditNotes.map((posting): NoteRow => {
+      const proposal = data.proposals.find((item) => item.id === posting.proposal_id) ?? null;
+      const message = messageForPosting(posting.id);
+      const tonnes = Number(proposal?.eligible_tonnes ?? 0);
+      const period = proposal?.period_start && proposal.period_end ? `${formatBusinessDate(proposal.period_start)} – ${formatBusinessDate(proposal.period_end)}` : null;
+      return {
+        key: `tod:${posting.id}`, scheme: "tod", customer: proposal?.customer_name ?? customerNames.get(posting.customer_id) ?? "Customer unavailable",
+        amount: Number(posting.verified_amount ?? posting.discount_amount ?? 0), voucherNumber: posting.verified_voucher_number, status: posting.status,
+        noteDate: posting.credit_note_date, about: [period, tonnes > 0 ? `${formatTonnes(tonnes)} MT` : null].filter(Boolean).join(" · ") || null,
+        ...noteProblem(posting.status, posting.failure_reason ?? posting.reconciliation_reason ?? null, company.tally_company_name),
+        whatsapp: message ? { status: message.status, at: message.read_at ?? message.delivered_at ?? message.sent_at ?? message.created_at, recipient: message.recipient_phone_e164 } : null,
+        request: { kind: "credit_note", postingId: posting.id }, proposal,
+        why: [period ? `Turnover Discount for ${period}` : "Turnover Discount", tonnes > 0 ? `${formatTonnes(tonnes)} MT counted` : null].filter(Boolean).join(" · "),
+        invoiceGuid: null,
+        customerKey: posting.customer_id,
+        group: groupOfCustomer(posting.customer_id),
+        messages: data.messages.filter((item) => item.credit_note_posting_id === posting.id).sort((left, right) => right.created_at.localeCompare(left.created_at))
+          .map((item) => ({ status: item.status, at: item.read_at ?? item.delivered_at ?? item.sent_at ?? item.created_at, recipient: item.recipient_phone_e164, failureReason: item.failure_reason })),
+      };
+    });
+    const cd = (data.cdCreditNotes ?? []).map((note): NoteRow => ({
+      key: `cd:${note.id}`, scheme: "cd", customer: note.customerName ?? "Customer unavailable", amount: Number(note.amount ?? 0),
+      voucherNumber: note.voucherNumber, status: note.status, noteDate: note.noteDate,
+      about: [note.invoiceNumber ? `Inv ${note.invoiceNumber}` : null, note.invoiceDate ? formatBusinessDate(note.invoiceDate) : null, note.eligibleTonnes ? `${formatTonnes(note.eligibleTonnes)} MT × ₹${Number(note.amountPerTonne ?? 0).toLocaleString("en-IN")}/MT` : null].filter(Boolean).join(" · ") || null,
+      ...noteProblem(note.status, note.failureReason, company.tally_company_name),
+      whatsapp: note.whatsapp ? { status: note.whatsapp.status, at: note.whatsapp.readAt ?? note.whatsapp.deliveredAt ?? note.whatsapp.sentAt, recipient: note.whatsapp.recipient } : null,
+      // Stored with Debit Notes; the server sends it with the Credit Note template.
+      request: { kind: "debit_note", postingId: note.id }, proposal: null,
+      why: [note.category ? CD_CATEGORY_WHY[note.category] ?? null : null, note.windowDeadline ? `deadline ${formatBusinessDate(note.windowDeadline)}` : null, note.eligibleTonnes ? `${formatTonnes(note.eligibleTonnes)} MT × ₹${Number(note.amountPerTonne ?? 0).toLocaleString("en-IN")}/MT` : null, note.invoiceNumber ? `Inv ${note.invoiceNumber}${note.invoiceDate ? ` dated ${formatBusinessDate(note.invoiceDate)}` : ""}` : null].filter(Boolean).join(" · ") || null,
+      invoiceGuid: note.invoiceGuid ?? null,
+      customerKey: note.customerId ?? `name:${note.customerName ?? note.id}`,
+      group: note.customerGroup ?? null,
+      messages: (note.whatsappHistory ?? (note.whatsapp ? [note.whatsapp] : [])).map((item) => ({ status: item.status, at: item.readAt ?? item.deliveredAt ?? item.sentAt ?? item.createdAt ?? null, recipient: item.recipient, failureReason: item.failureReason })),
+    }));
+    return [...tod, ...cd].sort((left, right) => (right.noteDate ?? "").localeCompare(left.noteDate ?? ""));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data.creditNotes, data.cdCreditNotes, data.proposals, data.messages, data.reference, customerNames, company.tally_company_name]);
+
+  // Everything below follows the period (Credit Note date), like a Tally register.
+  const periodRows = rows.filter((row) => inPeriod(period, row.noteDate));
+  const schemeRows = periodRows.filter((row) => scheme === "all" || row.scheme === scheme);
+  // Work left outside the period is never silently hidden.
+  const openOutside = rows.filter((row) => !inPeriod(period, row.noteDate) && (scheme === "all" || row.scheme === scheme) && ["attention", "not_sent"].includes(noteView(row)));
+  const q = query.trim().toLowerCase();
+  const groupOptions = [...new Set(schemeRows.map((row) => row.group ?? "No group"))].sort((left, right) => left === "No group" ? 1 : right === "No group" ? -1 : left.localeCompare(right));
+  const visible = schemeRows.filter((row) => (view === "all" || noteView(row) === view)
+    && (groupFilter === "all" || (row.group ?? "No group") === groupFilter)
+    && (!q || `${row.customer} ${row.group ?? ""} ${row.voucherNumber ?? ""} ${row.about ?? ""}`.toLowerCase().includes(q)));
+  // By customer: one line per customer, unsent / failed first, then the largest amounts.
+  const customers = [...visible.reduce((map, row) => {
+    const entry = map.get(row.customerKey) ?? { key: row.customerKey, name: row.customer, group: row.group, rows: [] as NoteRow[] };
+    entry.rows.push(row);
+    return map.set(row.customerKey, entry);
+  }, new Map<string, { key: string; name: string; group: string | null; rows: NoteRow[] }>()).values()].map((customer) => {
+    const unsent = customer.rows.filter((row) => row.status === "created_verified" && (!row.whatsapp || !NOTE_SENT.includes(row.whatsapp.status)));
+    return { ...customer, total: customer.rows.reduce((sum, row) => sum + row.amount, 0), unsent, attention: customer.rows.filter((row) => noteView(row) === "attention").length };
+  }).sort((left, right) => (right.attention - left.attention) || (right.unsent.length - left.unsent.length) || (right.total - left.total));
+  const visibleTotal = visible.reduce((total, row) => total + row.amount, 0);
+  const schemeCards = (["all", "tod", "cd"] as const).map((key) => {
+    const inScheme = periodRows.filter((row) => key === "all" || row.scheme === key);
+    return { key, label: key === "all" ? "All Credit Notes" : key === "tod" ? "Turnover Discount" : "Cash Discount", count: inScheme.length, amount: inScheme.reduce((total, row) => total + row.amount, 0), attention: inScheme.filter((row) => noteView(row) === "attention").length };
   });
-  const filters = [["all", "All"], ["tally", "Creating in Tally"], ["whatsapp", "WhatsApp not sent"], ["completed", "Sent"], ["attention", "Needs attention"]];
-  const hasActiveWork = tallyActiveCount > 0 || data.messages.some((message) => message.credit_note_posting_id && ["queued", "sending", "retrying"].includes(message.status));
-  const customerFor = (posting: CreditNotePosting) => data.proposals.find((proposal) => proposal.id === posting.proposal_id)?.customer_name ?? customerNames.get(posting.customer_id) ?? "Customer unavailable";
-  const selectableIds = filtered.filter((posting) => posting.status === "created_verified").map((posting) => posting.id);
-  const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selectedMessageIds.has(id));
-  const selectableKey = selectableIds.join(",");
+  const viewCount = (key: Exclude<NoteView, "all">) => schemeRows.filter((row) => noteView(row) === key).length;
+  // Keep refreshing while a note is being created or any WhatsApp (Turnover or Cash Discount) is on its way.
+  const hasActiveWork = rows.some((row) => NOTE_CREATING.includes(row.status) || ["queued", "sending", "retrying"].includes(row.whatsapp?.status ?? ""));
+  const selectable = visible.filter((row) => row.status === "created_verified").map((row) => row.key);
+  const allSelected = selectable.length > 0 && selectable.every((key) => selectedKeys.has(key));
+  const selectableKey = selectable.join(",");
   useEffect(() => {
     const allowed = new Set(selectableKey ? selectableKey.split(",") : []);
-    setSelectedMessageIds((current) => [...current].every((id) => allowed.has(id)) ? current : new Set([...current].filter((id) => allowed.has(id))));
+    setSelectedKeys((current) => [...current].every((key) => allowed.has(key)) ? current : new Set([...current].filter((key) => allowed.has(key))));
   }, [selectableKey]);
-  const openSend = (ids: string[]) => setSendTargets(data.creditNotes.filter((posting) => ids.includes(posting.id) && posting.status === "created_verified").map((posting) => {
-    const proposal = data.proposals.find((item) => item.id === posting.proposal_id);
-    const message = messageForPosting(posting.id);
-    return {
-      key: posting.id, customerId: posting.customer_id, customerName: customerFor(posting),
-      detail: `${posting.verified_voucher_number ? `Credit Note ${posting.verified_voucher_number}` : "Credit Note"}${proposal?.period_start && proposal.period_end ? ` · ${formatBusinessDate(proposal.period_start)} – ${formatBusinessDate(proposal.period_end)}` : ""}`,
-      amount: posting.verified_amount ?? posting.discount_amount, lastMessage: message ? { status: message.status, recipient: message.recipient_phone_e164 } : null,
-      request: { kind: "credit_note" as const, postingId: posting.id },
-    };
-  }));
+  useEffect(() => { setShown(50); }, [scheme, view, query, groupFilter, layout, period]);
+  const openSend = (keys: string[]) => setSendTargets(rows.filter((row) => keys.includes(row.key) && row.status === "created_verified").map((row) => ({
+    key: row.key, customerId: row.proposal?.customer_id ?? (row.customerKey.startsWith("name:") ? null : row.customerKey), customerName: row.customer,
+    detail: `${row.voucherNumber ? `Credit Note ${row.voucherNumber}` : "Credit Note"}${row.about ? ` · ${row.about}` : ""}`,
+    amount: row.amount, lastMessage: row.whatsapp ? { status: row.whatsapp.status, recipient: row.whatsapp.recipient } : null,
+    request: row.request,
+  })));
   useEffect(() => {
     if (!hasActiveWork) return;
     const interval = window.setInterval(() => { void refresh(); }, 5_000);
     return () => window.clearInterval(interval);
   }, [hasActiveWork, refresh]);
 
+  const renderNoteRow = (row: NoteRow) => {
+        const created = row.status === "created_verified";
+        const whatsappState = !created ? { label: "After Tally", tone: "muted" }
+          : !row.whatsapp ? { label: "Not sent", tone: "waiting" }
+          : ["failed", "suppressed"].includes(row.whatsapp.status) ? { label: "Not delivered", tone: "problem" }
+          : NOTE_SENT.includes(row.whatsapp.status) ? { label: row.whatsapp.status === "read" ? "Read" : row.whatsapp.status === "delivered" ? "Delivered" : "Sent", tone: "done" }
+          : { label: "Sending…", tone: "active" };
+        const tallyState = created ? { label: `No. ${row.voucherNumber ?? "—"}`, tone: "done" } : row.problem ? { label: row.status === "reconciliation_required" ? "Check in Tally" : "Not created", tone: "problem" } : { label: "Creating…", tone: "active" };
+        return <div className={`note-table-row${row.problem ? " has-problem" : ""}`} role="row" key={row.key}>
+          <span>{created ? <input type="checkbox" aria-label={`Select ${row.customer} for WhatsApp`} checked={selectedKeys.has(row.key)} onChange={() => setSelectedKeys((current) => { const next = new Set(current); if (next.has(row.key)) next.delete(row.key); else next.add(row.key); return next; })} /> : null}</span>
+          <div><strong>{row.customer}</strong><small>{row.group && layout === "notes" && <span className="cd-tag note-group-tag">{row.group}</span>}<span className={`note-scheme is-${row.scheme}`}>{row.scheme === "tod" ? "Turnover Discount" : "Cash Discount"}</span>{row.about ? ` ${row.about}` : ""}</small></div>
+          <strong className="note-table-amount">{formatMoney(row.amount)}</strong>
+          <div><span className={`note-pill is-${tallyState.tone}`}>{tallyState.label}</span><small>{created && row.noteDate ? formatBusinessDate(row.noteDate) : null}</small>{row.problem && <small className="note-table-problem">{row.problem}{row.fix ? <> <strong>{row.fix}</strong></> : null}</small>}</div>
+          <div><span className={`note-pill is-${whatsappState.tone}`}>{whatsappState.label}</span>{row.whatsapp?.at && created && <small>{formatDate(row.whatsapp.at)}{row.whatsapp.recipient ? ` · ${row.whatsapp.recipient}` : ""}</small>}</div>
+          <div className="note-table-actions">
+            {created && <Button className="button-secondary" onClick={() => openSend([row.key])}><Send size={14} />{row.whatsapp ? "Send again" : "Send"}</Button>}
+            <Button className="button-quiet" onClick={() => setDetailKey(row.key)}>{row.problem ? "Fix" : "Details"}</Button>
+          </div>
+        </div>;
+  };
   return <div className="credit-notes-page">
-    <WorkspacePageHeader eyebrow="" title="Credit Notes" detail="Turnover Discount Credit Notes created in Tally." action={<IconButton label="Refresh Credit Notes" onClick={() => void refresh()}><RefreshCw size={16} /></IconButton>} />
-    <div className="credit-note-summary" aria-label="Credit Note summary"><div><strong>{data.creditNotes.length}</strong><span>All Credit Notes</span></div><div><strong>{tallyActiveCount}</strong><span>Creating in Tally</span></div><div><strong>{whatsappPendingCount}</strong><span>WhatsApp not sent</span></div><div><strong>{completedCount}</strong><span>Sent</span></div><div className={needsAttentionCount ? "has-attention" : ""}><strong>{needsAttentionCount}</strong><span>Needs attention</span></div></div>
-    <div className="credit-note-filter-bar"><label><span className="sr-only">Filter Credit Notes</span><select aria-label="Filter Credit Notes" value={filter} onChange={(event) => { setFilter(event.target.value); setSelectedMessageIds(new Set()); }}>{filters.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><div className="note-message-toolbar-actions"><Button disabled={!selectedMessageIds.size} onClick={() => openSend([...selectedMessageIds])}><Send size={14} />{selectedMessageIds.size ? `Send WhatsApp (${selectedMessageIds.size})` : "Send WhatsApp"}</Button></div></div>
-    {readyCount > 0 && <InlineMessage tone="info"><strong>{readyCount} Turnover Discount Credit Note{readyCount === 1 ? "" : "s"} ready to create.</strong> <Link href="/turnover-discount?view=create">Open Turnover Discount</Link></InlineMessage>}
-    <section className="credit-note-section credit-note-history"><div className="credit-note-section-heading"><h2>Credit Note history</h2>{selectableIds.length > 0 && <label className="note-select-all"><input type="checkbox" checked={allSelected} onChange={() => setSelectedMessageIds(allSelected ? new Set() : new Set(selectableIds))} />Select all confirmed</label>}</div>{filtered.length ? <div className="note-table" role="table" aria-label="Credit Note history"><div className="note-table-head" role="row"><span /><span>Customer</span><span>Amount</span><span>Tally</span><span>WhatsApp</span><span /></div>{filtered.map((posting) => {
-      const proposal = data.proposals.find((item) => item.id === posting.proposal_id) ?? null;
-      const message = messageForPosting(posting.id);
-      const canSend = posting.status === "created_verified";
-      const status = noteRowStatus(posting, message);
-      const problem = ["failed", "correction_required"].includes(posting.status) ? posting.failure_reason ?? posting.reconciliation_reason ?? "Tally could not confirm this Credit Note." : null;
-      // One compact row per note; a Tally problem shows as one short line
-      // under the Tally status, with the fix available from Open → Retry safely.
-      return <div className="note-table-row" role="row" key={posting.id}>
-        <span>{canSend ? <input type="checkbox" aria-label={`Select ${customerFor(posting)} for WhatsApp`} checked={selectedMessageIds.has(posting.id)} onChange={() => setSelectedMessageIds((current) => { const next = new Set(current); if (next.has(posting.id)) next.delete(posting.id); else next.add(posting.id); return next; })} /> : null}</span>
-        <div><strong>{customerFor(posting)}</strong><small>{proposal?.period_start && proposal.period_end ? `${formatBusinessDate(proposal.period_start)} – ${formatBusinessDate(proposal.period_end)}` : formatBusinessDate(posting.credit_note_date)}</small></div>
-        <strong className="note-table-amount">{formatMoney(posting.verified_amount ?? posting.discount_amount)}</strong>
-        <div><span className={`note-pill is-${status.tally.tone}`}>{status.tally.label}</span>{problem && <small className="note-table-problem" title={problem}>{problem}</small>}</div>
-        <div><span className={`note-pill is-${status.whatsapp.tone}`}>{status.whatsapp.label}</span></div>
-        <div className="note-table-actions">{canSend && <Button className="button-quiet" onClick={() => openSend([posting.id])}><Send size={14} />{message ? "Resend" : "Send"}</Button>}<Button className="button-quiet" onClick={() => proposal && setSelected(proposal)} disabled={!proposal}>{problem ? "Fix" : "Open"}</Button></div>
-      </div>;
-    })}</div> : <EmptyState title={data.creditNotes.length ? "No Credit Notes match this filter" : "No Credit Notes yet"} detail={data.creditNotes.length ? "Choose another status." : "Create them from Turnover Discount → Ready to create."} action={data.creditNotes.length ? undefined : <Link className="button button-secondary" href="/turnover-discount?view=create">Open Turnover Discount</Link>} />}</section>
-    <WhatsAppSendDrawer open={Boolean(sendTargets)} targets={sendTargets ?? []} onClose={() => setSendTargets(null)} onSent={async (count) => { setSelectedMessageIds(new Set()); setNotice(`${count} WhatsApp message${count === 1 ? "" : "s"} queued.`); await refresh(); }} />
-    <ProposalDrawer proposal={selected} onClose={() => setSelected(null)} onChanged={refresh} onError={setError} customerName={selected ? selected.customer_name ?? customerNames.get(selected.customer_id) : undefined} launchMode={data.launchControl?.mode} />
+    <WorkspacePageHeader eyebrow="" title="Credit Notes" detail="Turnover Discount and Cash Discount Credit Notes created in Tally." action={<IconButton label="Refresh Credit Notes" onClick={() => void refresh()}><RefreshCw size={16} /></IconButton>} />
+    {/* Level 1: which notes (scheme tabs) and when (period). Level 2: narrow them. Level 3: the result. */}
+    <div className="nf-head">
+      <div className="nf-tabs" role="tablist" aria-label="Scheme">
+        {schemeCards.filter((card) => card.key === "all" || card.count > 0).map((card) => <button key={card.key} type="button" role="tab" aria-selected={scheme === card.key} className={scheme === card.key ? "is-active" : ""} onClick={() => { setScheme(card.key); setSelectedKeys(new Set()); }}>
+          {card.key === "all" ? "All Credit Notes" : card.key === "tod" ? "Turnover Discount" : "Cash Discount"}<span className="nf-count">{card.count}</span>{card.attention > 0 && <span className="nf-dot" title={`${card.attention} need attention`} />}
+        </button>)}
+      </div>
+      <div className="nf-period"><CalendarDays size={15} aria-hidden="true" /><PeriodFilter period={period} basis="Credit Note date" onChange={(next) => { setPeriod(next); setSelectedKeys(new Set()); }} /></div>
+    </div>
+    <div className="nf-toolbar">
+      <div className="nf-seg" role="tablist" aria-label="Status">
+        {([["all", "All", schemeRows.length], ["not_sent", "Not sent", viewCount("not_sent")], ["sent", "Sent", viewCount("sent")], ["creating", "Creating", viewCount("creating")], ["attention", "Needs attention", viewCount("attention")]] as const)
+          .filter(([key, , total]) => key === "all" || total > 0)
+          .map(([key, label, total]) => <button key={key} type="button" role="tab" aria-selected={view === key} className={`${view === key ? "is-active" : ""}${key === "attention" && total > 0 ? " is-alert" : ""}`} onClick={() => { setView(key); setSelectedKeys(new Set()); }}>{label}<span>{total}</span></button>)}
+      </div>
+      <div className="nf-tools">
+        <label className="nf-search"><Search size={14} aria-hidden="true" /><span className="sr-only">Search Credit Notes</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search customer, CN, invoice" /></label>
+        {groupOptions.length > 1 && <label className="nf-select"><span className="sr-only">Customer group</span><select value={groupFilter} onChange={(event) => { setGroupFilter(event.target.value); setSelectedKeys(new Set()); }}><option value="all">All groups</option>{groupOptions.map((group) => <option key={group} value={group}>{group} ({schemeRows.filter((row) => (row.group ?? "No group") === group).length})</option>)}</select></label>}
+        <div className="nf-seg nf-icons" role="tablist" aria-label="Layout">
+          <button type="button" role="tab" aria-selected={layout === "notes"} className={layout === "notes" ? "is-active" : ""} title="List" onClick={() => setLayout("notes")}><List size={15} /><span className="sr-only">List</span></button>
+          <button type="button" role="tab" aria-selected={layout === "customers"} className={layout === "customers" ? "is-active" : ""} title="By customer" onClick={() => setLayout("customers")}><Users size={15} /><span className="sr-only">By customer</span></button>
+        </div>
+      </div>
+    </div>
+    <p className="nf-summary">
+      <span><strong>{formatMoney(visibleTotal)}</strong> across {visible.length} Credit Note{visible.length === 1 ? "" : "s"}{layout === "customers" ? ` · ${customers.length} customer${customers.length === 1 ? "" : "s"}` : ""}{period.preset !== "all" ? ` · ${periodLabel(period).replace(/^.*\((.*)\)$/, "$1")}` : ""}</span>
+      {openOutside.length > 0 && <button type="button" className="inline-link is-attention" onClick={() => setPeriod({ preset: "all", from: "", to: "" })}>{openOutside.length} open outside this period</button>}
+      {readyCount > 0 && <Link href="/turnover-discount?view=create">{readyCount} Turnover Discount ready to create →</Link>}
+    </p>
+    <section className="credit-note-section credit-note-history">
+      {!visible.length ? <EmptyState title={rows.length ? "No Credit Notes match this view" : "No Credit Notes yet"} detail={rows.length ? "Change the area, status, group or search." : "Create them from Turnover Discount or Cash Discount."} action={rows.length ? <Button className="button-secondary" onClick={() => { setScheme("all"); setView("all"); setQuery(""); setGroupFilter("all"); }}>Show all</Button> : <Link className="button button-secondary" href="/turnover-discount?view=create">Open Turnover Discount</Link>} />
+        : layout === "notes" ? <div className="note-table" role="table" aria-label="Credit Notes"><div className="note-table-head" role="row"><span>{selectable.length > 0 && <input type="checkbox" aria-label="Select all created Credit Notes in view" checked={allSelected} onChange={() => setSelectedKeys(allSelected ? new Set() : new Set(selectable))} />}</span><span>Customer and reason</span><span>Amount</span><span>Tally</span><span>WhatsApp</span><span /></div>{visible.slice(0, shown).map(renderNoteRow)}</div>
+        : <div className="note-customers" aria-label="Credit Notes by customer">{customers.slice(0, shown).map((customer) => {
+          const open = openCustomers.has(customer.key);
+          return <section key={customer.key} className={`note-customer${open ? " is-open" : ""}`}>
+            <div className="note-customer-head">
+              <button type="button" className="note-customer-toggle" aria-expanded={open} onClick={() => setOpenCustomers((current) => { const next = new Set(current); if (next.has(customer.key)) next.delete(customer.key); else next.add(customer.key); return next; })}>
+                <ChevronRight size={15} className="note-customer-caret" />
+                <span><strong>{customer.name}</strong><small>{customer.group ?? "No group"} · {customer.rows.length} Credit Note{customer.rows.length === 1 ? "" : "s"}</small></span>
+              </button>
+              <strong className="note-table-amount">{formatMoney(customer.total)}</strong>
+              <span className={`note-pill is-${customer.attention ? "problem" : customer.unsent.length ? "waiting" : "done"}`}>{customer.attention ? `${customer.attention} need attention` : customer.unsent.length ? `${customer.unsent.length} not sent` : "All sent"}</span>
+              <div className="note-table-actions">{customer.unsent.length > 0 && <Button className="button-secondary" onClick={() => openSend(customer.unsent.map((row) => row.key))}><Send size={14} />{customer.unsent.length === 1 ? "Send" : `Send all ${customer.unsent.length}`}</Button>}</div>
+            </div>
+            {open && <div className="note-table note-customer-notes" role="table" aria-label={`${customer.name} Credit Notes`}>{customer.rows.map(renderNoteRow)}</div>}
+          </section>;
+        })}</div>}
+      {selectedKeys.size > 0 && <div className="tod-bulk-bar" role="region" aria-label="Selected Credit Notes">
+        <span><strong>{selectedKeys.size} selected</strong> · {formatMoney(rows.filter((row) => selectedKeys.has(row.key)).reduce((total, row) => total + row.amount, 0))}</span>
+        <div><button type="button" className="tod-selection-clear" onClick={() => setSelectedKeys(new Set())}>Clear</button><Button onClick={() => openSend([...selectedKeys])}><Send size={14} />Send WhatsApp</Button></div>
+      </div>}
+      {(layout === "notes" ? visible.length : customers.length) > shown && <div className="note-show-more"><Button className="button-secondary" onClick={() => setShown((value) => value + 50)}>Show more ({(layout === "notes" ? visible.length : customers.length) - shown} left)</Button></div>}
+    </section>
+    {(() => {
+      const row = detailKey ? rows.find((item) => item.key === detailKey) ?? null : null;
+      const note: CreditNotePanelNote | null = row ? {
+        scheme: row.scheme, postingId: row.request.postingId, invoiceGuid: row.invoiceGuid, customer: row.customer, amount: row.amount, voucherNumber: row.voucherNumber,
+        status: row.status, noteDate: row.noteDate, why: row.why, problem: row.problem, fix: row.fix, gstInclusive: row.scheme === "cd", messages: row.messages,
+      } : null;
+      const openCalculation = !row ? null
+        // Turnover Discount opens its result with a Back button to this note; Cash Discount opens its invoice check inside the note drawer itself.
+        : row.proposal ? () => { setBackToNoteKey(row.key); setDetailKey(null); setSelected(row.proposal); }
+        : null;
+      return <CreditNotePanel note={note} companyId={company.id} onClose={() => setDetailKey(null)} onSend={() => { if (row) { setDetailKey(null); openSend([row.key]); } }}
+        onOpenCalculation={openCalculation} calculationLabel={row?.scheme === "cd" ? "Open invoice check" : row?.problem ? "Open and fix" : "Open calculation"} />;
+    })()}
+    <WhatsAppSendDrawer open={Boolean(sendTargets)} targets={sendTargets ?? []} onClose={() => setSendTargets(null)} onSent={async (count) => { setSelectedKeys(new Set()); setNotice(`${count} WhatsApp message${count === 1 ? "" : "s"} queued.`); await refresh(); }} />
+    <ProposalDrawer proposal={selected} onClose={() => { setSelected(null); setBackToNoteKey(null); }} onChanged={refresh} onError={setError} customerName={selected ? selected.customer_name ?? customerNames.get(selected.customer_id) : undefined} launchMode={data.launchControl?.mode}  onBackToNote={backToNoteKey ? () => { setSelected(null); setDetailKey(backToNoteKey); setBackToNoteKey(null); } : undefined}/>
   </div>;
 }
-
-function MessageDetailDrawer({ message, onClose }: { message: NotificationMessage | null; onClose: () => void }) { return <Drawer open={Boolean(message)} onClose={onClose} title="Delivery detail" description="Safe delivery history; no raw provider payload is shown.">{message && <div className="drawer-stack"><DetailGrid rows={[["Event", message.event_type.replaceAll("_", " ")], ["Recipient", safePhone(message.recipient_phone_e164)], ["Status", message.status.replaceAll("_", " ")], ["Consent", message.opt_in_snapshot ? "Opt-in snapshot recorded" : "Not available"], ["Attempts", `${message.attempt_count} of ${message.max_attempts}`], ["Sent", formatDate(message.sent_at)]]} />{message.failure_reason && <InlineMessage tone="error">{message.failure_reason}</InlineMessage>}<p className="muted-copy">Provider payloads and arbitrary message composition are intentionally unavailable.</p></div>}</Drawer>; }

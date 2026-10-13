@@ -5,6 +5,7 @@ import { RulebookRequestError } from "@/lib/rulebook/shared";
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { readIdempotencyKey } from "@/lib/tally/contracts";
+import { retireObsoleteEvaluationReads } from "@/lib/evaluation/refresh-commands.mjs";
 
 type RouteContext = { params: Promise<{ companyId: string; candidateId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -22,7 +23,9 @@ export async function POST(request: Request, context: RouteContext) {
     if (!idempotencyKey) return jsonWithCors(request, { error: "Idempotency-Key header is required." }, { status: 400 });
     const { company, userId } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator"]);
     await requirePostingEnabled(company.id);
-    const { data, error } = await createSupabaseAdminClient().rpc("enqueue_meenakshi_cd_credit_note", {
+    const db = createSupabaseAdminClient();
+    await retireObsoleteEvaluationReads(db, { companyId: company.id });
+    const { data, error } = await db.rpc("enqueue_meenakshi_cd_credit_note", {
       p_company_id: company.id, p_candidate_id: candidateId, p_actor_id: userId, p_idempotency_key: idempotencyKey,
     });
     if (error) return jsonWithCors(request, { error: error.message }, { status: 409 });

@@ -39,6 +39,10 @@ function rulePeriods(rule: { periodAnchorDate: string; periodMonths: number; eff
   return periods;
 }
 
+// Preparing the batches reads every customer's invoices, so a repeat visit within
+// a minute reuses the last result (and one load is shared by simultaneous calls).
+const bootstrapCache = new Map<string, { expiresAt: number; pending: Promise<Awaited<ReturnType<typeof loadLiveTodLocalBootstrap>>> }>();
+
 export async function GET(request: Request, context: RouteContext) {
   try {
     const { companyId } = await context.params;
@@ -56,7 +60,16 @@ export async function GET(request: Request, context: RouteContext) {
       tally_master_refresh_run_id: null,
       tally_voucher_refresh_run_id: null,
     };
-    const bootstrap = await loadLiveTodLocalBootstrap(syntheticRun);
+    const cacheKey = `${company.id}:${asOfDate}:${today}`;
+    let entry = bootstrapCache.get(cacheKey);
+    if (!entry || entry.expiresAt < Date.now() || url.searchParams.get("fresh") === "1") {
+      const pending = loadLiveTodLocalBootstrap(syntheticRun);
+      entry = { expiresAt: Date.now() + 60_000, pending };
+      bootstrapCache.set(cacheKey, entry);
+      pending.catch(() => { if (bootstrapCache.get(cacheKey)?.pending === pending) bootstrapCache.delete(cacheKey); });
+      if (bootstrapCache.size > 20) bootstrapCache.delete(bootstrapCache.keys().next().value as string);
+    }
+    const bootstrap = await entry.pending;
     const activeRule = [...bootstrap.batches].sort((left, right) => right.rule.versionNumber - left.rule.versionNumber)[0]?.rule ?? null;
     const activeSchemeVersionId = activeRule?.id ?? null;
     return jsonWithCors(request, {

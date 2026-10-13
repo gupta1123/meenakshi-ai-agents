@@ -9,9 +9,10 @@ import { isLiveTodAggregate, isLiveTodBatchAggregate } from "@/lib/evaluation/li
 import { completeLiveCdRun, isLiveCdBatch } from "@/lib/evaluation/live-cd";
 import { wakeEvaluationRunAfterTallyResult } from "@/lib/evaluation/wake-run";
 import { prepareCreditNoteDocument, prepareDebitNoteDocument } from "@/lib/notes/verified-note-document.mjs";
+import { getObsoleteEvaluationReadReason, retireEvaluationRead, OBSOLETE_READ_PREFIX } from "@/lib/evaluation/refresh-commands.mjs";
 
 type RouteContext = { params: Promise<{ commandId: string }> };
-type CommandRow = { id: string; organization_id: string; company_id: string; connector_id: string; correlation_id: string; attempts: number; max_attempts: number; command_type: string; payload: Record<string, unknown> };
+type CommandRow = { id: string; organization_id: string; company_id: string; connector_id: string; correlation_id: string; attempts: number; max_attempts: number; command_type: string; payload: Record<string, unknown>; status: string; failure_reason: string | null };
 function retryAt(attempts: number) { return new Date(Date.now() + Math.min(15 * 2 ** Math.max(0, attempts - 1), 15 * 60) * 1_000).toISOString(); }
 
 function localDiagnostic(error: unknown) {
@@ -50,10 +51,19 @@ export async function POST(request: Request, context: RouteContext) {
     const connector = await authenticateMeenakshiBridge(connectorId, controlToken);
     if (!connector) return jsonWithCors(request, { error: "Invalid connector credential." }, { status: 401 });
     const supabase = createSupabaseAdminClient();
-    const { data: command, error: commandError } = await supabase.from("tally_commands").select("id, organization_id, company_id, connector_id, correlation_id, attempts, max_attempts, command_type, payload").eq("id", commandId).eq("connector_id", connector.id).eq("status", "sending").eq("attempts", attempt).maybeSingle();
+    const { data: command, error: commandError } = await supabase.from("tally_commands").select("id, organization_id, company_id, connector_id, correlation_id, attempts, max_attempts, command_type, payload, status, failure_reason").eq("id", commandId).eq("connector_id", connector.id).eq("attempts", attempt).maybeSingle();
     if (commandError) throw commandError;
     if (!command) return jsonWithCors(request, { error: "Command is not currently leased to this bridge." }, { status: 409 });
     const row = command as unknown as CommandRow;
+    if (row.command_type === "fetch_meenakshi_evidence" && row.status === "dead_letter" && row.failure_reason?.startsWith(OBSOLETE_READ_PREFIX)) {
+      return jsonWithCors(request, { command: { id: row.id, status: row.status }, discarded: true });
+    }
+    if (row.status !== "sending") return jsonWithCors(request, { error: "Command is not currently leased to this bridge." }, { status: 409 });
+    const obsoleteReason = await getObsoleteEvaluationReadReason(supabase, row);
+    if (obsoleteReason) {
+      await retireEvaluationRead(supabase, row, obsoleteReason);
+      return jsonWithCors(request, { command: { id: row.id, status: "dead_letter" }, discarded: true });
+    }
     // Re-running a create operation after an ambiguous network/Tally result
     // can create a second financial voucher.  Creation retries therefore
     // require a deliberate, separately audited user action.  The bridge

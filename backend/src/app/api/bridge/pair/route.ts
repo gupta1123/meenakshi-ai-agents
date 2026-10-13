@@ -29,6 +29,19 @@ export async function POST(request: Request) {
     if (error) throw error;
     if (!data) return jsonWithCors(request, { error: "Connector pairing state changed. Retry from setup." }, { status: 409 });
     const paired = data as typeof connector;
+    // The same computer connecting again replaces its older entries (unless a company still uses one).
+    if (!paired.machine_fingerprint.startsWith("pending:")) {
+      const supabase = createSupabaseAdminClient();
+      const { data: older } = await supabase.from("tally_connectors").select("id")
+        .eq("organization_id", paired.organization_id).eq("machine_fingerprint", paired.machine_fingerprint).neq("id", paired.id).neq("status", "revoked");
+      const olderIds = (older ?? []).map((row) => row.id as string);
+      if (olderIds.length) {
+        const { data: inUse } = await supabase.from("tally_connector_company_bindings").select("connector_id").in("connector_id", olderIds).eq("is_active", true);
+        const used = new Set((inUse ?? []).map((row) => row.connector_id as string));
+        const retire = olderIds.filter((id) => !used.has(id));
+        if (retire.length) await supabase.from("tally_connectors").update({ status: "revoked", revoked_at: now }).in("id", retire);
+      }
+    }
     await appendMeenakshiAuditEvent({ organizationId: paired.organization_id, actorType: "tally_connector", action: "tally_connector_paired", entityType: "tally_connector", entityId: paired.id, newValue: { bridgeVersion, installationKey: paired.installation_key }, metadata: { machineFingerprint: paired.machine_fingerprint } });
     return jsonWithCors(request, { connector: serializeTallyConnector(paired) });
   } catch (error) {

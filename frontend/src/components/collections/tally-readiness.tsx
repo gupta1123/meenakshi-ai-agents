@@ -14,7 +14,7 @@ import type { TallyHealth } from "./types";
 import { Button, InlineMessage, Skeleton } from "./ui";
 import s from "./tally-connection.module.css";
 
-type Connector = { id: string; displayName: string; machineFingerprint: string; status: string };
+type Connector = { id: string; displayName: string; machineFingerprint: string; status: string; heartbeatStale?: boolean };
 type SetupCredential = { connector: Connector & { installationKey: string }; controlToken: string; tallyUrl: string };
 type DetectedTallyCompany = { name: string; guid: string; isActive: boolean };
 type RegisteredCompany = { id: string; code: string; tallyCompanyGuid: string; tallyCompanyName: string };
@@ -93,8 +93,16 @@ async function token() {
   return response.data.session?.access_token ?? null;
 }
 
+// A Tally sync counts as current for 30 days (same as the backend). Judged
+// from its completion date, not the health check's own shorter "stale" flag.
+export const TALLY_SYNC_CURRENT_DAYS = 30;
+export function syncIsCurrent(entry: { status?: string; completedAt?: string | null } | null | undefined) {
+  if (!entry?.completedAt || !["current", "stale", "completed"].includes(entry.status ?? "")) return false;
+  return Date.now() - new Date(entry.completedAt).getTime() <= TALLY_SYNC_CURRENT_DAYS * 24 * 60 * 60 * 1_000;
+}
+
 export function workspaceIsReady(health: TallyHealth | null) {
-  return Boolean(health?.ready && health.sync?.masters.status === "current" && health.sync?.vouchers.status === "current");
+  return Boolean(health?.ready && syncIsCurrent(health.sync?.masters) && syncIsCurrent(health.sync?.vouchers));
 }
 
 export function workspaceCanCalculateLive(health: TallyHealth | null) {
@@ -181,6 +189,7 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
   const { company, organization, companyKey, isAdministrator, availableCompanies } = useCompany();
   const health = initialHealth ?? null;
   const [connectors, setConnectors] = useState<Connector[]>([]);
+  const [showOlderComputers, setShowOlderComputers] = useState(false);
   const [selectedConnectorId, setSelectedConnectorId] = useState<string | null>(null);
   const [localConnectorId, setLocalConnectorId] = useState<string | null>(null);
   const [manualConnectorSelection, setManualConnectorSelection] = useState(false);
@@ -208,6 +217,11 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
     [connectors, health?.connector?.id, selectedConnectorId]
   );
   const connectorId = selectedConnector?.id ?? null;
+  // Setup attempts and reinstalls leave stale entries behind. Show the computers that matter:
+  // this one, the one the company uses, the selected one, and any that are connected right now.
+  const liveConnectors = connectors.filter((item) => item.status !== "revoked");
+  const visibleConnectors = showOlderComputers ? liveConnectors : liveConnectors.filter((item) => item.id === connectorId || item.id === health?.connector?.id || item.id === localConnectorId || (item.status === "paired" && !item.heartbeatStale));
+  const hiddenConnectorCount = liveConnectors.length - liveConnectors.filter((item) => visibleConnectors.includes(item)).length;
   const snapshotConnector = connectorSnapshot?.connector ?? null;
   const tallyCompanies = connectorSnapshot?.companies ?? [];
   const activeTallyCompany = connectorSnapshot?.activeCompany ?? tallyCompanies.find((item) => item.isActive) ?? null;
@@ -604,10 +618,10 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
               <div><dt>Last contact</dt><dd>{sinceLabel(snapshotConnector?.lastHeartbeatAt)}</dd></div>
             </dl>
 
-            {connectors.length > 1 && <label className={s.select}><span>Switch computer</span><select value={connectorId ?? ""} onChange={(event) => { setManualConnectorSelection(true); setSelectedConnectorId(event.target.value || null); setConnectorSnapshot(null); setSnapshotError(null); }}>
+            {(visibleConnectors.length > 1 || hiddenConnectorCount > 0) && <label className={s.select}><span>Switch computer</span><select value={connectorId ?? ""} onChange={(event) => { setManualConnectorSelection(true); setSelectedConnectorId(event.target.value || null); setConnectorSnapshot(null); setSnapshotError(null); }}>
               {!connectorId && <option value="">Choose a computer</option>}
-              {connectors.map((connector) => <option key={connector.id} value={connector.id}>{connector.displayName}{connector.id === localConnectorId ? " (this computer)" : ""}</option>)}
-            </select></label>}
+              {visibleConnectors.map((connector) => <option key={connector.id} value={connector.id}>{connector.displayName}{connector.id === localConnectorId ? " (this computer)" : connector.heartbeatStale || connector.status !== "paired" ? " (not connected)" : ""}</option>)}
+            </select>{(hiddenConnectorCount > 0 || showOlderComputers) && <button type="button" className={s.olderToggle} onClick={() => setShowOlderComputers((value) => !value)}>{showOlderComputers ? "Hide older entries" : `Show ${hiddenConnectorCount} older entr${hiddenConnectorCount === 1 ? "y" : "ies"}`}</button>}</label>}
 
             {tallyCompanies.length > 0 && <div className={s.companies}>
               <span>Companies in Tally Prime</span>

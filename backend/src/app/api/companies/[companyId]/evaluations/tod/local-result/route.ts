@@ -7,6 +7,7 @@ import { isLiveTodBatchAggregate, type LiveTodBatchAggregate } from "@/lib/evalu
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { readIdempotencyKey } from "@/lib/tally/contracts";
+import { retireObsoleteEvaluationReads } from "@/lib/evaluation/refresh-commands.mjs";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -68,6 +69,10 @@ export async function POST(request: Request, context: RouteContext) {
       if (run.request_context.batch !== true) throw new Error("A previous Turnover Discount calculation is still stopping. Please retry once.");
     }
     const evidence: LiveTodBatchAggregate = { ...body.evidence, evaluationRunId: run.id };
+    const { error: localModeError } = await supabase.from("evaluation_runs")
+      .update({ request_context: { ...run.request_context, ...requestContext } }).eq("id", run.id).eq("company_id", company.id);
+    if (localModeError) throw localModeError;
+    await retireObsoleteEvaluationReads(supabase, { companyId: company.id, runId: run.id });
     const { error: fanoutError } = await supabase.rpc("fanout_meenakshi_tod_batch_evaluation", {
       p_parent_run_id: run.id,
       p_company_id: company.id,

@@ -4,7 +4,7 @@
 
 ## 1. The idea in one paragraph
 
-The invoice goes out at **full price**. A customer who pays within their Cash Discount window may pay the invoice **minus the discount** (₹ per MT). When that happens, we issue a **Credit Note** for the discount so the bill closes. A customer who pays in full has not claimed the discount, so nothing is issued. Payments of more than 90% that fit neither case are shown to staff, who decide.
+The invoice goes out at **full price**. A customer who pays within their Cash Discount window may pay the invoice **minus the discount** (₹ per MT). When that happens, staff issue a **Credit Note** for the discount from the Cash Discount page so the bill closes. A customer who pays in full has not claimed the discount, so nothing is issued. Payments of more than 90% that fit neither case are shown to staff, who decide.
 
 ## 2. Rule setup
 
@@ -19,7 +19,7 @@ Cash Discount rule (one active version, effective from a date)
 
 - **Segment:**
   - one or more Tally customer groups;
-  - a window in **working days**;
+  - a window in **days** after the invoice;
   - a discount in **₹ per MT**.
 - **Mutually exclusive:** a Tally group can be in only one segment. A sub-group can't be placed in a different segment from its parent. Activation is blocked otherwise.
 - **Eligible products and MT conversions:** set on the rule, the same way as for TOD. Only eligible product lines count towards the MT.
@@ -34,11 +34,15 @@ Cash Discount rule (one active version, effective from a date)
 
 MT uses the rule's unit conversions, the same as TOD. Round as set on the rule.
 
-## 4. The window: working days
+## 4. The window: days after the invoice
 
-- Count **working days after the invoice date**. **Sundays** and **holidays** from the rule's holiday calendar are not counted.
-- **Deadline** = the Nth working day after the invoice date (N = 3 or 10). A payment **on** the deadline counts.
-- Example: invoice Friday 3 Oct 2025, 3 working days. Sat 4 is day 1, Sun 5 is skipped, Mon 6 is day 2 (if it's not a holiday), Tue 7 is day 3, so the deadline is Tue 7 Oct.
+- Count **every day after the invoice date**, Sundays and holidays included.
+- **Deadline** = invoice date + N days (N = 3 or 10). A payment **on** the deadline counts.
+- **Only if the deadline itself** falls on a Sunday or a holiday in the company holiday calendar does it move to the next working day (and on again if that is also off).
+- Examples (3 days):
+  - Invoice Fri 3 Oct 2025: deadline Mon 6 Oct (Sun 5 still counts).
+  - Invoice Thu 2 Oct 2025: day 3 is Sun 5 Oct, so the deadline moves to Mon 6 Oct.
+  - Invoice Fri 17 Oct 2025: day 3 is Mon 20 Oct (Deepavali), so the deadline moves to Tue 21 Oct.
 
 ## 5. Payments that count
 
@@ -48,16 +52,16 @@ MT uses the rule's unit conversions, the same as TOD. Round as set on the rule.
 
 ## 6. Categories
 
-The screen **shows** the categories in the client's order: Full payment, More than 90%, Discounted payment. For each invoice, `received` is the total received by the deadline, and `invoice` is the bill amount.
+The screen **shows** the categories in the client's order: Full payment, Short up to ₹10,000, Discounted payment. For each invoice, `received` is the total received by the deadline, and `invoice` is the bill amount.
 
 | Category | Condition | Result |
 |---|---|---|
 | **Full payment** | received ≥ invoice − ₹1 | **No Credit Note.** Discount not claimed. Shown for information only. |
-| **Discounted payment** | received is within ±₹1 of invoice − discount | **Credit Note for the discount, automatically.** The bill closes at zero. |
-| **More than 90%** | received ≥ 90% of invoice, and neither of the above | **Staff decide.** The entry is shown with an option to create a Credit Note for **only what is short**, **capped at the discount**: min(invoice − received, discount). Nothing happens automatically. |
-| **Not eligible** | received < 90% of invoice by the deadline, or no payment by the deadline | No discount. Any shortfall stays in the customer's outstanding balance. |
+| **Discounted payment** | received is within ±₹1 of invoice − discount | **Credit Note for the discount, created by staff** from the Cash Discount page (never automatic). The bill closes at zero. |
+| **Short up to ₹10,000** | invoice − received ≤ ₹10,000 (a flat limit, whatever the bill size), and neither of the above | **Staff decide.** The entry is shown with an option to create a Credit Note for **only what is short**, **capped at the discount**: min(invoice − received, discount). Nothing happens automatically. |
+| **Not eligible** | short of the invoice by more than ₹10,000 at the deadline, or no payment by the deadline | No discount. Any shortfall stays in the customer's outstanding balance. |
 
-**Evaluation order:** the system checks the exact matches first (Full, then Discounted), then the 90% band. A discounted payment is almost always above 90% of the invoice, so checking the 90% band first would swallow every discounted payment.
+**Evaluation order:** the system checks the exact matches first (Full, then Discounted), then the ₹10,000 band. A discounted payment is usually short by less than ₹10,000, so checking the ₹10,000 band first would swallow every discounted payment.
 
 ## 7. The Credit Note
 
@@ -89,7 +93,7 @@ Existing Cash Discount Debit Notes already created in Tally are kept as history;
 
 **Rounding allowance (confirmed):** a payment still counts as "full" or "discounted" when it is within **₹1** of the expected amount. This covers paise rounding, e.g. ₹99,499.60 paid against ₹99,500.
 
-**More than 90% cap (confirmed):** the Credit Note never exceeds the agreed discount. Example: 91% paid on ₹1,00,000 leaves ₹9,000 short; with a ₹500 discount, the Credit Note is ₹500.
+**Short up to ₹10,000 (client rule, replaces the old 90% band):** the limit is a flat ₹10,000 because 10% of a large bill is a lot of money. The Credit Note never exceeds the agreed discount. Example: ₹91,000 paid on ₹1,00,000 leaves ₹9,000 short; with a ₹500 discount, the Credit Note is ₹500. On ₹10,00,000, paying ₹9,50,000 is ₹50,000 short, so it is not eligible.
 
 ## 10. Still to confirm
 
@@ -105,7 +109,7 @@ Nothing. All rules above are agreed.
 | Load a per-MT rule; connector scope (customers → segment, products, MT conversions) | `backend/src/lib/evaluation/evidence.ts` (`loadRule`, `loadLiveCdLocalBootstrap`) |
 | Read Tally: invoices with MT, Receipt/Journal allocations, existing CD Credit Notes | `tally-bridge/src/commands/live-cd-evidence.mjs` |
 | The calculation (categories, windows, amounts, GST deadline) | `tally-bridge/src/local-cd-settlement-evaluator.mjs`; identical copy `backend/src/lib/evaluation/cd-settlement.mjs` (a test fails if they differ) |
-| Save the check, queue Credit Notes for Discounted payments | `backend/src/lib/evaluation/live-cd.ts` (`completeCdSettlementRun`) |
+| Save the check (Credit Notes are created manually by staff) | `backend/src/lib/evaluation/live-cd.ts` (`completeCdSettlementRun`) |
 | Page data / staff "Create Credit Note" | `backend/src/app/api/companies/[companyId]/cash-discount/settlements/...` |
 | Cash Discount page (per-MT) | `frontend/src/components/collections/cash-discount-settlements.tsx` |
 | GST split and narration | `backend/src/lib/notes/debit-note-gst.mjs` (`noteKind = credit_note`) |

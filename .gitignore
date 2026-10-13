@@ -36,3 +36,7 @@
 Thumbs.db
 .vscode/
 .idea/
+
+# Local one-off backups and caches
+**/.next-backup-*/
+work-cache-backup-*/

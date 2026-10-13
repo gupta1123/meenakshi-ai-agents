@@ -15,6 +15,13 @@ const CASH_DISCOUNT_FETCH_FIELDS = [
   "Date,EffectiveDate,VoucherTypeName,VoucherType,VoucherTypeGUID,VoucherNumber,GUID,MasterID,AlterID,IsCancelled,IsOptional,IsReversed,PartyLedgerName,PartyLedgerGUID,LinkedSalesVoucherGUID,VoucherAmount,Amount,Narration",
   "AllLedgerEntries.LedgerName,AllLedgerEntries.Amount,AllLedgerEntries.IsDeemedPositive,AllLedgerEntries.BillAllocations.Name,AllLedgerEntries.BillAllocations.BillType,AllLedgerEntries.BillAllocations.Amount,AllLedgerEntries.BillAllocations.TargetVoucherGUID,AllLedgerEntries.BillAllocations.VoucherNumber",
 ].join(",");
+// A per-MT Cash Discount rule needs product quantities, so it adds the
+// inventory (and ledger inventory-allocation) fields back.
+const CASH_DISCOUNT_PER_MT_FETCH_FIELDS = `${CASH_DISCOUNT_FETCH_FIELDS},${VOUCHER_FETCH_FIELDS.slice(VOUCHER_FETCH_FIELDS.indexOf("AllInventoryEntries."))}`;
+// Cash Discount reads a whole rule period. Asking Tally for months at once
+// freezes it, so read in short date windows with a pause between them.
+const CASH_DISCOUNT_DAYS_PER_CHUNK = 10;
+const CASH_DISCOUNT_PAUSE_MS = 400;
 const MAX_DAYS_PER_CHUNK = 31;
 const TARGETED_DAYS_PER_CHUNK = 92;
 const CUSTOMER_BATCH_SIZE = 50;
@@ -85,14 +92,14 @@ function matchesScope(voucher, scope) {
   return true;
 }
 
-async function exportVoucherBatch({ config, activeCompany, chunk, ledgerNames, batchIndex, cashDiscountFastPath }) {
+async function exportVoucherBatch({ config, activeCompany, chunk, ledgerNames, batchIndex, cashDiscountFastPath, cashDiscountPerMt }) {
   const ledgerEntryFilterName = "MeenakshiRequestedLedger";
   const voucherFilterName = "MeenakshiRequestedVoucher";
   const targeted = ledgerNames.length > 0;
   const xml = buildCollectionExportXml({
     collectionName: targeted ? `Meenakshi Vouchers ${batchIndex + 1}` : "Meenakshi Vouchers",
     tallyType: "Voucher",
-    fetchFields: cashDiscountFastPath ? CASH_DISCOUNT_FETCH_FIELDS : VOUCHER_FETCH_FIELDS,
+    fetchFields: cashDiscountPerMt ? CASH_DISCOUNT_PER_MT_FETCH_FIELDS : cashDiscountFastPath ? CASH_DISCOUNT_FETCH_FIELDS : VOUCHER_FETCH_FIELDS,
     companyName: activeCompany.name,
     dateFrom: chunk.scope.dateFrom,
     dateTo: chunk.scope.dateTo,
@@ -110,12 +117,16 @@ export async function syncVouchers(command, { config, activeCompany, isCancelled
   const scope = command.payload?.requestedScope && typeof command.payload.requestedScope === "object" ? command.payload.requestedScope : {};
   const customerLedgerNames = uniqueCustomerLedgerNames(scope);
   const cashDiscountFastPath = scope.purpose === "live_cd_evaluation";
+  const cashDiscountPerMt = cashDiscountFastPath && scope.cdDiscountBasis === "amount_per_tonne";
   const localLiveCalculation = cashDiscountFastPath || scope.purpose === "live_tod_evaluation";
   if (!syncRunId && !localLiveCalculation) throw new Error("Voucher sync command did not contain syncRunId.");
   const targeted = customerLedgerNames.length > 0 && customerLedgerNames.length <= TARGETED_CUSTOMER_LIMIT;
-  // Finora's fast path asks Tally once and performs customer matching in
-  // memory. Use the complete bounded rule period in one export for CD.
-  const chunk = chunkScope(scope, cashDiscountFastPath ? 36_525 : targeted ? TARGETED_DAYS_PER_CHUNK : MAX_DAYS_PER_CHUNK);
+  // Cash Discount matches customers in memory but reads the period in short
+  // windows; the caller loops on cursorTo until the period is complete.
+  const chunk = chunkScope(scope, cashDiscountFastPath ? CASH_DISCOUNT_DAYS_PER_CHUNK : targeted ? TARGETED_DAYS_PER_CHUNK : MAX_DAYS_PER_CHUNK);
+  if (cashDiscountFastPath && typeof scope.cursor === "string" && scope.cursor !== scope.dateFrom) {
+    await new Promise((resolve) => setTimeout(resolve, CASH_DISCOUNT_PAUSE_MS));
+  }
   const ledgerBatches = cashDiscountFastPath
     ? [[]]
     : customerLedgerNames.length && customerLedgerNames.length <= TARGETED_CUSTOMER_LIMIT
@@ -124,7 +135,7 @@ export async function syncVouchers(command, { config, activeCompany, isCancelled
   const voucherByGuid = new Map();
   for (const [batchIndex, ledgerNames] of ledgerBatches.entries()) {
     if (isCancelled?.()) throw new Error("This Tally read was stopped.");
-    const resultXml = await exportVoucherBatch({ config, activeCompany, chunk, ledgerNames, batchIndex, cashDiscountFastPath });
+    const resultXml = await exportVoucherBatch({ config, activeCompany, chunk, ledgerNames, batchIndex, cashDiscountFastPath, cashDiscountPerMt });
     if (isCancelled?.()) throw new Error("This Tally read was stopped.");
     for (const voucher of parseVouchers(resultXml)) {
       if (matchesScope(voucher, chunk.scope)) voucherByGuid.set(voucher.guid, voucher);

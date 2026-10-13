@@ -9,11 +9,12 @@ import { userFacingError } from "@/lib/user-copy";
 
 import { useCompany } from "./company-context";
 import { useTallyHealth } from "./tally-readiness";
-import type { CashDiscountDebitNoteHistory, Contact, CreditNotePosting, LaunchControl, MessageTemplate, NotificationHealth, NotificationMessage, OperationsHealth, OverviewSummary, Proposal, ReferenceData, TallyHealth } from "./types";
+import type { CashDiscountCreditNote, CashDiscountDebitNoteHistory, Contact, CreditNotePosting, LaunchControl, MessageTemplate, NotificationHealth, NotificationMessage, OperationsHealth, OverviewSummary, Proposal, ReferenceData, TallyHealth } from "./types";
 
 export type WorkspaceData = {
   proposals: Proposal[];
   creditNotes: CreditNotePosting[];
+  cdCreditNotes: CashDiscountCreditNote[];
   debitNotes: CashDiscountDebitNoteHistory[];
   messages: NotificationMessage[];
   contacts: Contact[];
@@ -25,7 +26,7 @@ export type WorkspaceData = {
   overview: OverviewSummary | null;
 };
 
-const emptyData: WorkspaceData = { proposals: [], creditNotes: [], debitNotes: [], messages: [], contacts: [], messageHealth: null, operations: null, launchControl: null, reference: null, templates: [], overview: null };
+const emptyData: WorkspaceData = { proposals: [], creditNotes: [], cdCreditNotes: [], debitNotes: [], messages: [], contacts: [], messageHealth: null, operations: null, launchControl: null, reference: null, templates: [], overview: null };
 const workspaceRequestCache = new Map<string, { expiresAt: number; request: Promise<WorkspaceData> }>();
 
 type WorkspaceSessionValue = {
@@ -83,15 +84,19 @@ export function WorkspaceSessionProvider({ email, signOut, children }: { email: 
           return { ...emptyData, proposals: proposalData.proposals, launchControl: launchData.launchControl, reference };
         }
         if (pathname === "/credit-notes") {
-          const [proposalData, creditNoteData, messageData, contactData, launchData, reference] = await Promise.all([
-            apiRequest<{ proposals: Proposal[] }>(token, `${base}/evaluations/proposals?schemeType=tod`),
+          const [proposalData, creditNoteData, messageData, contactData, launchData, reference, cdCreditNoteData, postedData] = await Promise.all([
+            apiRequest<{ proposals: Proposal[] }>(token, `${base}/evaluations/proposals?schemeType=tod&status=eligible&activeOnly=true&limit=500`),
             apiRequest<{ creditNotePostings: CreditNotePosting[] }>(token, `${base}/credit-notes`),
             apiRequest<{ messages: NotificationMessage[] }>(token, `${base}/notifications?for=credit_notes`),
             apiRequest<{ contacts: Contact[] }>(token, `${base}/contacts`).catch(() => ({ contacts: [] })),
             apiRequest<{ launchControl: LaunchControl }>(token, `${base}/launch-control`),
             apiRequest<ReferenceData>(token, `${base}/rulebook/reference-data`).catch(() => null),
+            apiRequest<{ creditNotes: CashDiscountCreditNote[] }>(token, `${base}/cash-discount/credit-notes`).catch(() => ({ creditNotes: [] })),
+            // Notes already created need their period and tonnes, whichever rule version made them.
+            apiRequest<{ proposals: Proposal[] }>(token, `${base}/evaluations/proposals?schemeType=tod&withPosting=true&limit=500`).catch(() => ({ proposals: [] as Proposal[] })),
           ]);
-          return { ...emptyData, proposals: proposalData.proposals, creditNotes: creditNoteData.creditNotePostings, messages: messageData.messages, contacts: contactData.contacts, launchControl: launchData.launchControl, reference };
+          const proposals = [...new Map([...postedData.proposals, ...proposalData.proposals].map((proposal) => [proposal.id, proposal])).values()];
+          return { ...emptyData, cdCreditNotes: cdCreditNoteData.creditNotes ?? [], proposals, creditNotes: creditNoteData.creditNotePostings, messages: messageData.messages, contacts: contactData.contacts, launchControl: launchData.launchControl, reference };
         }
         if (pathname === "/debit-notes") {
           const [response, messageData, contactData] = await Promise.all([

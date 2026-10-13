@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Eye, RefreshCw, Square } from "lucide-react";
 
 import { apiRequest } from "@/lib/api";
@@ -13,6 +13,8 @@ import { accessToken } from "./workspace";
 
 type Props = {
   scheme: "cd" | "tod";
+  /** Only calculations made under this rule version are listed (older rule versions are hidden). */
+  ruleVersionId?: string | null;
   latestRun: EvaluationRun | null;
   onError: (message: string | null) => void;
   onRetry: () => void;
@@ -42,10 +44,6 @@ function runStatus(run: EvaluationRun, resolved: boolean) {
   return { label: "Running", tone: "running" };
 }
 
-function shortReference(run: EvaluationRun) {
-  return (run.run_reference?.split("-").at(-1) ?? run.id.slice(0, 4)).toUpperCase();
-}
-
 function durationLabel(run: EvaluationRun) {
   if (!run.completed_at) return "Started and waiting for completion";
   const started = new Date(run.started_at ?? run.created_at).getTime();
@@ -58,9 +56,10 @@ function durationLabel(run: EvaluationRun) {
   return `Completed in ${minutes}m${remainder ? ` ${remainder}s` : ""}`;
 }
 
-export function GuidedEvaluationQueue({ scheme, latestRun, onError, onRetry, onViewResults, onSettled }: Props) {
+export function GuidedEvaluationQueue({ scheme, ruleVersionId, latestRun, onError, onRetry, onViewResults, onSettled }: Props) {
   const { company, companyKey } = useCompany();
-  const [runs, setRuns] = useState<EvaluationRun[]>([]);
+  const [loadedRuns, setRuns] = useState<EvaluationRun[]>([]);
+  const runs = useMemo(() => ruleVersionId ? loadedRuns.filter((run) => !run.scheme_version_id || run.scheme_version_id === ruleVersionId) : loadedRuns, [loadedRuns, ruleVersionId]);
   const [loading, setLoading] = useState(true);
   const [dismissedRunId, setDismissedRunId] = useState<string | null>(null);
   const [historyFilter, setHistoryFilter] = useState<"all" | "successful" | "attention">("all");
@@ -143,20 +142,37 @@ export function GuidedEvaluationQueue({ scheme, latestRun, onError, onRetry, onV
   const unresolvedIssueRuns = issueRuns.filter((run) => !isResolved(run));
   const issueRun = submittedRun && unresolvedIssueRuns.some((run) => run.id === submittedRun.id) && dismissedRunId !== submittedRun.id ? submittedRun : null;
   const attentionRuns = runs.filter((run) => activeRuns.some((activeRun) => activeRun.id === run.id) || unresolvedIssueRuns.some((issue) => issue.id === run.id));
-  const filteredRuns = historyFilter === "attention" ? attentionRuns : historyFilter === "successful" ? successfulRuns : runs;
+  const periodKey = (run: EvaluationRun) => `${run.period_start ?? ""}:${run.period_end ?? ""}`;
+  const newestFirst = (left: EvaluationRun, right: EvaluationRun) => new Date(right.created_at).getTime() - new Date(left.created_at).getTime();
+  const periods = [...runs.reduce((groups, run) => {
+    const key = periodKey(run);
+    groups.set(key, [...(groups.get(key) ?? []), run]);
+    return groups;
+  }, new Map<string, EvaluationRun[]>()).values()].map((group) => {
+    const sorted = [...group].sort(newestFirst);
+    const active = sorted.find((run) => activeRuns.some((item) => item.id === run.id)) ?? null;
+    const completed = sorted.filter((run) => run.status === "completed");
+    const shown = active ?? completed[0] ?? sorted[0];
+    // A newer attempt that failed while an older result is still shown.
+    const failedAfter = !active && completed[0] ? sorted.find((run) => newestFirst(run, completed[0]) < 0 && unresolvedIssueRuns.some((issue) => issue.id === run.id)) ?? null : null;
+    return { key: periodKey(shown), shown, older: completed.filter((run) => run.id !== shown.id), attempts: sorted.length, failedAfter, lastRunAt: sorted[0].created_at };
+  }).sort((left, right) => (right.shown.period_end ?? "").localeCompare(left.shown.period_end ?? "") || newestFirst(left.shown, right.shown));
+  const needsAttention = (period: (typeof periods)[number]) => attentionRuns.some((run) => periodKey(run) === period.key);
+  const filteredPeriods = historyFilter === "attention" ? periods.filter(needsAttention) : historyFilter === "successful" ? periods.filter((period) => period.shown.status === "completed") : periods;
+  const [openPeriod, setOpenPeriod] = useState<string | null>(null);
   // The newest completed run of a period is the live result (actions allowed);
   // older runs of the same period open as read-only snapshots.
   const isLatestForPeriod = (run: EvaluationRun) => !successfulRuns.some((other) => other.id !== run.id
     && other.period_start === run.period_start && other.period_end === run.period_end
     && new Date(other.created_at).getTime() > new Date(run.created_at).getTime());
   const pageSize = 10;
-  const pageCount = Math.max(1, Math.ceil(filteredRuns.length / pageSize));
+  const pageCount = Math.max(1, Math.ceil(filteredPeriods.length / pageSize));
   const currentPage = Math.min(historyPage, pageCount);
-  const visibleRuns = filteredRuns.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const visiblePeriods = filteredPeriods.slice((currentPage - 1) * pageSize, currentPage * pageSize);
   useEffect(() => { setHistoryPage(1); }, [historyFilter, companyKey]);
   return <Card className="calculation-history-card">
     <div className="card-title calculation-history-heading">
-      <div><p className="eyebrow">Calculation history</p><h2>Previous calculations</h2><p className="muted-copy">Use Customers for daily work. History keeps a record of what ran and whether it succeeded.</p></div>
+      <div><p className="eyebrow">Calculation history</p><h2>Previous calculations</h2><p className="muted-copy">One row per period with its latest result. Calculating a period again updates its row; earlier calculations stay available as snapshots.</p></div>
       <div className="calculation-history-actions">
         {hasLiveRun && <Button className="button-secondary" disabled={stopping} onClick={() => void stopActiveRun()}><Square size={14} />{stopping ? "Stopping…" : "Stop calculation"}</Button>}
         <Button className="button-secondary" onClick={() => void load(true)} aria-label="Refresh calculation history"><RefreshCw size={15} />Refresh</Button>
@@ -164,14 +180,15 @@ export function GuidedEvaluationQueue({ scheme, latestRun, onError, onRetry, onV
     </div>
     {loading && !runs.length ? <Skeleton lines={3} /> : <>
       {issueRun ? <div className="drawer-actions"><StatusBadge status={issueRun.status} /><h3>Calculation did not finish</h3><p className="muted-copy">{userFacingDetail(issueRun.summary?.message ?? issueRun.error_summary, "The calculation could not be completed.")}</p><div className="accounting-card-actions"><Button onClick={onRetry}>Try again</Button><Button className="button-secondary" onClick={() => setDismissedRunId(issueRun.id)}>Dismiss</Button></div></div> : null}
-      {runs.length ? <><div className="calculation-history-toolbar"><div className="segmented" aria-label="Calculation history filters"><button className={historyFilter === "all" ? "selected" : ""} onClick={() => setHistoryFilter("all")}>All {runs.length}</button><button className={historyFilter === "successful" ? "selected" : ""} onClick={() => setHistoryFilter("successful")}>Completed {successfulRuns.length}</button>{attentionRuns.length > 0 && <button className={historyFilter === "attention" ? "selected" : ""} onClick={() => setHistoryFilter("attention")}>Needs attention {attentionRuns.length}</button>}</div></div><div className="data-table evaluation-run-table calculation-history-table"><div className="table-head"><span>Started</span><span>Business result</span><span>Status</span><span>Next step</span></div>{visibleRuns.map((run) => {
+      {runs.length ? <><div className="calculation-history-toolbar"><div className="segmented" aria-label="Calculation history filters"><button className={historyFilter === "all" ? "selected" : ""} onClick={() => setHistoryFilter("all")}>All {periods.length}</button><button className={historyFilter === "successful" ? "selected" : ""} onClick={() => setHistoryFilter("successful")}>Completed {periods.filter((period) => period.shown.status === "completed").length}</button>{attentionRuns.length > 0 && <button className={historyFilter === "attention" ? "selected" : ""} onClick={() => setHistoryFilter("attention")}>Needs attention {periods.filter(needsAttention).length}</button>}</div></div><div className="data-table evaluation-run-table calculation-history-table"><div className="table-head"><span>Period</span><span>Business result</span><span>Status</span><span>Next step</span></div>{visiblePeriods.map((period) => {
+        const run = period.shown;
         const resolved = isResolved(run);
         const status = runStatus(run, resolved);
         const hasIssue = ["failed", "completed_with_issues"].includes(run.status);
         const wasStopped = run.status === "cancelled";
         const result = run.status === "completed" ? `${run.total_jobs ?? 0} checked · ${run.qualified_jobs ?? 0} qualified · ${formatMoney(run.projected_discount_amount ?? 0)} projected` : wasStopped ? "Calculation stopped" : hasIssue ? "Calculation did not finish" : progressLabel(run);
         const detail = run.status === "completed"
-          ? `${run.not_qualified_jobs ?? 0} customers did not qualify in this calculation`
+          ? period.failedAfter ? `A recalculation on ${formatDate(period.failedAfter.created_at)} did not finish; this is the last good result.` : `${run.not_qualified_jobs ?? 0} customers did not qualify`
           : wasStopped
             ? "Stopped by the user. Completed customer results remain in history."
           : resolved
@@ -179,12 +196,13 @@ export function GuidedEvaluationQueue({ scheme, latestRun, onError, onRetry, onV
             : hasIssue
               ? userFacingDetail(run.summary?.message ?? run.error_summary, "Try the calculation again.")
               : "Customer calculations are still being prepared";
-        return <article key={run.id}>
-          <div><strong>{formatDate(run.created_at)}</strong><small>{periodLabel(run)} · Ref {shortReference(run)}</small></div>
+        const expanded = openPeriod === period.key;
+        return <article key={period.key} className={expanded ? "is-expanded" : undefined}>
+          <div><strong>{periodLabel(run)}</strong><small>Calculated {formatDate(run.created_at)}{period.attempts > 1 ? <> · <button type="button" className="history-older-toggle" aria-expanded={expanded} onClick={() => setOpenPeriod(expanded ? null : period.key)}>{period.attempts} times</button></> : null}</small></div>
           <div><strong>{result}</strong><small>{detail}</small></div>
           <div><span className={`calculation-status calculation-status-${status.tone}`}>{status.label}</span><small>{durationLabel(run)}</small></div>
-          <div className="queue-next">{run.status === "completed"
-            ? <Button className="button-quiet" title={isLatestForPeriod(run) ? "Live results for this period. Credit Notes can be created here." : "Read-only record of what this calculation found. A newer calculation replaced it."} onClick={() => onViewResults(run, isLatestForPeriod(run))}><Eye size={15} />{isLatestForPeriod(run) ? "View live results" : "View snapshot"}</Button>
+          <div className="queue-next">{period.failedAfter && <Button className="button-quiet" onClick={onRetry}>Try again</Button>}{run.status === "completed"
+            ? <Button className="button-quiet" title="Live results for this period. Credit Notes can be created here." onClick={() => onViewResults(run, isLatestForPeriod(run))}><Eye size={15} />View results</Button>
             : wasStopped
               ? <Button className="button-quiet" onClick={onRetry}>Start again</Button>
             : resolved
@@ -192,8 +210,15 @@ export function GuidedEvaluationQueue({ scheme, latestRun, onError, onRetry, onV
               : hasIssue
                 ? <Button className="button-quiet" onClick={onRetry}>Try again</Button>
                 : <small>Keep Tally open</small>}</div>
+          {expanded && <div className="history-older">
+            <small>Earlier calculations of this period · read-only</small>
+            {period.older.length ? period.older.map((older) => <div key={older.id}>
+              <span>{formatDate(older.created_at)} · {older.total_jobs ?? 0} checked · {formatMoney(older.projected_discount_amount ?? 0)}</span>
+              <Button className="button-quiet" onClick={() => onViewResults(older, false)}><Eye size={14} />View snapshot</Button>
+            </div>) : <span>Only unfinished or stopped attempts; nothing else to show.</span>}
+          </div>}
         </article>;
-      })}</div>{pageCount > 1 && <nav className="table-pagination" aria-label="Calculation history pages"><span>Page {currentPage} of {pageCount} · {filteredRuns.length} calculations</span><div><Button className="button-secondary" disabled={currentPage === 1} onClick={() => setHistoryPage((value) => Math.max(1, value - 1))}>Previous</Button>{Array.from({ length: pageCount }, (_, index) => index + 1).map((number) => <button key={number} className={number === currentPage ? "selected" : ""} aria-current={number === currentPage ? "page" : undefined} onClick={() => setHistoryPage(number)}>{number}</button>)}<Button className="button-secondary" disabled={currentPage === pageCount} onClick={() => setHistoryPage((value) => Math.min(pageCount, value + 1))}>Next</Button></div></nav>}</> : <EmptyState title="No calculations yet" detail={`Start a ${title} calculation to create the first history record.`} />}
+      })}</div>{pageCount > 1 && <nav className="table-pagination" aria-label="Calculation history pages"><span>Page {currentPage} of {pageCount} · {filteredPeriods.length} periods</span><div><Button className="button-secondary" disabled={currentPage === 1} onClick={() => setHistoryPage((value) => Math.max(1, value - 1))}>Previous</Button>{Array.from({ length: pageCount }, (_, index) => index + 1).map((number) => <button key={number} className={number === currentPage ? "selected" : ""} aria-current={number === currentPage ? "page" : undefined} onClick={() => setHistoryPage(number)}>{number}</button>)}<Button className="button-secondary" disabled={currentPage === pageCount} onClick={() => setHistoryPage((value) => Math.min(pageCount, value + 1))}>Next</Button></div></nav>}</> : <EmptyState title="No calculations yet" detail={`Start a ${title} calculation to create the first history record.`} />}
     </>}
   </Card>;
 }

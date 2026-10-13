@@ -15,7 +15,6 @@ export async function GET(request: Request, context: RouteContext) {
     const { companyId } = await context.params;
     if (!isUuid(companyId)) return jsonWithCors(request, { error: "Invalid company id." }, { status: 400 });
     const scope = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
-    const isAdministrator = scope.roles.includes("administrator");
     const url = new URL(request.url);
     const q = url.searchParams.get("q")?.trim() ?? "";
     const requestedLimit = Number(url.searchParams.get("limit") ?? 500);

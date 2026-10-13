@@ -37,7 +37,7 @@ type RuleRow = {
   tod_benefit_basis: "percentage_of_eligible_value" | "amount_per_eligible_tonne" | null;
 };
 
-type RunContext = { schemeType?: unknown; ruleVersionId?: unknown; schemeVersionId?: unknown; salesVoucherId?: unknown; customerId?: unknown; batch?: unknown; periodStart?: unknown; periodEnd?: unknown; asOfDate?: unknown; evaluatedOn?: unknown; reviewRefreshForProposal?: unknown };
+type RunContext = { schemeType?: unknown; localFirst?: unknown; ruleVersionId?: unknown; schemeVersionId?: unknown; salesVoucherId?: unknown; customerId?: unknown; batch?: unknown; periodStart?: unknown; periodEnd?: unknown; asOfDate?: unknown; evaluatedOn?: unknown; reviewRefreshForProposal?: unknown };
 
 export type EvaluationRunRecord = {
   id: string;
@@ -578,18 +578,33 @@ export async function loadLiveCdBatchRule(run: EvaluationRunRecord, ruleVersionI
 }
 
 /** Active Cash Discount rules on a date, for the rule selector on the Cash Discount page. */
-export async function listActiveCdRules(companyId: string, onDate: string) {
-  const ids = await activeRuleIds(companyId, "cd", onDate);
-  if (!ids.length) return [];
-  const { data, error } = await createSupabaseAdminClient().from("scheme_versions")
-    .select("id, scheme_id, version_number, discount_percentage, allowed_working_days, effective_from, effective_to, schemes(name)")
-    .in("id", ids);
+/**
+ * Active Cash Discount rules that have started by onDate. A rule's end date
+ * only limits which invoices count (see invoiceDateTo); a rule that has ended
+ * is still checked so its last invoices get their windows and Credit Notes.
+ */
+async function startedCdRuleIds(companyId: string, onDate: string) {
+  const { data, error } = await createSupabaseAdminClient()
+    .from("scheme_versions").select("id")
+    .eq("company_id", companyId).eq("scheme_type", "cd").eq("status", "active")
+    .lte("effective_from", onDate)
+    .order("version_number", { ascending: false });
   if (error) throw error;
-  // Before the 20260926090000 migration the basis column is missing: all rules are percentage rules.
-  const basis = await createSupabaseAdminClient().from("scheme_versions").select("id, cd_discount_basis").in("id", ids);
-  if (basis.error && basis.error.code !== "42703") throw basis.error;
-  const basisById = new Map((basis.error ? [] : basis.data ?? []).map((row) => [row.id as string, row.cd_discount_basis as string]));
-  return (data ?? []).map((row) => ({
+  return (data ?? []).map((row) => row.id);
+}
+
+export async function listActiveCdRules(companyId: string, onDate: string) {
+  // One query. Before the 20260926090000 migration the basis column is missing
+  // (error 42703): then all rules are percentage rules.
+  const read = (columns: string) => createSupabaseAdminClient().from("scheme_versions").select(columns)
+    .eq("company_id", companyId).eq("scheme_type", "cd").eq("status", "active").lte("effective_from", onDate);
+  const base = "id, scheme_id, version_number, discount_percentage, allowed_working_days, effective_from, effective_to, schemes(name)";
+  let result = await read(`${base}, cd_discount_basis`);
+  if (result.error?.code === "42703") result = await read(base);
+  if (result.error) throw result.error;
+  const data = (result.data ?? []) as unknown as Array<Record<string, any>>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  const basisById = new Map(data.map((row) => [row.id as string, row.cd_discount_basis as string | undefined]));
+  return data.map((row) => ({
     id: row.id, schemeId: row.scheme_id, versionNumber: row.version_number,
     name: String((row.schemes as { name?: string } | null)?.name ?? "Cash Discount rule"),
     discountPercentage: String(row.discount_percentage ?? ""), allowedWorkingDays: row.allowed_working_days,
@@ -620,7 +635,7 @@ export async function listActiveRulesByGroup(companyId: string, onDate: string) 
 
 export async function loadLiveCdLocalBootstrap(run: EvaluationRunRecord, requestedRuleVersionId?: string | null) {
   const evaluatedOn = dateText(run.request_context.evaluatedOn, utcToday());
-  const ruleIds = await activeRuleIds(run.company_id, "cd", evaluatedOn);
+  const ruleIds = await startedCdRuleIds(run.company_id, evaluatedOn);
   // Several Cash Discount rules may be active; the page asks for one of them.
   let ruleId: string;
   if (requestedRuleVersionId) {
@@ -676,7 +691,10 @@ export async function loadLiveCdLocalBootstrap(run: EvaluationRunRecord, request
         ruleVersionId: rule.id,
         customers: eligibleCustomers,
         dateFrom: rule.effectiveFrom,
+        // Payments are read up to today so an invoice near the rule's end
+        // still gets its full window; only invoices stop at the end date.
         dateTo: evaluatedOn,
+        invoiceDateTo: rule.effectiveTo && rule.effectiveTo < evaluatedOn ? rule.effectiveTo : evaluatedOn,
         maxWorkingDays,
         ...products,
       },

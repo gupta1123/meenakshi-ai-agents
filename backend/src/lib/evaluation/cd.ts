@@ -60,7 +60,6 @@ export function evaluateCashDiscount(input: CdEvaluationInput): EvaluationResult
   const legacyRule = rule as FrozenCdRule & { discountPercentage?: string; allowedWorkingDays?: number; invoiceTreatment?: string; narrationMode?: string };
   const checkNarration = rule.checkNarration ?? legacyRule.narrationMode !== "disabled";
   const strictNarration = legacyRule.narrationMode === "required";
-  const legacyUpfrontTreatment = legacyRule.invoiceTreatment === "deducted_upfront";
   const coverage = resolveRuleCoverage(rule, customer, salesVoucher.voucherDate);
   const orderedSlabs = [...(rule.slabs?.length ? rule.slabs : legacyRule.discountPercentage != null && legacyRule.allowedWorkingDays != null ? [{ id: rule.id, percentage: legacyRule.discountPercentage, allowedWorkingDays: legacyRule.allowedWorkingDays }] : [])].sort((left, right) => left.allowedWorkingDays - right.allowedWorkingDays);
   const finalSlab = orderedSlabs.at(-1);

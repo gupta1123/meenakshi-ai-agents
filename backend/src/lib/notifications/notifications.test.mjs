@@ -10,7 +10,7 @@ test("live template validation rejects local placeholders and missing required P
   const catalog = [{ name: "share_credit_memo", languages: [{ language: "en", status: "approved", variables: ["header_1", "body_1"], variable_type: { header_1: { type: "document" }, body_1: { type: "text" } } }] }];
   assert.match(providerTemplateProblem({ providerTemplateId: "LOCAL_TOD_CREDIT_NOTE_V1", languageCode: "en" }, catalog), /not approved/);
   const template = { providerTemplateId: "share_credit_memo", languageCode: "en", componentSchema: { components: [{ component: "header_1", type: "document", value: "documentUrl" }, { component: "body_1", value: "customerName" }] } };
-  assert.match(providerTemplateProblem(template, catalog, false), /requires a Credit Note PDF/);
+  assert.match(providerTemplateProblem(template, catalog, false), /requires a verified note PDF/);
   assert.equal(providerTemplateProblem(template, catalog, true), null);
 });
 

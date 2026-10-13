@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { Archive, BadgePercent, BookOpen, CalendarDays, ContactRound, Layers3, Pause, Pencil, Plus, Search, Settings2, UserPlus } from "lucide-react";
+import { Archive, BadgePercent, BookOpen, CalendarDays, ContactRound, Layers3, UsersRound, Pause, Pencil, Plus, Search, Settings2, Trash2, UserPlus } from "lucide-react";
 
 import { ApiError, apiRequest, jsonBody } from "@/lib/api";
 import { userFacingError } from "@/lib/user-copy";
@@ -9,13 +9,14 @@ import { userFacingError } from "@/lib/user-copy";
 import { useCompany } from "./company-context";
 import { WorkspacePageHeader } from "./app-shell";
 import type { Calendar, Contact, ReferenceData, Scheme, SchemeDetail, Version, VersionDetail } from "./types";
-import { Button, Card, Dialog, Drawer, EmptyState, InlineMessage, Skeleton, StatusBadge, labelFor, safePhone } from "./ui";
+import { Button, Card, Dialog, Drawer, EmptyState, Skeleton, StatusBadge, labelFor, safePhone } from "./ui";
 import type { PageProps } from "./workspace";
 import { ContactConsentDrawer } from "./contact-consent-drawer";
 import { GuidedDraftSetupDrawer } from "./guided-draft-setup";
 import { HolidayCalendar } from "./holiday-calendar";
 import { GuidedVersionSummary, type ActivationValidation } from "./guided-version-summary";
 import { RuleEditor } from "./rule-editor";
+import { TeamContactsPanel } from "./team-contacts";
 import { RulebookGuidance } from "./rulebook-guidance";
 import { accessToken } from "./workspace";
 import studio from "./rulebook-studio.module.css";
@@ -33,9 +34,14 @@ const TABS = [
   { id: "schemes", label: "Rules", icon: BookOpen },
   { id: "calendar", label: "Calendar", icon: CalendarDays },
   { id: "contacts", label: "Contacts & consent", icon: ContactRound },
+  { id: "team", label: "Team", icon: UsersRound },
   { id: "management", label: "Rule status", icon: Settings2 },
 ] as const;
 type RulebookTab = (typeof TABS)[number]["id"];
+// Hidden for now: "Contacts & consent". WhatsApp is sent manually to the number
+// entered at send time, which records its own opt-in. Remove from this list to restore.
+const HIDDEN_TABS: ReadonlySet<RulebookTab> = new Set(["contacts"]);
+const VISIBLE_TABS = TABS.filter((item) => !HIDDEN_TABS.has(item.id));
 
 function schemeTypeName(scheme: Scheme) {
   return scheme.schemeType === "cd" ? "Cash Discount" : "Turnover Discount";
@@ -52,12 +58,13 @@ function coversDate(version: Version, date: string) {
 
 function operationalStatus(scheme: Scheme, versions?: Version[]) {
   if (scheme.status !== "active") return scheme.status;
-  if (!versions) return scheme.operationalStatus ?? scheme.status;
+  // A rule past its end date is still shown as active: its dates show the period.
+  if (!versions) return scheme.operationalStatus === "expired" ? "active" : scheme.operationalStatus ?? scheme.status;
   const applied = versions.filter((item) => item.status === "active");
   const today = new Date().toISOString().slice(0, 10);
   if (applied.some((item) => coversDate(item, today))) return "active";
   if (applied.some((item) => item.effectiveFrom > today)) return "scheduled";
-  return applied.length ? "expired" : "setup_incomplete";
+  return applied.length ? "active" : "setup_incomplete";
 }
 
 function activationValidationFromError(cause: unknown): ActivationValidation | null {
@@ -94,6 +101,7 @@ export function RulebookPage({ data: initialData, isAdministrator, setError, set
   const loadedTabs = useRef(new Set<string>());
   const tabRefs = useRef<Partial<Record<RulebookTab, HTMLButtonElement | null>>>({});
   const [ruleSearch, setRuleSearch] = useState("");
+  const [showRetired, setShowRetired] = useState(false);
   const [ruleEditorMode, setRuleEditorModeState] = useState<"new" | "complete" | "update" | null>(null);
   const [draftSetupOpen, setDraftSetupOpen] = useState(false);
   const [calendarOpen, setCalendarOpen] = useState(false);
@@ -254,7 +262,7 @@ export function RulebookPage({ data: initialData, isAdministrator, setError, set
   useEffect(() => { setLoaded(false); setSelected(null); setVersion(null); setRuleSearch(""); setConsentContactId(null); setRulebook(blankData); selectedSchemeId.current = null; selectedVersionId.current = null; schemeDetailCache.current.clear(); versionDetailCache.current.clear(); loadedTabs.current = new Set(); void load(); }, [companyKey, load]);
 
   const loadTab = useCallback(async (nextTab: RulebookTab, force = false) => {
-    if (nextTab === "schemes" || nextTab === "management" || (!force && loadedTabs.current.has(nextTab))) return;
+    if (nextTab === "schemes" || nextTab === "management" || nextTab === "team" || (!force && loadedTabs.current.has(nextTab))) return;
     const token = await accessToken();
     if (!token) return;
     setTabLoading(true);
@@ -280,7 +288,7 @@ export function RulebookPage({ data: initialData, isAdministrator, setError, set
   }
 
   function onTabKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
-    const last = TABS.length - 1;
+    const last = VISIBLE_TABS.length - 1;
     const next = event.key === "ArrowRight" ? (index === last ? 0 : index + 1)
       : event.key === "ArrowLeft" ? (index === 0 ? last : index - 1)
       : event.key === "Home" ? 0
@@ -288,7 +296,7 @@ export function RulebookPage({ data: initialData, isAdministrator, setError, set
       : null;
     if (next === null) return;
     event.preventDefault();
-    const nextTab = TABS[next].id;
+    const nextTab = VISIBLE_TABS[next].id;
     selectTab(nextTab);
     tabRefs.current[nextTab]?.focus();
   }
@@ -370,19 +378,21 @@ export function RulebookPage({ data: initialData, isAdministrator, setError, set
   }
 
   const ruleQuery = ruleSearch.trim().toLowerCase();
-  const visibleSchemes = useMemo(() => rulebook.schemes.filter((scheme) => !ruleQuery || `${scheme.name} ${scheme.code} ${scheme.description ?? ""}`.toLowerCase().includes(ruleQuery)), [rulebook.schemes, ruleQuery]);
+  const retiredCount = rulebook.schemes.filter((scheme) => scheme.status === "retired").length;
+  const visibleSchemes = useMemo(() => rulebook.schemes.filter((scheme) => (showRetired || scheme.status !== "retired") && (!ruleQuery || `${scheme.name} ${scheme.code} ${scheme.description ?? ""}`.toLowerCase().includes(ruleQuery))), [rulebook.schemes, ruleQuery, showRetired]);
   const missingForActivation = useMemo(() => activationValidation?.valid === false ? (activationValidation.issues ?? []).map((issue) => issue.message ?? "More information is needed before this update can be applied.") : [], [activationValidation]);
   if (!isAdministrator) return <><WorkspacePageHeader eyebrow="Restricted" title="Rulebook" detail="Rulebook administration is available only to Administrators." /><EmptyState title="Administrator access required" detail="Finance Approvers can continue reviewing proposals, Credit Notes, Messages, and Tally readiness." /></>;
 
   const activeVersion = selected?.versions.find((item) => item.status === "active") ?? null;
   const draftVersion = selected?.versions.find((item) => item.status === "draft") ?? null;
-  const today = new Date().toISOString().slice(0, 10);
   const selectedOperationalStatus = selected ? operationalStatus(selected.scheme, selected.versions) : null;
-  const draftCoversToday = draftVersion ? coversDate(draftVersion, today) : false;
   const consentContact = consentContactId ? rulebook.contacts.find((item) => item.id === consentContactId) ?? null : null;
   const tabCounts: Partial<Record<RulebookTab, number>> = { schemes: loaded ? rulebook.schemes.length : undefined, contacts: loadedTabs.current.has("contacts") ? rulebook.contacts.length : undefined };
 
-  const primaryAction = tab === "schemes" ? <Button onClick={() => void setRuleEditorMode("new")}><Plus size={16} />New rule</Button>
+  // One active rule per type: once both Cash Discount and Turnover Discount are
+  // active, a new rule has nothing to add. Change them with "Edit rule" instead.
+  const bothTypesActive = (["cd", "tod"] as const).every((type) => rulebook.schemes.some((scheme) => scheme.schemeType === type && scheme.status === "active"));
+  const primaryAction = tab === "schemes" ? bothTypesActive ? null : <Button onClick={() => void setRuleEditorMode("new")}><Plus size={16} />New rule</Button>
     : tab === "contacts" ? <Button onClick={openAddContact}><UserPlus size={16} />Add contact</Button>
     : null;
 
@@ -403,7 +413,8 @@ export function RulebookPage({ data: initialData, isAdministrator, setError, set
             <span className={studio.ruleMeta}><StatusBadge status={operationalStatus(scheme)} /></span>
           </button>)}
           {!rulebook.schemes.length && <div className={studio.railEmpty}><p>No rules yet.</p><Button className="button-secondary" onClick={() => void setRuleEditorMode("new")}><Plus size={15} />Create first rule</Button></div>}
-          {rulebook.schemes.length > 0 && !visibleSchemes.length && <p className={studio.railEmpty}>No rules match “{ruleSearch.trim()}”.</p>}
+          {rulebook.schemes.length > 0 && !visibleSchemes.length && <p className={studio.railEmpty}>{ruleQuery ? <>No rules match “{ruleSearch.trim()}”.</> : "Only retired rules."}</p>}
+          {retiredCount > 0 && <button type="button" className={studio.retiredToggle} onClick={() => setShowRetired((value) => !value)}>{showRetired ? "Hide retired rules" : `Show retired (${retiredCount})`}</button>}
         </div>
       </aside>
       <section className={studio.canvas} aria-live="polite">{selectingScheme ? <div className={studio.body}><Skeleton lines={6} /></div> : selected ? <>
@@ -416,14 +427,12 @@ export function RulebookPage({ data: initialData, isAdministrator, setError, set
               <StatusBadge status={selectedOperationalStatus ?? selected.scheme.status} />
               {activeVersion && selectedOperationalStatus === "active" && <span>In use since {shortDate(activeVersion.effectiveFrom)}{activeVersion.effectiveTo ? ` · until ${shortDate(activeVersion.effectiveTo)}` : ""}</span>}
               {selectedOperationalStatus === "scheduled" && activeVersion && <span>Starts {shortDate(activeVersion.effectiveFrom)}</span>}
-              {selectedOperationalStatus === "expired" && activeVersion?.effectiveTo && <span>Ended {shortDate(activeVersion.effectiveTo)}</span>}
               {draftVersion && <span className={studio.workingCopy}>Draft update</span>}
             </div>
           </div>
           <div className={studio.heroActions}>{heroAction}</div>
         </header>
         <div className={studio.body}>
-          {selectedOperationalStatus === "expired" && <InlineMessage tone="warning"><strong>No applied version covers today.</strong> The last applied version ended {activeVersion?.effectiveTo ? shortDate(activeVersion.effectiveTo) : "before today"}.{draftVersion && !draftCoversToday ? ` The draft does not cover ${shortDate(today)} either.` : ""}</InlineMessage>}
           {!selected.versions.length && <EmptyState title="Rule setup is incomplete" detail="Complete the business terms before using this rule." action={<Button onClick={() => void setRuleEditorMode("complete")}><Pencil size={14} />Complete setup</Button>} />}
           {version && <GuidedVersionSummary detail={version} reference={liveReference} validation={activationValidation} allowReplacementOverlap={Boolean(activeVersion) && rulebook.schemes.filter((item) => item.schemeType === selected?.scheme.schemeType && item.status === "active").length === 1} busy={versionActionBusy} onEditTerms={() => void setRuleEditorMode("update")} onDraftSetup={() => setDraftSetupOpen(true)} onValidate={() => void runVersionAction("validate")} onActivate={() => void runVersionAction("activate")} />}
         </div>
@@ -434,11 +443,12 @@ export function RulebookPage({ data: initialData, isAdministrator, setError, set
   const panel = tab === "schemes" ? rulesPanel
     : tabLoading && !loadedTabs.current.has(tab) ? <Skeleton lines={4} />
     : tab === "calendar" ? <HolidayCalendar calendars={rulebook.calendars} onSetUp={() => setCalendarOpen(true)} onChanged={async (message) => { setNotice(message); await loadTab("calendar", true); }} onError={setError} />
+    : tab === "team" ? <TeamContactsPanel onNotice={setNotice} onError={setError} />
     : tab === "contacts" ? <ContactsList contacts={rulebook.contacts} onAdd={openAddContact} onManage={(contact) => setConsentContactId(contact.id)} />
     : <RuleLifecycleList schemes={rulebook.schemes} onChanged={async (message) => { setNotice(message); await load({ schemeId: selectedSchemeId.current, versionId: selectedVersionId.current }); }} onError={setError} />;
 
   return <><WorkspacePageHeader title="Rulebook" action={<><RulebookGuidance hasMasters={Boolean(liveReference)} missing={missingForActivation} />{primaryAction}</>} />
-    <div className={studio.tabs} role="tablist" aria-label="Rulebook sections">{TABS.map(({ id, label, icon: TabIcon }, index) => <button key={id} ref={(node) => { tabRefs.current[id] = node; }} id={`rulebook-tab-${id}`} type="button" role="tab" aria-selected={tab === id} aria-controls={`rulebook-panel-${id}`} tabIndex={tab === id ? 0 : -1} className={studio.tab} onClick={() => selectTab(id)} onKeyDown={(event) => onTabKeyDown(event, index)}><TabIcon size={16} />{label}{tabCounts[id] !== undefined && <span className={studio.tabCount}>{tabCounts[id]}</span>}</button>)}</div>
+    <div className={studio.tabs} role="tablist" aria-label="Rulebook sections">{VISIBLE_TABS.map(({ id, label, icon: TabIcon }, index) => <button key={id} ref={(node) => { tabRefs.current[id] = node; }} id={`rulebook-tab-${id}`} type="button" role="tab" aria-selected={tab === id} aria-controls={`rulebook-panel-${id}`} tabIndex={tab === id ? 0 : -1} className={studio.tab} onClick={() => selectTab(id)} onKeyDown={(event) => onTabKeyDown(event, index)}><TabIcon size={16} />{label}{tabCounts[id] !== undefined && <span className={studio.tabCount}>{tabCounts[id]}</span>}</button>)}</div>
     <div className={studio.panel} role="tabpanel" id={`rulebook-panel-${tab}`} aria-labelledby={`rulebook-tab-${tab}`}>{loading && !loaded ? <Skeleton lines={6} /> : panel}</div>
     <RuleEditor open={ruleEditorMode !== null} scheme={ruleEditorMode === "new" ? null : selected?.scheme ?? null} source={ruleEditorMode === "update" ? version : null} reference={liveReference} onClose={() => setRuleEditorMode(null)} onSaved={async (created) => { const wasUpdate = ruleEditorMode === "update"; setRuleEditorMode(null); setActivationValidation(null); setNotice(wasUpdate && created.applied ? "Rule changes saved and applied." : "Rule created. Complete its eligibility, then apply it."); await load(created); }} onError={setError} />
     <GuidedDraftSetupDrawer open={draftSetupOpen} onClose={() => setDraftSetupOpen(false)} detail={version} reference={liveReference} refreshingReference={refreshingReference} onRefreshReference={async () => { try { await readLiveTallyReference(); } catch (cause) { setError(userFacingError(cause, "Could not read the latest customers and products from Tally.")); } }} onError={setError} onSaved={async (message) => { setActivationValidation(null); setNotice(message); await refreshOpenVersion(); }} />
@@ -463,7 +473,22 @@ function RuleLifecycleList({ schemes, onChanged, onError }: { schemes: Scheme[];
   const { company } = useCompany();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [retiring, setRetiring] = useState<Scheme | null>(null);
+  const [deleting, setDeleting] = useState<Scheme | null>(null);
   const ordered = useMemo(() => [...schemes].sort((left, right) => Number(left.status === "retired") - Number(right.status === "retired")), [schemes]);
+
+  // Only a rule that was never used (still a draft) can be deleted; the server refuses the rest.
+  async function deleteScheme(scheme: Scheme) {
+    const token = await accessToken(); if (!token) return;
+    setBusyId(scheme.id);
+    try {
+      await apiRequest(token, `/api/companies/${company.id}/schemes/${scheme.id}`, { method: "DELETE" });
+      setDeleting(null);
+      await onChanged(`${scheme.name} deleted.`);
+    } catch (cause) {
+      setDeleting(null);
+      onError(userFacingError(cause, "Could not delete this rule."));
+    } finally { setBusyId(null); }
+  }
 
   async function updateScheme(scheme: Scheme, status: "paused" | "retired") {
     const token = await accessToken(); if (!token) return;
@@ -478,15 +503,19 @@ function RuleLifecycleList({ schemes, onChanged, onError }: { schemes: Scheme[];
   }
 
   return <><Card>
-    <div className="card-title"><div><p className="eyebrow">Rule status</p><h2>Pause or retire rules</h2><p className="muted-copy">Pausing stops a rule from being used for new work. Retiring is permanent. Neither changes activated versions or verified Credit Notes.</p></div><Settings2 size={20} /></div>
+    <div className="card-title"><div><p className="eyebrow">Rule status</p><h2>Pause or retire rules</h2><p className="muted-copy">Pausing stops a rule from being used for new work. Retiring is permanent. Neither changes activated versions or verified Credit Notes. A rule that was never used (still a draft) can be deleted.</p></div><Settings2 size={20} /></div>
     {ordered.length ? <div className="simple-list">{ordered.map((scheme) => <article key={scheme.id} className={scheme.status === "retired" ? "is-inactive" : ""}>
       <div><strong>{scheme.name}</strong><p>{scheme.code} · {schemeTypeName(scheme)}</p></div>
       <div className="table-actions"><StatusBadge status={scheme.status} />
-        {scheme.status === "paused" ? <Button className="button-quiet" disabled={busyId === scheme.id} onClick={() => setRetiring(scheme)}><Archive size={14} />Retire</Button>
+        {scheme.status === "draft" ? <Button className="button-quiet" disabled={busyId === scheme.id} onClick={() => setDeleting(scheme)}><Trash2 size={14} />Delete</Button>
+          : scheme.status === "paused" ? <Button className="button-quiet" disabled={busyId === scheme.id} onClick={() => setRetiring(scheme)}><Archive size={14} />Retire</Button>
           : scheme.status !== "retired" && <Button className="button-quiet" disabled={busyId === scheme.id} onClick={() => void updateScheme(scheme, "paused")}><Pause size={14} />Pause</Button>}
       </div>
     </article>)}</div> : <EmptyState title="No rules to manage" detail="Create a rule from the Rules tab first." />}
   </Card>
+  <Dialog open={Boolean(deleting)} onClose={() => setDeleting(null)} title="Delete this rule?" description={deleting ? `${deleting.name} was never used, so it will be removed completely with its settings. This cannot be undone.` : undefined}>
+    <div className="inline-actions"><Button className="button-secondary" onClick={() => setDeleting(null)}>Keep rule</Button><Button className="button-danger" disabled={!deleting || busyId === deleting.id} onClick={() => { if (deleting) void deleteScheme(deleting); }}><Trash2 size={14} />Delete rule</Button></div>
+  </Dialog>
   <Dialog open={Boolean(retiring)} onClose={() => setRetiring(null)} title="Retire this rule?" description={retiring ? `${retiring.name} will be retired permanently and can no longer be used. Its activated versions and verified Credit Notes stay unchanged.` : undefined}>
     <div className="inline-actions"><Button className="button-secondary" onClick={() => setRetiring(null)}>Keep paused</Button><Button className="button-danger" disabled={!retiring || busyId === retiring.id} onClick={() => { if (retiring) void updateScheme(retiring, "retired"); }}><Archive size={14} />Retire rule</Button></div>
   </Dialog></>;

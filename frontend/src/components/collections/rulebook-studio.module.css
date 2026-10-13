@@ -295,3 +295,14 @@
   .ruleEditorForm::after { flex-basis: 116px; }
   .applySummary > div { grid-template-columns: 1fr; gap: 4px; }
 }
+
+/* Cash Discount segments as side-by-side cards. */
+.ruleFacts > .segmentFact { grid-template-columns: 1fr; gap: 10px; }
+.segmentCards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.segmentCard { display: grid; align-content: start; gap: 6px; padding: 12px 14px; border: 1px solid #e3ded4; border-radius: 11px; background: #fcfbf9; }
+.segmentHead { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.segmentHead strong { color: var(--ink); font-size: 1rem; }
+.segmentHead span { padding: 2px 8px; border-radius: 999px; background: var(--green-wash); color: #178248; font-size: .72rem; font-weight: 750; }
+.segmentCard > small { color: var(--muted); font-size: .68rem; font-weight: 600; }
+
+.retiredToggle { justify-self: start; margin: 6px 4px 0; padding: 4px 6px; border: 0; background: none; color: var(--ink-soft); font: inherit; font-size: .7rem; font-weight: 650; text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }

@@ -2,6 +2,7 @@ import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { authenticateMeenakshiBridge } from "@/lib/bridge";
 import { isUuid, readBridgeToken } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { getObsoleteEvaluationReadReason, retireEvaluationRead, retireObsoleteEvaluationReads } from "@/lib/evaluation/refresh-commands.mjs";
 
 type TallyCommandRow = { id: string; company_id: string; command_type: string; correlation_id: string; expected_tally_company_guid: string; expected_tally_company_name: string; payload: Record<string, unknown>; attempts: number };
 function serializeCommand(command: TallyCommandRow) {
@@ -16,9 +17,18 @@ export async function GET(request: Request) {
     const connector = await authenticateMeenakshiBridge(connectorId, controlToken);
     if (!connector) return jsonWithCors(request, { error: "Invalid connector credential." }, { status: 401 });
     const workerId = `meenakshi-bridge:${connector.id}:${connector.machine_fingerprint.slice(-32)}`;
-    const { data, error } = await createSupabaseAdminClient().rpc("claim_tally_commands", { p_connector_id: connector.id, p_worker_id: workerId, p_limit: 1, p_lease_seconds: 90 });
+    const supabase = createSupabaseAdminClient();
+    await retireObsoleteEvaluationReads(supabase, { connectorId: connector.id });
+    const { data, error } = await supabase.rpc("claim_tally_commands", { p_connector_id: connector.id, p_worker_id: workerId, p_limit: 1, p_lease_seconds: 90 });
     if (error) throw error;
     const command = (data as unknown as TallyCommandRow[] | null)?.[0] ?? null;
+    if (command) {
+      const reason = await getObsoleteEvaluationReadReason(supabase, command);
+      if (reason) {
+        await retireEvaluationRead(supabase, command, reason);
+        return jsonWithCors(request, { command: null });
+      }
+    }
     if (command && (command.command_type === "sync_meenakshi_masters" || command.command_type === "sync_meenakshi_vouchers" || command.command_type === "fetch_meenakshi_evidence")) {
       const syncRunIds = command.command_type === "fetch_meenakshi_evidence"
         ? [command.payload.masterSyncRunId, command.payload.voucherSyncRunId]

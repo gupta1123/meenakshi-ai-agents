@@ -117,7 +117,13 @@ export function parseCustomers(xml) {
     const customerGroupGuid = value(block, "PARENTGUID");
     const customerGroupName = value(block, "PARENT");
     const taxIdentifier = value(block, "PARTYGSTIN");
-    const phone = value(block, "MOBILE") || value(block, "PHONENUMBER") || value(block, "PHONE");
+    // Tally Prime keeps contact details in LEDGERMOBILE / LEDGERPHONE / LEDGERCONTACT / EMAIL.
+    // A field may hold several numbers ("98..., 97..."); keep each one.
+    const numbers = (text) => String(text ?? "").split(/[,/;|]+/).map((part) => part.replace(/[^\d+]/g, "")).filter((part) => part.replace(/\D/g, "").length >= 10);
+    const mobiles = [...new Set([...numbers(value(block, "LEDGERMOBILE")), ...numbers(value(block, "LEDGERPHONE"))])];
+    const phone = mobiles[0] ?? "";
+    const email = value(block, "EMAIL");
+    const contactPerson = value(block, "LEDGERCONTACT");
     // Printed on Credit/Debit Note PDFs (Party's Name block).
     const addressLines = getTagTexts(block, "ADDRESS").map((line) => line.trim()).filter(Boolean);
     const address = addressLines.length ? addressLines.join(", ") : "";
@@ -130,7 +136,7 @@ export function parseCustomers(xml) {
       ledgerName: item.name,
       customerGroupGuid,
       taxIdentifier,
-      sourcePayload: sourcePayload({ ...item, customerGroupGuid, customerGroupName, taxIdentifier, phone, address, stateName, pinCode }),
+      sourcePayload: sourcePayload({ ...item, customerGroupGuid, customerGroupName, taxIdentifier, phone, mobiles: mobiles.length ? mobiles : undefined, email, contactPerson, address, stateName, pinCode }),
     };
   }).filter((item) => item.guid && item.ledgerName);
 }

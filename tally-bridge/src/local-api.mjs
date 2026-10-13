@@ -6,6 +6,7 @@ import { evaluateLocalCashDiscount } from "./local-cd-evaluator.mjs";
 import { evaluateCashDiscountSettlements } from "./local-cd-settlement-evaluator.mjs";
 import { evaluateLocalTurnoverDiscount } from "./local-tod-evaluator.mjs";
 import { probeActiveCompany } from "./tally/company-probe.mjs";
+import { readNoteEInvoice } from "./tally/einvoice.mjs";
 
 export const LOCAL_TALLY_PORT = 3219;
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
@@ -54,6 +55,8 @@ function readJson(request) {
 
 export function startLocalApi(config) {
   let stopping = false;
+  // Progress of the calculation in flight, read by the browser while it waits.
+  let progress = null;
   let retryTimer = null;
   const server = http.createServer(async (request, response) => {
     const origin = String(request.headers.origin ?? "").replace(/\/+$/, "");
@@ -74,10 +77,32 @@ export function startLocalApi(config) {
       }
       return;
     }
+    if (request.method === "GET" && request.url === "/v1/progress") {
+      respond(response, 200, { progress }, origin, config);
+      return;
+    }
     if (request.method === "GET" && request.url === "/v1/identity") {
       // The connector ID is not a credential. It lets this browser choose
       // the connector running on this PC without exposing pairing secrets.
       respond(response, 200, { connectorId: config.connectorId }, origin, config);
+      return;
+    }
+    // IRN / Ack / signed QR of one Credit or Debit Note, for its PDF.
+    if (request.method === "POST" && request.url === "/v1/einvoice") {
+      try {
+        const body = await readJson(request);
+        const expectedCompany = body.expectedCompany && typeof body.expectedCompany === "object" ? body.expectedCompany : {};
+        const activeCompany = await probeActiveCompany(config.tallyUrl);
+        const expectedGuid = String(expectedCompany.guid ?? "").trim();
+        const sameCompany = expectedGuid
+          ? normalized(activeCompany.guid) === normalized(expectedGuid)
+          : Boolean(expectedCompany.name) && normalized(activeCompany.name) === normalized(expectedCompany.name);
+        if (!sameCompany) throw new Error(`Open ${expectedCompany.name || "the selected company"} in Tally Prime first.`);
+        const einvoice = await readNoteEInvoice({ tallyUrl: config.tallyUrl, companyName: activeCompany.name, date: body.date, voucherNumber: body.voucherNumber, kind: body.kind });
+        respond(response, 200, { einvoice }, origin, config);
+      } catch (error) {
+        respond(response, 422, { error: error instanceof Error ? error.message : String(error) }, origin, config);
+      }
       return;
     }
     const isCashDiscount = request.url === "/v1/cash-discount";
@@ -99,9 +124,12 @@ export function startLocalApi(config) {
         throw new Error(`Open ${expectedCompany.name || "the selected company"} in Tally Prime before running this calculation.`);
       }
       const command = { payload: { evaluationRunId: null, voucherScope: body.voucherScope } };
+      progress = { task: isCashDiscount ? "cash_discount" : "turnover_discount", stage: "reading", done: 0, total: null, from: null, to: null, startedAt: new Date().toISOString() };
+      const onProgress = (update) => { progress = { ...progress, ...update }; };
       const evidence = isCashDiscount
-        ? await fetchLiveCdEvidence(command, { config, activeCompany, isCancelled: () => false }, null)
+        ? await fetchLiveCdEvidence(command, { config, activeCompany, isCancelled: () => false, onProgress }, null)
         : await fetchLiveTodEvidence(command, { config, activeCompany, isCancelled: () => false });
+      onProgress({ stage: "calculating" });
       const calculation = isCashDiscount
         ? body.rule?.cdDiscountBasis === "amount_per_tonne"
           ? evaluateCashDiscountSettlements(body.rule, body.evaluatedOn, evidence.invoices)

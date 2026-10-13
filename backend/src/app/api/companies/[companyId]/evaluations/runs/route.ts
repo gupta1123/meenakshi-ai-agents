@@ -16,6 +16,9 @@ function schemeTypeFromRequestContext(value: unknown): SchemeType | null {
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
 
 const RUNS_CACHE_TTL_MS = 5_000;
+const settledStatuses = new Set(["completed", "completed_with_issues", "failed", "cancelled"]);
+const settledChildren = new Map<string, never[]>();
+const childColumns = "id, scheme_version_id, period_start, period_end, status, error_summary, created_at, updated_at, completed_at, idempotency_key";
 const runsCache = new Map<string, { expiresAt: number; data: unknown }>();
 
 export async function GET(request: Request, context: RouteContext) {
@@ -58,20 +61,35 @@ export async function GET(request: Request, context: RouteContext) {
     type RunRow = NonNullable<typeof rootRuns>[number];
     const runs: RunRow[] = [...(rootRuns ?? [])];
     const todRoots = (rootRuns ?? []).filter((run) => schemeTypeFromRequestContext(run.request_context) === "tod");
-    await Promise.all(todRoots.map(async (root) => {
+    // A finished calculation never changes, so its per-customer rows are kept in
+    // memory; only unfinished or newly created calculations are read again.
+    const loadChildren = async (root: RunRow) => {
+      const settled = settledChildren.get(root.id);
+      if (settled) return settled;
+      const rows: RunRow[] = [];
       for (let from = 0; ; from += 1000) {
         const { data: children, error: childError } = await supabase.from("evaluation_runs")
-          .select(`${columns}, calculatedDiscountAmount:summary->calculatedDiscountAmount`)
+          .select(`${childColumns}, calculatedDiscountAmount:summary->calculatedDiscountAmount`)
           .eq("company_id", company.id).like("idempotency_key", `${root.id}:%`)
           .order("id").range(from, from + 999);
         if (childError) throw childError;
         for (const child of children ?? []) {
           const { calculatedDiscountAmount, ...rest } = child as typeof child & { calculatedDiscountAmount?: unknown };
-          runs.push({ ...rest, summary: { calculatedDiscountAmount } } as RunRow);
+          rows.push({ ...rest, summary: { calculatedDiscountAmount } } as unknown as RunRow);
         }
         if ((children ?? []).length < 1000) break;
       }
-    }));
+      if (rows.length && rows.every((row) => settledStatuses.has(row.status))) {
+        settledChildren.set(root.id, rows as never[]);
+        if (settledChildren.size > 400) settledChildren.delete(settledChildren.keys().next().value as string);
+      }
+      return rows;
+    };
+    // Eight at a time: one request per calculation, without opening hundreds at once.
+    for (let index = 0; index < todRoots.length; index += 8) {
+      const loaded = await Promise.all(todRoots.slice(index, index + 8).map(loadChildren));
+      for (const rows of loaded) runs.push(...rows);
+    }
 
     const versionIds = requestedScheme
       ? []

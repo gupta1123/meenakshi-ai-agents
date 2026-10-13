@@ -2,21 +2,23 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bell, BookOpen, Building2, ChevronDown, CircleGauge, FileCheck2, FileMinus2, Layers2, LogOut, Menu, ReceiptIndianRupee } from "lucide-react";
+import { Bell, BookOpen, Building2, ChevronDown, CircleGauge, FileCheck2, Layers2, LogOut, Menu, ReceiptIndianRupee } from "lucide-react";
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
 
-import { StatusBadge } from "./ui";
 import { useCompany } from "./company-context";
 import { GlobalTallyMonitor } from "./global-tally-monitor";
 import { useTallyCompanySelection } from "./tally-company-selection";
 import headerStyles from "./app-shell-header.module.css";
+import { TallySyncPill } from "./tally-sync-pill";
 
 const navigation = [
   { href: "/", label: "Overview", description: "What needs attention", icon: CircleGauge },
   { href: "/cash-discount", label: "Cash Discount", description: "Check a Sales invoice", icon: ReceiptIndianRupee },
   { href: "/turnover-discount", label: "Turnover Discount", description: "Check a customer period", icon: Layers2 },
   { href: "/credit-notes", label: "Credit Notes", description: "Posting and verification history", icon: FileCheck2 },
-  { href: "/debit-notes", label: "Debit Notes", description: "Cash Discount recoveries", icon: FileMinus2 },
+  // Hidden: the active per-MT Cash Discount rule gives discounts by Credit Note and never
+  // creates Debit Notes. The page still works at /debit-notes for the few created earlier.
+  // { href: "/debit-notes", label: "Debit Notes", description: "Cash Discount recoveries", icon: FileMinus2 }, (import FileMinus2 from lucide-react to restore)
   { href: "/messages", label: "Messages", description: "WhatsApp delivery history", icon: Bell },
   { href: "/rulebook", label: "Rulebook", description: "Administrator settings", icon: BookOpen, administratorOnly: true },
 ];
@@ -70,11 +72,7 @@ export function AppShell({ children, email, tallyStatus, onSignOut }: { children
         })}
       </nav>
       <div className="sidebar-bottom">
-        <Link href="/tally" prefetch={false} className="sidebar-tally-pill" title="View Tally connection status">
-          <span className={`tally-dot ${tallyStatus.includes("ready") ? "ready" : "stale"}`} />
-          <span className="tally-label">Tally: {tallyStatus.replaceAll("bridge_stale", "connection needs attention").replaceAll("not_bound", "not connected").replaceAll("awaiting_pairing", "connecting").replaceAll("_", " ")}</span>
-          <span className="tally-arrow">→</span>
-        </Link>
+        <TallySyncPill tallyStatus={tallyStatus} />
         <button className="user-menu-trigger" onClick={() => setMenuOpen((open) => !open)} aria-expanded={menuOpen}>
           <span className="avatar">{initials}</span>
           <span className="user-name">{email || "Signed in"}</span>

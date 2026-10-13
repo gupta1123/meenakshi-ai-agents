@@ -129,7 +129,7 @@ async function processOne(message) {
     if (templateProblem) throw new TemplateConfigurationError(templateProblem);
     const result = await sendMsg91Notification({
       eventType: message.event_type, recipientPhoneE164: message.recipient_phone_e164,
-      payload: { ...(message.payload ?? {}), ...(documentUrl ? { documentUrl, documentName: message.cash_discount_debit_note_posting_id ? `Debit-Note-${message.payload?.debitNoteNumber ?? "verified"}.pdf` : `Credit-Note-${message.payload?.creditNoteNumber ?? "verified"}.pdf` } : {}) },
+      payload: { ...(message.payload ?? {}), ...(documentUrl ? { documentUrl, documentName: message.event_type === "cd_debit_note_created" ? `Debit-Note-${message.payload?.debitNoteNumber ?? "verified"}.pdf` : `Credit-Note-${message.payload?.creditNoteNumber ?? "verified"}.pdf` } : {}) },
       template: message.template_snapshot ?? {},
     });
     await markSent(message, attemptId, result);

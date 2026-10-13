@@ -7,6 +7,20 @@ import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { liveProviderTemplateProblem } from "./provider-template";
 import type { NotificationEventType } from "./types";
 
+/** "2026-10-13" -> "13 Oct 2026", the way customers read dates. Anything else is left as it is. */
+function readableDate(value: string | null | undefined) {
+  const match = typeof value === "string" ? value.match(/^(\d{4})-(\d{2})-(\d{2})/) : null;
+  if (!match) return value ?? null;
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const month = months[Number(match[2]) - 1];
+  return month ? `${Number(match[3])} ${month} ${match[1]}` : value ?? null;
+}
+
+/** Tally names the company with its financial year ("… LTD - (2025-2026)"); customers should not see that. */
+function customerFacingCompanyName(name: string | null | undefined) {
+  return name ? name.replace(/\s*-\s*\(\d{4}\s*-\s*\d{4}\)\s*$/, "").trim() : name ?? null;
+}
+
 type Scope = Awaited<ReturnType<typeof requireMeenakshiCompanyAccess>>;
 type Supabase = ReturnType<typeof createSupabaseAdminClient>;
 
@@ -15,7 +29,10 @@ export type ManualSendItem =
   | { kind: "debit_note"; postingId: string; phone: string }
   | { kind: "cd_reminder"; evaluationRunId: string; customerName: string; invoiceNumber: string; invoiceDate: string; billReference: string; phone: string };
 
-export type ManualSendResult = { ok: true; messageId: string; recipient: string } | { ok: false; error: string; code: string };
+/** A Meenakshi team member copied on the message. */
+export type TeamCopy = { id: string; name: string; phone: string };
+
+export type ManualSendResult = { ok: true; messageId: string; recipient: string; copiedTo?: string[]; copyFailed?: string[] } | { ok: false; error: string; code: string };
 
 /** A message could not be sent for a reason the administrator can act on. */
 export class ManualSendProblem extends Error {
@@ -169,8 +186,8 @@ async function sendCreditNote(supabase: Supabase, scope: Scope, postingId: strin
     business_event_key: `manual:credit_note:${posting.id}:${randomUUID()}`, recipient_phone_e164: phone,
     created_by: scope.userId,
     payload: {
-      customerName: await customerName(supabase, companyId, proposal.customer_id), companyName: scope.company.tally_company_name,
-      creditNoteNumber: posting.verified_voucher_number, creditNoteDate: posting.credit_note_date,
+      customerName: await customerName(supabase, companyId, proposal.customer_id), companyName: customerFacingCompanyName(scope.company.tally_company_name),
+      creditNoteNumber: posting.verified_voucher_number, creditNoteDate: readableDate(posting.credit_note_date),
       creditNoteAmount: posting.verified_amount ?? posting.discount_amount, invoiceReference,
       todPeriodStart: proposal.period_start, todPeriodEnd: proposal.period_end, todTonnes: proposal.eligible_tonnes,
       todTierId: proposal.achieved_tier_id, documentStoragePath: posting.document_storage_path, eventType,
@@ -181,35 +198,44 @@ async function sendCreditNote(supabase: Supabase, scope: Scope, postingId: strin
 async function sendDebitNote(supabase: Supabase, scope: Scope, postingId: string, phone: string) {
   const companyId = scope.company.id;
   const { data: posting, error } = await supabase.from("cash_discount_debit_note_postings")
-    .select("id, candidate_id, status, verified_voucher_number, debit_note_date, verified_amount, amount")
+    .select("id, candidate_id, status, verified_voucher_number, debit_note_date, verified_amount, amount, note_kind")
     .eq("id", postingId).eq("company_id", companyId).maybeSingle();
   if (error) throw error;
-  if (!posting) throw new ManualSendProblem("This Debit Note was not found.", "not_found");
-  if (posting.status !== "created_verified") throw new ManualSendProblem("This Debit Note is not confirmed in Tally yet.", "not_verified");
+  // Per-MT Cash Discount Credit Notes share this table; they go out as Credit Notes.
+  const isCreditNote = posting?.note_kind === "credit_note";
+  const noteName = isCreditNote ? "Credit Note" : "Debit Note";
+  if (!posting) throw new ManualSendProblem("This note was not found.", "not_found");
+  if (posting.status !== "created_verified") throw new ManualSendProblem(`This ${noteName} is not confirmed in Tally yet.`, "not_verified");
   const { data: candidate, error: candidateError } = await supabase.from("cash_discount_recovery_candidates")
     .select("customer_tally_guid, customer_name, invoice_number, bill_reference")
     .eq("id", posting.candidate_id).eq("company_id", companyId).maybeSingle();
   if (candidateError) throw candidateError;
-  if (!candidate) throw new ManualSendProblem("The recovery behind this Debit Note was not found.", "not_found");
+  if (!candidate) throw new ManualSendProblem(`The invoice behind this ${noteName} was not found.`, "not_found");
   const { data: customer, error: customerError } = await supabase.from("customers").select("id, ledger_name")
     .eq("company_id", companyId).eq("tally_ledger_guid", candidate.customer_tally_guid).maybeSingle();
   if (customerError) throw customerError;
   if (!customer) throw new ManualSendProblem(`${candidate.customer_name} is not in the latest customer list from Tally. Update customers from Tally, then send again.`, "customer_missing");
 
-  const template = await approvedTemplate(supabase, scope.organization.id, "cd_debit_note_created");
+  const eventType: NotificationEventType = isCreditNote ? "cd_credit_note_created" : "cd_debit_note_created";
+  const template = await approvedTemplate(supabase, scope.organization.id, eventType);
   const hasDocument = await prepareDebitNoteDocument(supabase, companyId, posting.id).then(() => true, () => false);
   await checkTemplate(template, hasDocument);
   const contactId = await ensureRecipient(supabase, scope, customer.id, phone);
   return insertMessage(supabase, {
     company_id: companyId, proposal_id: null, credit_note_posting_id: null, cash_discount_debit_note_posting_id: posting.id,
-    customer_contact_id: contactId, whatsapp_template_id: template.id, event_type: "cd_debit_note_created",
-    business_event_key: `manual:debit_note:${posting.id}:${randomUUID()}`, recipient_phone_e164: phone,
+    customer_contact_id: contactId, whatsapp_template_id: template.id, event_type: eventType,
+    business_event_key: `manual:${isCreditNote ? "cd_credit_note" : "debit_note"}:${posting.id}:${randomUUID()}`, recipient_phone_e164: phone,
     created_by: scope.userId,
-    payload: {
-      customerName: customer.ledger_name, companyName: scope.company.tally_company_name,
-      debitNoteNumber: posting.verified_voucher_number, debitNoteDate: posting.debit_note_date,
+    payload: isCreditNote ? {
+      customerName: customer.ledger_name, companyName: customerFacingCompanyName(scope.company.tally_company_name),
+      creditNoteNumber: posting.verified_voucher_number, creditNoteDate: readableDate(posting.debit_note_date),
+      creditNoteAmount: posting.verified_amount ?? posting.amount,
+      invoiceReference: candidate.invoice_number ?? candidate.bill_reference ?? "", eventType,
+    } : {
+      customerName: customer.ledger_name, companyName: customerFacingCompanyName(scope.company.tally_company_name),
+      debitNoteNumber: posting.verified_voucher_number, debitNoteDate: readableDate(posting.debit_note_date),
       debitNoteAmount: posting.verified_amount ?? posting.amount,
-      invoiceReference: candidate.invoice_number ?? candidate.bill_reference ?? "", eventType: "cd_debit_note_created",
+      invoiceReference: candidate.invoice_number ?? candidate.bill_reference ?? "", eventType,
     },
   });
 }
@@ -286,14 +312,46 @@ async function sendCdReminder(supabase: Supabase, scope: Scope, item: Extract<Ma
     business_event_key: `manual:cd_reminder:${proposalId}:${randomUUID()}`, recipient_phone_e164: phone,
     created_by: scope.userId,
     payload: {
-      customerName: customer.ledger_name, companyName: scope.company.tally_company_name,
+      customerName: customer.ledger_name, companyName: customerFacingCompanyName(scope.company.tally_company_name),
       invoiceReference: voucher.voucher_number ?? reminder.billReference, paidAmount: reminder.amountPaid,
-      benefitAmount: 0, shortfallAmount: reminder.shortfallAmount, eligibilityDeadline: reminder.eligibilityDeadline, eventType: "cd_shortfall",
+      benefitAmount: 0, shortfallAmount: reminder.shortfallAmount, eligibilityDeadline: readableDate(reminder.eligibilityDeadline), eventType: "cd_shortfall",
     },
   });
 }
 
-export async function sendManualWhatsApp(scope: Scope, item: ManualSendItem): Promise<ManualSendResult> {
+/**
+ * Queues the same message again for each team member. The copy reuses the
+ * customer's opted-in contact (the worker sends to recipient_phone_e164), so it
+ * carries the same template, document and values. A failed copy never fails
+ * the customer's message.
+ */
+async function queueTeamCopies(supabase: Supabase, scope: Scope, messageId: string, customerPhone: string, team: TeamCopy[]) {
+  const wanted = team.filter((member, index) => member.phone !== customerPhone && team.findIndex((other) => other.phone === member.phone) === index);
+  const result = { copied: [] as string[], failed: [] as string[] };
+  if (!wanted.length) return result;
+  const { data: original, error } = await supabase.from("notification_messages")
+    .select("company_id, proposal_id, credit_note_posting_id, cash_discount_debit_note_posting_id, customer_contact_id, whatsapp_template_id, event_type, payload")
+    .eq("id", messageId).eq("company_id", scope.company.id).single();
+  if (error) throw error;
+  for (const member of wanted) {
+    try {
+      // Only the message's content is copied; delivery state (locks, attempts, timestamps) starts fresh.
+      const copyId = await insertMessage(supabase, {
+        ...original, business_event_key: `manual:team_copy:${messageId}:${member.id}:${randomUUID()}`,
+        recipient_phone_e164: member.phone, team_contact_id: member.id, created_by: scope.userId,
+        payload: { ...(original.payload as Record<string, unknown>), teamCopyOf: messageId, teamMemberName: member.name },
+      });
+      await appendRulebookAudit({ scope, action: "manual_whatsapp_team_copy_queued", entityType: "notification_message", entityId: copyId, newValue: { copyOf: messageId, teamContactId: member.id, recipient: member.phone } });
+      result.copied.push(member.name);
+    } catch (cause) {
+      console.error("Could not queue team copy of WhatsApp message:", cause);
+      result.failed.push(member.name);
+    }
+  }
+  return result;
+}
+
+export async function sendManualWhatsApp(scope: Scope, item: ManualSendItem, team: TeamCopy[] = []): Promise<ManualSendResult> {
   const phone = normalizeRecipient(item.phone);
   if (!phone) return { ok: false, error: "Enter a valid mobile number, for example 98765 43210 or +91 98765 43210.", code: "invalid_phone" };
   const supabase = createSupabaseAdminClient();
@@ -305,7 +363,8 @@ export async function sendManualWhatsApp(scope: Scope, item: ManualSendItem): Pr
       scope, action: "manual_whatsapp_queued", entityType: "notification_message", entityId: messageId,
       newValue: { kind: item.kind, recipient: phone, source: item.kind === "cd_reminder" ? item.billReference : item.postingId },
     });
-    return { ok: true, messageId, recipient: phone };
+    const copies = await queueTeamCopies(supabase, scope, messageId, phone, team).catch((cause) => { console.error("Team copies skipped:", cause); return { copied: [] as string[], failed: team.map((member) => member.name) }; });
+    return { ok: true, messageId, recipient: phone, ...(team.length ? { copiedTo: copies.copied, copyFailed: copies.failed } : {}) };
   } catch (error) {
     if (error instanceof ManualSendProblem) return { ok: false, error: error.message, code: error.code };
     console.error("Could not queue manual WhatsApp message:", error);

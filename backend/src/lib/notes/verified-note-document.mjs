@@ -1,18 +1,44 @@
-import { renderTallyStyleNotePdf, indianMoney, tallyDate } from "./tally-style-note-pdf.mjs";
+import { indianMoney, tallyDate } from "./tally-style-note-pdf.mjs";
+import { renderTallyEInvoiceNotePdf } from "./tally-einvoice-note-pdf.mjs";
 
 export const NOTE_DOCUMENTS_BUCKET = "meenakshi-credit-note-documents";
 // Bump when the customer-facing layout changes so older copies are re-rendered on resend.
-const LAYOUT = "tally-v2";
+// "tally-einv-v1": TallyPrime e-Invoice layout (Credit Note 301 print).
+const LAYOUT = "tally-einv-v1";
 const GST_NOTE = {
   credit: "Commercial credit note. GST is not adjusted; the original tax invoices remain unchanged.",
   debit: "Commercial debit note. GST is not adjusted; the original tax invoice remains unchanged.",
 };
 
 async function companyDetails(supabase, companyId, fallbackName) {
-  const { data, error } = await supabase.from("companies").select("tally_company_name,document_address,document_gstin,document_state").eq("id", companyId).maybeSingle();
-  // Columns are added by 20260925120000; before that migration only the name is known.
+  const full = await supabase.from("companies").select("tally_company_name,document_address,document_gstin,document_state,document_cin,document_email").eq("id", companyId).maybeSingle();
+  // CIN / e-mail columns come with 20260927180000; before it, print without them.
+  const { data, error } = full.error ? await supabase.from("companies").select("tally_company_name,document_address,document_gstin,document_state").eq("id", companyId).maybeSingle() : full;
   if (error) return { name: fallbackName };
-  return { name: data?.tally_company_name ?? fallbackName, address: data?.document_address, gstin: data?.document_gstin, state: data?.document_state };
+  return { name: data?.tally_company_name ?? fallbackName, address: data?.document_address, gstin: data?.document_gstin, stateName: data?.document_state, cin: data?.document_cin, email: data?.document_email };
+}
+
+/** IRN, Ack No., Ack Date and signed QR read from Tally, once the note is e-invoiced. */
+async function einvoiceFor(supabase, source, postingId) {
+  const { data, error } = await supabase.from("note_einvoices").select("irn,ack_no,ack_date,signed_qr").eq("note_source", source).eq("posting_id", postingId).maybeSingle();
+  if (error || !data) return null;
+  return { irn: data.irn, ackNo: data.ack_no, ackDate: data.ack_date, signedQr: data.signed_qr };
+}
+
+/** Tax lines of a GST note as the renderer needs them (rate from the ledger name, e.g. "SGST-9%"). */
+function gstParts(gst) {
+  if (!gst) return null;
+  return {
+    taxableValue: Number(gst.taxableValue),
+    taxes: gst.taxLines.map((line) => ({ name: line.name.replace(/\s+/g, " "), ratePercent: Number((String(line.name).match(/(\d+(?:\.\d+)?)\s*%/) ?? [])[1]), amount: Number(line.amount) })),
+    roundOff: Number(gst.roundOff?.amount ?? 0),
+    total: Number(gst.total),
+  };
+}
+
+function shortDate(iso) {
+  const [year, month, day] = String(iso).slice(0, 10).split("-").map(Number);
+  return `${day}-${["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][month - 1]}-${String(year).slice(2)}`;
 }
 
 async function partyDetails(supabase, companyId, customerId, ledgerGuid, fallbackName) {
@@ -21,7 +47,7 @@ async function partyDetails(supabase, companyId, customerId, ledgerGuid, fallbac
   const { data } = await query.maybeSingle();
   const payload = data?.source_payload ?? {};
   const address = [payload.address, payload.pinCode && !String(payload.address ?? "").includes(payload.pinCode) ? payload.pinCode : null].filter(Boolean).join(", ");
-  return { name: fallbackName ?? data?.ledger_name, address, gstin: data?.tax_identifier, state: payload.stateName };
+  return { name: fallbackName ?? data?.ledger_name, address, gstin: data?.tax_identifier, stateName: payload.stateName };
 }
 
 function required(value, label) {
@@ -54,7 +80,10 @@ export async function prepareCreditNoteDocument(supabase, companyId, postingId) 
     .select("id,status,storage_path,tally_voucher_guid").eq("credit_note_posting_id", postingId)
     .eq("document_kind", "credit_note_pdf").maybeSingle();
   if (documentError) throw documentError;
-  if (existing?.status === "verified" && existing.storage_path?.includes(`/${LAYOUT}-`) && existing.tally_voucher_guid === posting.verified_tally_guid) return existing;
+  const einvoice = await einvoiceFor(supabase, "tod_credit_note", postingId);
+  // A copy made before the e-invoice was read is redrawn once it exists.
+  const layoutKey = einvoice ? `${LAYOUT}-irn${einvoice.irn.slice(0, 12)}` : LAYOUT;
+  if (existing?.status === "verified" && existing.storage_path?.includes(`/${layoutKey}-`) && existing.tally_voucher_guid === posting.verified_tally_guid) return existing;
   const snapshot = posting.credit_note_snapshot ?? {};
   const tally = snapshot.tallyPosting ?? {};
   const total = amount(posting.verified_amount);
@@ -67,29 +96,23 @@ export async function prepareCreditNoteDocument(supabase, companyId, postingId) 
   const rate = Number(evaluation?.formula_snapshot?.achievedTierRatePerMt);
   const tonnes = Number(proposal?.eligible_tonnes);
   const period = proposal?.period_start && proposal?.period_end ? `${tallyDate(proposal.period_start)} to ${tallyDate(proposal.period_end)}` : null;
-  const particulars = proposal?.scheme_type === "tod"
+  const description = proposal?.scheme_type === "tod"
     ? [`Turnover discount${period ? ` for ${period}` : ""}`, ...(tonnes > 0 && rate > 0 ? [`Eligible quantity ${tonnes.toFixed(2)} MT @ Rs. ${indianMoney(rate)} per MT`] : [])]
     : ["Cash discount"];
-  // GST credit notes (client style): taxable value, GST lines, round off, total.
-  const gst = tally.gstNote;
-  const gstRows = gst ? [
-    ...gst.taxLines.map((line) => ({ label: `${line.name.replace(/\s+/g, " ")}`, amount: line.amount })),
-    ...(Number(gst.roundOff?.amount ?? 0) ? [{ label: "Round Off", amount: gst.roundOff.amount }] : []),
-  ] : [];
-  const { pdf, sha256Hex } = renderTallyStyleNotePdf({
+  // GST credit notes: taxable value, GST lines, round off, total.
+  const gst = gstParts(tally.gstNote);
+  const { pdf, sha256Hex } = renderTallyEInvoiceNotePdf({
     kind: "credit",
-    ...(gst ? { amountRows: gstRows, taxableValue: gst.taxableValue } : {}),
     company: await companyDetails(supabase, companyId, required(tally.company?.name, "company name")),
     party: await partyDetails(supabase, companyId, posting.customer_id, tally.party?.guid, partyName),
     voucherNumber: required(posting.verified_voucher_number, "voucher number"),
     voucherDate: required(posting.credit_note_date, "voucher date"),
-    reference: proposal?.scheme_type === "tod" && period ? `Turnover discount ${period}` : null,
-    particulars,
-    // The customer is credited with the GST-inclusive total on GST notes.
-    amount: gst ? Number(gst.total) : total,
-    gstNote: gst ? null : GST_NOTE.credit,
+    originalInvoice: period ? `${shortDate(proposal.period_start)} to ${shortDate(proposal.period_end)}` : null,
+    einvoice,
+    line: { label: "Discount Allowed", description },
+    ...(gst ?? { taxableValue: total, taxes: [], roundOff: 0, total, note: GST_NOTE.credit }),
   });
-  const path = `${companyId}/credit-notes/${postingId}/${LAYOUT}-${sha256Hex}.pdf`;
+  const path = `${companyId}/credit-notes/${postingId}/${layoutKey}-${sha256Hex}.pdf`;
   await putPdf(supabase, path, pdf);
   const now = new Date().toISOString();
   const { data, error } = await supabase.from("credit_note_documents").upsert({
@@ -122,34 +145,24 @@ export async function prepareDebitNoteDocument(supabase, companyId, postingId) {
   const percentage = Number(candidate?.granted_discount_percentage);
   const tonnes = Number(candidate?.eligible_tonnes);
   const rate = Number(candidate?.amount_per_tonne);
-  const particulars = isCreditNote ? [
-    "Cash discount allowed",
-    ...(invoiceNumber ? [`Against invoice ${invoiceNumber}${candidate?.invoice_date ? ` dated ${tallyDate(candidate.invoice_date)}` : ""}`] : []),
-    ...(Number.isFinite(tonnes) && Number.isFinite(rate) ? [`${tonnes.toLocaleString("en-IN", { maximumFractionDigits: 3 })} MT @ Rs.${rate.toLocaleString("en-IN")} per MT`] : []),
-    ...(candidate?.missed_window_deadline ? [`Paid by ${tallyDate(candidate.missed_window_deadline)}`] : []),
+  const description = isCreditNote ? [
+    ...(Number.isFinite(tonnes) && Number.isFinite(rate) ? [`Cash discount: ${tonnes.toLocaleString("en-IN", { maximumFractionDigits: 3 })} MT @ Rs.${rate.toLocaleString("en-IN")} per MT`] : ["Cash discount"]),
+    ...(candidate?.missed_window_deadline ? [`Payment due by ${shortDate(candidate.missed_window_deadline)}`] : []),
   ] : [
     `Cash discount${percentage > 0 ? ` of ${percentage}%` : ""} recovered`,
-    ...(invoiceNumber ? [`Against invoice ${invoiceNumber}${candidate?.invoice_date ? ` dated ${tallyDate(candidate.invoice_date)}` : ""}`] : []),
-    ...(candidate?.missed_window_deadline ? [`Invoice was not paid in full by ${tallyDate(candidate.missed_window_deadline)}`] : []),
+    ...(candidate?.missed_window_deadline ? [`Invoice was not paid in full by ${shortDate(candidate.missed_window_deadline)}`] : []),
   ];
-  const { pdf, sha256Hex } = renderTallyStyleNotePdf({
+  const gst = gstParts(snapshot.gstNote);
+  const { pdf, sha256Hex } = renderTallyEInvoiceNotePdf({
     kind: isCreditNote ? "credit" : "debit",
     company: await companyDetails(supabase, companyId, required(snapshot.company?.name, "company name")),
     party: await partyDetails(supabase, companyId, null, snapshot.party?.guid, party),
     voucherNumber: required(posting.verified_voucher_number, "voucher number"),
     voucherDate: required(posting.debit_note_date, "voucher date"),
-    reference: invoiceNumber ? `Inv. ${invoiceNumber}` : null,
-    particulars,
-    // GST Debit Notes (client style): value, GST lines, Round Off, rounded total.
-    ...(snapshot.gstNote ? {
-      taxableValue: snapshot.gstNote.taxableValue,
-      amountRows: [
-        ...snapshot.gstNote.taxLines.map((line) => ({ label: line.name.replace(/\s+/g, " "), amount: line.amount })),
-        ...(Number(snapshot.gstNote.roundOff?.amount ?? 0) ? [{ label: "Round Off", amount: snapshot.gstNote.roundOff.amount }] : []),
-      ],
-      amount: Number(snapshot.gstNote.total),
-      gstNote: null,
-    } : { amount: total, gstNote: GST_NOTE.debit }),
+    originalInvoice: invoiceNumber ? `${invoiceNumber}${candidate?.invoice_date ? ` dt. ${shortDate(candidate.invoice_date)}` : ""}` : null,
+    einvoice: await einvoiceFor(supabase, "cash_discount_note", postingId),
+    line: { label: isCreditNote ? "Discount Allowed" : "Cash Discount Recovered", description },
+    ...(gst ?? { taxableValue: total, taxes: [], roundOff: 0, total, note: GST_NOTE.debit }),
   });
   const path = `${companyId}/debit-notes/${postingId}/${LAYOUT}-${sha256Hex}.pdf`;
   await putPdf(supabase, path, pdf);

@@ -53,7 +53,6 @@ export function GuidedVersionSummary({ detail, reference, validation, allowRepla
   const { version } = detail;
   const isDraft = version.status === "draft";
   const today = new Date().toISOString().slice(0, 10);
-  const ended = Boolean(version.effectiveTo && version.effectiveTo < today);
   const startsLater = version.effectiveFrom > today;
   const issues = validation?.valid === false ? validation.issues ?? [] : [];
   const replacementOverlapOnly = allowReplacementOverlap && issues.length > 0 && issues.every((issue) => issue.code === "customer_group_coverage_overlap");
@@ -78,11 +77,28 @@ export function GuidedVersionSummary({ detail, reference, validation, allowRepla
 
   return <section className={studio.snapshot}>
     <div className={studio.snapshotHeader}>
-      <div>{isDraft && <p className="eyebrow">Draft update</p>}<h3>{period}</h3>{ended && <p className={studio.dateWarning}>Does not cover today · ended {businessDate(version.effectiveTo!)}</p>}{startsLater && <p className={studio.dateNote}>Starts {businessDate(version.effectiveFrom)}</p>}</div>
+      <div>{isDraft && <p className="eyebrow">Draft update</p>}<h3>{period}</h3>{startsLater && <p className={studio.dateNote}>Starts {businessDate(version.effectiveFrom)}</p>}</div>
     </div>
     <div className={studio.activeSummary}>
       <dl className={studio.ruleFacts}>
-        {version.schemeType === "cd" ? <>
+        {version.schemeType === "cd" && version.cdDiscountBasis === "amount_per_tonne" ? <>
+          {/* Each segment is its own card: window and rate as the heading, its groups below. */}
+          <div className={studio.segmentFact}>
+            <dt>Segments · {(detail.configuration.cdSegments ?? []).length}</dt>
+            <dd>{(detail.configuration.cdSegments ?? []).length
+              ? <span className={studio.segmentCards}>{(detail.configuration.cdSegments ?? []).map((segment, index) => <span key={segment.id ?? index} className={studio.segmentCard}>
+                  <span className={studio.segmentHead}>
+                    <strong>{segment.allowedWorkingDays} {segment.allowedWorkingDays === 1 ? "day" : "days"}</strong>
+                    <span>₹{Number(segment.amountPerTonne).toLocaleString("en-IN")}/MT</span>
+                  </span>
+                  <small>{segment.label || `Segment ${index + 1}`} · {segment.customerGroupIds.length} customer group{segment.customerGroupIds.length === 1 ? "" : "s"}</small>
+                  <NameList names={segment.customerGroupIds.map((id) => masterName(groupById.get(id), "Unavailable customer group"))} empty="No customer groups" />
+                </span>)}</span>
+              : "No segments configured"}</dd>
+          </div>
+          <div><dt>Eligible products</dt><dd><NameList names={productNames} empty="No products selected" /></dd></div>
+          <div><dt>Deadline</dt><dd>Every day counts; moves to the next working day if it lands on a Sunday or holiday</dd></div>
+        </> : version.schemeType === "cd" ? <>
           <div><dt>Payment terms</dt><dd>{paymentTerms || "No payment windows configured"}</dd></div>
           <div><dt>Customer groups</dt><dd><NameList names={customerGroupNames} empty="No customer groups selected" /></dd></div>
           <div><dt>Invoice narration</dt><dd>{version.checkNarration ? "Checked when available" : "Not checked"}</dd></div>

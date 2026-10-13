@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, CheckCheck, Eye, FileText, Layers, MessageSquare, Plus, RefreshCw, Send, Sparkles, Trash2 } from "lucide-react";
+import { ArrowRight, CalendarDays, CheckCheck, ChevronRight, Eye, Layers, List, MessageSquare, Plus, RefreshCw, Search, Send, Sparkles, Trash2, Users } from "lucide-react";
 
 import { apiRequest, jsonBody } from "@/lib/api";
 import { userFacingDetail, userFacingError, userLabel } from "@/lib/user-copy";
@@ -9,9 +9,10 @@ import { supabase } from "@/lib/supabase";
 
 import { WorkspacePageHeader } from "./app-shell";
 import { useCompany } from "./company-context";
+import { PeriodFilter, defaultPeriod, inPeriod, periodLabel, type Period } from "./period-filter";
 import type { PageProps } from "./workspace";
 import type { MessageTemplate, NotificationMessage } from "./types";
-import { Button, Drawer, EmptyState, IconButton, InlineMessage, StatusBadge, formatDate } from "./ui";
+import { Button, Drawer, EmptyState, InlineMessage, StatusBadge, formatDate } from "./ui";
 
 type MessageDetail = {
   message: NotificationMessage & { delivered_at?: string | null; read_at?: string | null; scheduled_for?: string | null };
@@ -89,6 +90,65 @@ function catalogOptions(payload: unknown): CatalogOption[] {
   return output;
 }
 
+// "off" = messages that are switched off on purpose (nothing to send), kept apart from real "Not sent".
+type MessageView = "all" | "attention" | "sent" | "pending" | "not_sent" | "off";
+type Scheme = "all" | "tod" | "cd";
+const schemeOf = (eventType: string): Exclude<Scheme, "all"> | null => eventType.startsWith("tod_") ? "tod" : eventType.startsWith("cd_") ? "cd" : null;
+const SENT_STATUSES = ["sent", "whatsapp_sent", "delivered", "read"];
+const MESSAGE_TYPE_LABEL: Record<string, string> = {
+  tod_tier_reached: "Turnover Discount tier update",
+  tod_credit_note_created: "Turnover Discount Credit Note",
+  cd_credit_note_created: "Cash Discount Credit Note",
+  cd_debit_note_created: "Cash Discount Debit Note",
+  cd_shortfall: "Cash Discount reminder",
+};
+const typeLabel = (eventType: string) => MESSAGE_TYPE_LABEL[eventType] ?? userLabel(eventType);
+const rupees = (value: string | null | undefined) => value ? `₹${Number(value).toLocaleString("en-IN", { maximumFractionDigits: 2 })}` : null;
+const shortDay = (value: string) => new Date(`${value.slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+
+/** One line naming what the message was about: the document, amount and period. */
+function documentLine(message: NotificationMessage) {
+  const doc = message.document;
+  if (!doc) return null;
+  const period = doc.periodStart && doc.periodEnd ? `${shortDay(doc.periodStart)} – ${shortDay(doc.periodEnd)}` : null;
+  const name = doc.number ? `${doc.kind === "debit_note" ? "Debit Note" : "Credit Note"} ${doc.number}` : message.event_type === "tod_tier_reached" ? "Projected discount" : null;
+  return [name, rupees(doc.amount), doc.invoiceReference ? `Inv ${doc.invoiceReference}` : null, period].filter(Boolean).join(" · ") || null;
+}
+
+/**
+ * Plain status for one message: what happened, why, and whether sending again
+ * can help. "Needs attention" is only for failures someone can act on.
+ */
+function explain(message: NotificationMessage): { label: string; tone: "done" | "active" | "problem" | "muted"; detail: string | null; canRetry: boolean; bucket: Exclude<MessageView, "all"> } {
+  const reason = message.failure_reason ?? "";
+  if (message.status === "read") return { label: "Read", tone: "done", detail: message.read_at ? `Read ${formatDate(message.read_at)}` : null, canRetry: false, bucket: "sent" };
+  if (message.status === "delivered") return { label: "Delivered", tone: "done", detail: message.delivered_at ? `Delivered ${formatDate(message.delivered_at)}` : null, canRetry: false, bucket: "sent" };
+  if (SENT_STATUSES.includes(message.status)) return { label: "Sent", tone: "done", detail: message.read_at ? `Read ${formatDate(message.read_at)}` : message.delivered_at ? `Delivered ${formatDate(message.delivered_at)}` : null, canRetry: false, bucket: "sent" };
+  if (["queued", "sending"].includes(message.status)) return { label: "Sending…", tone: "active", detail: null, canRetry: false, bucket: "pending" };
+  // Automatic tier updates are switched off; an old failed one needs no action.
+  if (message.event_type === "tod_tier_reached") return { label: "Not sent", tone: "muted", detail: "Automatic updates are off.", canRetry: false, bucket: "off" };
+  if (message.status === "suppressed") return { label: "Not sent", tone: "muted", detail: "Stopped on purpose: the customer's consent or the result changed.", canRetry: false, bucket: "not_sent" };
+  if (message.status === "cancelled") return { label: "Cancelled", tone: "muted", detail: null, canRetry: false, bucket: "not_sent" };
+  const missing = reason.match(/requires the (\w+) value/);
+  if (missing) return { label: "Failed", tone: "problem", detail: `The WhatsApp template needs "${userLabel(missing[1])}", which this message doesn't have. Fix the template; sending again won't help.`, canRetry: false, bucket: "attention" };
+  if (/permanent/i.test(reason)) return { label: "Failed", tone: "problem", detail: `${reason.replace(/^Permanent MSG91 failure:\s*/i, "")} Sending again won't help until this is fixed.`, canRetry: false, bucket: "attention" };
+  return { label: "Failed", tone: "problem", detail: reason || "WhatsApp did not accept the message. Try sending again.", canRetry: true, bucket: "attention" };
+}
+
+/** Attempts of the same message (same document and number) shown as one row. */
+function groupAttempts(messages: NotificationMessage[]) {
+  const groups = new Map<string, NotificationMessage[]>();
+  for (const message of messages) {
+    const subject = message.credit_note_posting_id ?? message.cash_discount_debit_note_posting_id ?? message.proposal_id ?? message.business_event_key ?? message.id;
+    const key = `${message.event_type}:${subject}:${message.recipient_phone_e164 ?? ""}`;
+    groups.set(key, [...(groups.get(key) ?? []), message]);
+  }
+  return [...groups.values()].map((attempts) => {
+    const sorted = [...attempts].sort((left, right) => right.created_at.localeCompare(left.created_at));
+    return { latest: sorted[0], attempts: sorted.length };
+  }).sort((left, right) => right.latest.created_at.localeCompare(left.latest.created_at));
+}
+
 export function MessagesWorkspace({ data, isAdministrator, refresh, setError, setNotice }: PageProps) {
   const { company } = useCompany();
   const [selected, setSelected] = useState<NotificationMessage | null>(null);
@@ -98,18 +158,49 @@ export function MessagesWorkspace({ data, isAdministrator, refresh, setError, se
   const [templatesOpen, setTemplatesOpen] = useState(false);
   const [sendingAgainId, setSendingAgainId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all");
+  const [view, setView] = useState<MessageView>("all");
+  const [scheme, setScheme] = useState<Scheme>("all");
   const [eventFilter, setEventFilter] = useState("all");
-  const metric = (statuses: string[]) => data.messages.filter((message) => statuses.includes(message.status)).length;
-  const statuses = Array.from(new Set(data.messages.map((message) => message.status)));
-  const events = Array.from(new Set(data.messages.map((message) => message.event_type)));
-  const pendingCount = metric(["queued", "sending"]) + (data.messageHealth?.retrying ?? 0);
-  // Read/opened is not tracked as a KPI; anything that reached WhatsApp counts as sent.
-  const sentCount = metric(["sent", "whatsapp_sent", "delivered", "read"]);
-  const visibleMessages = data.messages.filter((message) => {
-    const searchable = `${message.customer_name ?? ""} ${message.recipient_phone_e164 ?? ""} ${message.event_type} ${message.resend_reason ?? ""} ${message.status}`.toLowerCase();
-    return (statusFilter === "all" || message.status === statusFilter) && (eventFilter === "all" || message.event_type === eventFilter) && (!query.trim() || searchable.includes(query.trim().toLowerCase()));
+  const [groupFilter, setGroupFilter] = useState("all");
+  const [period, setPeriod] = useState<Period>(defaultPeriod);
+  const [layout, setLayout] = useState<"messages" | "customers">("messages");
+  const [openCustomers, setOpenCustomers] = useState<Set<string>>(new Set());
+  const events = Array.from(new Set(data.messages.filter((message) => scheme === "all" || schemeOf(message.event_type) === scheme).map((message) => message.event_type)));
+  // One row per message; counts are per message, not per attempt.
+  const everyRow = groupAttempts(data.messages).map((row) => ({ ...row, state: explain(row.latest) }));
+  // Everything below follows the period (sent date; queued messages use their queued date).
+  const sentOn = (message: NotificationMessage) => message.sent_at ?? message.created_at;
+  const allRows = everyRow.filter((row) => inPeriod(period, sentOn(row.latest)));
+  const attentionOutside = everyRow.filter((row) => !inPeriod(period, sentOn(row.latest)) && row.state.bucket === "attention").length;
+  // Same shape as the Cash Discount and Turnover Discount pages: pick the area, then filter.
+  const schemeCards = (["all", "tod", "cd"] as const).map((key) => {
+    const inScheme = allRows.filter((row) => key === "all" || schemeOf(row.latest.event_type) === key);
+    return { key, label: key === "all" ? "All messages" : key === "tod" ? "Turnover Discount" : "Cash Discount", total: inScheme.length, sent: inScheme.filter((row) => row.state.bucket === "sent").length, attention: inScheme.filter((row) => row.state.bucket === "attention").length };
   });
+  const rows = allRows.filter((row) => scheme === "all" || schemeOf(row.latest.event_type) === scheme);
+  const count = (bucket: Exclude<MessageView, "all">) => rows.filter((row) => row.state.bucket === bucket).length;
+  const groupOf = (message: NotificationMessage) => message.customer_group ?? "No group";
+  const groupOptions = [...new Set(rows.map((row) => groupOf(row.latest)))].sort((left, right) => left === "No group" ? 1 : right === "No group" ? -1 : left.localeCompare(right));
+  const visibleRows = rows.filter(({ latest: message, state }) => {
+    const searchable = `${message.customer_name ?? ""} ${message.customer_group ?? ""} ${message.recipient_phone_e164 ?? ""} ${typeLabel(message.event_type)} ${documentLine(message) ?? ""} ${state.label}`.toLowerCase();
+    return (view === "all" || state.bucket === view) && (eventFilter === "all" || message.event_type === eventFilter) && (groupFilter === "all" || groupOf(message) === groupFilter) && (!query.trim() || searchable.includes(query.trim().toLowerCase()));
+  });
+  // By customer: everything sent to one customer together; customers needing attention first.
+  const customers = [...visibleRows.reduce((map, row) => {
+    const key = row.latest.customer_id ?? `name:${row.latest.customer_name ?? row.latest.recipient_phone_e164 ?? row.latest.id}`;
+    const entry = map.get(key) ?? { key, name: row.latest.customer_name || "Customer", group: row.latest.customer_group ?? null, rows: [] as typeof visibleRows };
+    entry.rows.push(row);
+    return map.set(key, entry);
+  }, new Map<string, { key: string; name: string; group: string | null; rows: typeof visibleRows }>()).values()].map((customer) => ({
+    ...customer,
+    sent: customer.rows.filter((row) => row.state.bucket === "sent").length,
+    // Messages switched off on purpose are not "unsent": leave them out of "x of y sent".
+    expected: customer.rows.filter((row) => row.state.bucket !== "off").length,
+    attention: customer.rows.filter((row) => row.state.bucket === "attention").length,
+    last: customer.rows.reduce((latest, row) => (row.latest.sent_at ?? row.latest.created_at) > latest ? (row.latest.sent_at ?? row.latest.created_at) : latest, ""),
+  })).sort((left, right) => (right.attention - left.attention) || right.last.localeCompare(left.last));
+  const clearFilters = () => { setQuery(""); setView("all"); setEventFilter("all"); setGroupFilter("all"); };
+  const pickScheme = (key: Scheme) => { setScheme(key); setEventFilter("all"); };
 
   async function openMessage(message: NotificationMessage) {
     setSelected(message); setDetail(null); setDetailLoading(true);
@@ -147,22 +238,67 @@ export function MessagesWorkspace({ data, isAdministrator, refresh, setError, se
     finally { setSendingAgainId(null); }
   }
 
+  const renderMessageRow = ({ latest: message, attempts, state }: (typeof visibleRows)[number]) => {
+        const doc = documentLine(message);
+        const canSendAgain = state.canRetry && Boolean(message.credit_note_posting_id || message.cash_discount_debit_note_posting_id || message.event_type === "cd_shortfall");
+        return <article key={message.id} data-tone={state.tone}>
+          <div>{layout === "messages" && <strong>{message.customer_name || "Customer"}</strong>}<small>{message.team_member_name && <span className="cd-tag note-group-tag">Copy · {message.team_member_name}</span>}{message.customer_group && layout === "messages" && <span className="cd-tag note-group-tag">{message.customer_group}</span>}{message.recipient_phone_e164 || "Number unavailable"}</small></div>
+          <div><strong>{typeLabel(message.event_type)}</strong>{doc && <small>{doc}</small>}</div>
+          <div className="message-state"><span className={`message-state-label is-${state.tone}`}>{state.label}</span>{state.detail && <small title={message.failure_reason ?? undefined}>{state.detail}</small>}</div>
+          <div><small>{formatDate(message.sent_at ?? message.created_at)}</small>{attempts > 1 && <small className="message-attempts">{attempts} attempts</small>}</div>
+          <div className="table-actions"><Button className="button-quiet" onClick={() => void openMessage(message)}><Eye size={14} />View</Button>{canSendAgain && <Button className="button-quiet" disabled={sendingAgainId === message.id} onClick={() => void sendAgain(message)}><Send size={14} />{sendingAgainId === message.id ? "Sending…" : "Send again"}</Button>}</div>
+        </article>;
+  };
   return <div className="messages-page">
     <WorkspacePageHeader eyebrow="Delivery history" title="Messages" detail="WhatsApp delivery status and audit history." />
     {data.messages.some((message) => message.event_type === "cd_shortfall" && ["queued", "sending"].includes(message.status)) && <InlineMessage tone="info">A <strong>Cash Discount reminder</strong> is ready for a customer who has given consent. It is only a WhatsApp reminder and does not create a Credit Note.</InlineMessage>}
-    <div className="message-status-strip" aria-label="Message delivery summary">
-      <div><span>Pending</span><strong>{pendingCount}</strong></div>
-      <div><span>Sent</span><strong>{sentCount}</strong></div>
-      <div className={(data.messageHealth?.terminalFailures ?? 0) > 0 ? "has-attention" : ""}><span>Needs attention</span><strong>{data.messageHealth?.terminalFailures ?? 0}</strong></div>
-    </div>
-    <section className="messages-history">
-      <div className="message-filter-bar">
-        <label className="message-search"><span className="sr-only">Search messages</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search messages" /></label>
-        <label><span className="sr-only">Filter by status</span><select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="all">All statuses</option>{statuses.map((status) => <option key={status} value={status}>{userLabel(status)}</option>)}</select></label>
-        <label><span className="sr-only">Filter by message type</span><select value={eventFilter} onChange={(event) => setEventFilter(event.target.value)}><option value="all">All message types</option>{events.map((event) => <option key={event} value={event}>{userLabel(event)}</option>)}</select></label>
-        {(query || statusFilter !== "all" || eventFilter !== "all") && <Button className="button-quiet" onClick={() => { setQuery(""); setStatusFilter("all"); setEventFilter("all"); }}>Clear</Button>}
+    {/* Same header as Credit Notes: scheme tabs + period, then status and tools, then the result. */}
+    <div className="nf-head">
+      <div className="nf-tabs" role="tablist" aria-label="Message areas">
+        {schemeCards.filter((card) => card.key === "all" || card.total > 0).map((card) => <button key={card.key} type="button" role="tab" aria-selected={scheme === card.key} className={scheme === card.key ? "is-active" : ""} onClick={() => pickScheme(card.key)}>
+          {card.label}<span className="nf-count">{card.total}</span>{card.attention > 0 && <span className="nf-dot" title={`${card.attention} need attention`} />}
+        </button>)}
       </div>
-      {visibleMessages.length ? <div className="data-table messages-table"><div className="table-head"><span>Customer</span><span>Message</span><span>Status</span><span>Last activity</span><span /></div>{visibleMessages.map((message) => { const source = message.credit_note_posting_id ? "Credit Note" : message.proposal_id ? message.event_type === "cd_shortfall" ? "Cash Discount" : "Discount result" : "Collections"; return <article key={message.id}><div><strong>{message.customer_name || "Customer"}</strong><small>{message.recipient_phone_e164 || "Number unavailable"}</small></div><div><strong>{userLabel(message.event_type)}</strong><small>{source} · {message.resend_of_notification_id ? "Resent" : "Original"}{!message.opt_in_snapshot ? " · Consent needed" : ""}</small></div><StatusBadge status={message.status} /><small>{formatDate(message.sent_at ?? message.created_at)}</small><div className="table-actions"><Button className="button-quiet" onClick={() => void openMessage(message)}><Eye size={14} />View</Button>{["failed", "suppressed", "cancelled"].includes(message.status) && <Button className="button-quiet" disabled={sendingAgainId === message.id} onClick={() => void sendAgain(message)}><Send size={14} />{sendingAgainId === message.id ? "Sending…" : "Send again"}</Button>}</div></article>; })}</div> : <EmptyState title={data.messages.length ? "No messages match this view" : "No messages yet"} detail={data.messages.length ? "Clear or change the filters to see all messages." : "Messages appear here when an approved notification is triggered."} action={data.messages.length ? <Button className="button-secondary" onClick={() => { setQuery(""); setStatusFilter("all"); setEventFilter("all"); }}>Clear filters</Button> : undefined} />}
+      <div className="nf-period"><CalendarDays size={15} aria-hidden="true" /><PeriodFilter period={period} basis="Sent date" onChange={setPeriod} /></div>
+    </div>
+    <div className="nf-toolbar">
+      <div className="nf-seg" role="tablist" aria-label="Status">
+        {([["all", "All", rows.length], ["attention", "Needs attention", count("attention")], ["sent", "Sent", count("sent")], ["pending", "Sending", count("pending")], ["not_sent", "Not sent", count("not_sent")], ["off", "Updates off", count("off")]] as const)
+          .filter(([key, , total]) => key === "all" || key === "attention" || key === "sent" || total > 0)
+          .map(([key, label, total]) => <button key={key} type="button" role="tab" aria-selected={view === key} className={`${view === key ? "is-active" : ""}${key === "attention" && total > 0 ? " is-alert" : ""}`} onClick={() => setView(key)}>{label}<span>{total}</span></button>)}
+      </div>
+      <div className="nf-tools">
+        <label className="nf-search"><Search size={14} aria-hidden="true" /><span className="sr-only">Search messages</span><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search customer, number, CN" /></label>
+        {events.length > 1 && <label className="nf-select"><span className="sr-only">Message type</span><select value={eventFilter} onChange={(event) => setEventFilter(event.target.value)}><option value="all">All types</option>{events.map((event) => <option key={event} value={event}>{typeLabel(event)}</option>)}</select></label>}
+        {groupOptions.length > 1 && <label className="nf-select"><span className="sr-only">Customer group</span><select value={groupFilter} onChange={(event) => setGroupFilter(event.target.value)}><option value="all">All groups</option>{groupOptions.map((group) => <option key={group} value={group}>{group} ({rows.filter((row) => groupOf(row.latest) === group).length})</option>)}</select></label>}
+        <div className="nf-seg nf-icons" role="tablist" aria-label="Layout">
+          <button type="button" role="tab" aria-selected={layout === "messages"} className={layout === "messages" ? "is-active" : ""} title="List" onClick={() => setLayout("messages")}><List size={15} /><span className="sr-only">List</span></button>
+          <button type="button" role="tab" aria-selected={layout === "customers"} className={layout === "customers" ? "is-active" : ""} title="By customer" onClick={() => setLayout("customers")}><Users size={15} /><span className="sr-only">By customer</span></button>
+        </div>
+      </div>
+    </div>
+    <p className="nf-summary">
+      <span><strong>{visibleRows.length}</strong> message{visibleRows.length === 1 ? "" : "s"}{layout === "customers" ? ` · ${customers.length} customer${customers.length === 1 ? "" : "s"}` : ""}{period.preset !== "all" ? ` · ${periodLabel(period).replace(/^.*\((.*)\)$/, "$1")}` : ""}</span>
+      {attentionOutside > 0 && <button type="button" className="inline-link is-attention" onClick={() => setPeriod({ preset: "all", from: "", to: "" })}>{attentionOutside} need attention outside this period</button>}
+      {(query || view !== "all" || eventFilter !== "all" || groupFilter !== "all") && <button type="button" className="inline-link" onClick={clearFilters}>Clear filters</button>}
+    </p>
+    <section className="messages-history">
+      {!visibleRows.length ? <EmptyState title={data.messages.length ? view === "attention" ? "Nothing needs attention" : "No messages match this view" : "No messages yet"} detail={data.messages.length ? view === "attention" ? "Every message was sent, or stopped on purpose." : "Clear or change the filters to see all messages." : "Send Credit Notes on WhatsApp from the Credit Notes page. Every message appears here with its delivery status."} action={data.messages.length && view !== "attention" ? <Button className="button-secondary" onClick={clearFilters}>Clear filters</Button> : undefined} />
+        : layout === "messages" ? <div className="data-table messages-table"><div className="table-head"><span>Customer</span><span>Message</span><span>Status</span><span>When</span><span /></div>{visibleRows.map(renderMessageRow)}</div>
+        : <div className="note-customers" aria-label="Messages by customer">{customers.map((customer) => {
+          const open = openCustomers.has(customer.key);
+          return <section key={customer.key} className={`note-customer${open ? " is-open" : ""}`}>
+            <div className="note-customer-head message-customer-head">
+              <button type="button" className="note-customer-toggle" aria-expanded={open} onClick={() => setOpenCustomers((current) => { const next = new Set(current); if (next.has(customer.key)) next.delete(customer.key); else next.add(customer.key); return next; })}>
+                <ChevronRight size={15} className="note-customer-caret" />
+                <span><strong>{customer.name}</strong><small>{customer.group ?? "No group"} · {customer.rows.length} message{customer.rows.length === 1 ? "" : "s"}</small></span>
+              </button>
+              <span className={`message-state-label is-${customer.attention ? "problem" : customer.expected > 0 && customer.sent === customer.expected ? "done" : "muted"}`}>{customer.attention ? `${customer.attention} need attention` : customer.expected === 0 ? "Updates off" : `${customer.sent} of ${customer.expected} sent`}</span>
+              <small>{customer.last ? `Last ${formatDate(customer.last)}` : ""}</small>
+            </div>
+            {open && <div className="data-table messages-table note-customer-notes">{customer.rows.map(renderMessageRow)}</div>}
+          </section>;
+        })}</div>}
     </section>
     <MessageDetailDrawer message={selected} detail={detail} loading={detailLoading} onClose={() => { setSelected(null); setDetail(null); }} />
     <Drawer open={Boolean(resend)} onClose={() => setResend(null)} title="Send message again" description="The current template and consent will be checked before anything is queued."><form className="form-stack" onSubmit={(event) => { event.preventDefault(); void doResend(event.currentTarget); }}><label>Reason for sending again<textarea name="reason" required maxLength={500} placeholder="Why this message should be sent again" /></label><Button type="submit">Check and send again</Button></form></Drawer>
@@ -209,7 +345,7 @@ function WhatsAppMessagePreview({ eventType, preview, sent, at }: { eventType: s
 }
 
 function MessageDetailDrawer({ message, detail, loading, onClose }: { message: NotificationMessage | null; detail: MessageDetail | null; loading: boolean; onClose: () => void }) {
-  return <Drawer open={Boolean(message)} onClose={onClose} title={message ? userLabel(message.event_type) : "Message"}>{loading || !message ? <MessageDetailLoading /> : <div className="drawer-stack message-detail-drawer"><dl className="message-detail-summary"><div><dt>Recipient</dt><dd>{message.recipient_phone_e164 || "Number unavailable"}</dd></div><div><dt>Status</dt><dd><StatusBadge status={message.status} /></dd></div><div><dt>Attempts</dt><dd>{message.attempt_count} of {message.max_attempts}</dd></div><div><dt>Consent</dt><dd>{message.opt_in_snapshot && Object.keys(message.opt_in_snapshot).length ? "Recorded" : "Not available"}</dd></div></dl>{message.failure_reason && <InlineMessage tone="error">{userFacingDetail(message.failure_reason, "This message needs attention.")}</InlineMessage>}<section><p className="eyebrow">Message preview</p><WhatsAppMessagePreview eventType={message.event_type} preview={detail?.preview ?? []} sent={detail?.sent} at={message.sent_at ?? message.created_at} /></section><section><p className="eyebrow">Sending history</p>{detail?.attempts.length ? <div className="timeline">{detail.attempts.map((attempt) => <article key={attempt.id}><span /><div><strong>Try {attempt.attempt_number} · {userLabel(attempt.status)}</strong>{attempt.failure_reason && <p>This attempt needs attention.</p>}<small>{formatDate(attempt.completed_at ?? attempt.attempted_at)}</small></div></article>)}</div> : <p className="muted-copy">No sending attempt recorded.</p>}</section></div>}</Drawer>;
+  return <Drawer open={Boolean(message)} onClose={onClose} title={message ? userLabel(message.event_type) : "Message"}>{loading || !message ? <MessageDetailLoading /> : <div className="drawer-stack message-detail-drawer"><dl className="message-detail-summary"><div><dt>Recipient</dt><dd>{message.recipient_phone_e164 || "Number unavailable"}</dd></div><div><dt>Status</dt><dd><span className={`message-state-label is-${explain(message).tone}`}>{explain(message).label}</span></dd></div><div><dt>Attempts</dt><dd>{message.attempt_count} of {message.max_attempts}</dd></div><div><dt>Consent</dt><dd>{message.opt_in_snapshot && Object.keys(message.opt_in_snapshot).length ? "Recorded" : "Not available"}</dd></div></dl>{message.failure_reason && <InlineMessage tone="error">{userFacingDetail(message.failure_reason, "This message needs attention.")}</InlineMessage>}<section><p className="eyebrow">Message preview</p><WhatsAppMessagePreview eventType={message.event_type} preview={detail?.preview ?? []} sent={detail?.sent} at={message.sent_at ?? message.created_at} /></section><section><p className="eyebrow">Sending history</p>{detail?.attempts.length ? <div className="timeline">{detail.attempts.map((attempt) => <article key={attempt.id}><span /><div><strong>Try {attempt.attempt_number} · {userLabel(attempt.status)}</strong>{attempt.failure_reason && <p>This attempt needs attention.</p>}<small>{formatDate(attempt.completed_at ?? attempt.attempted_at)}</small></div></article>)}</div> : <p className="muted-copy">No sending attempt recorded.</p>}</section></div>}</Drawer>;
 }
 
 function getSampleVariableValue(varName: string): string {

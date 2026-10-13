@@ -4,6 +4,14 @@ import test from "node:test";
 import { collapseEvaluationRuns } from "./run-batches.ts";
 import { requiresTallyRefresh } from "./refresh-policy.ts";
 
+test("local CD and TOD saves cannot enqueue a refresh before evidence is attached", () => {
+  for (const schemeType of ["cd", "tod"]) assert.equal(requiresTallyRefresh({
+    request_context: { schemeType, localFirst: true }, summary: {},
+    tally_master_refresh_run_id: null, tally_voucher_refresh_run_id: null,
+  }), false);
+  assert.equal(requiresTallyRefresh({ request_context: { schemeType: "cd" }, summary: {} }), true);
+});
+
 test("completed local TOD evidence never requests another Tally refresh", () => {
   const liveTodEvidence = {
     mode: "live_tod_aggregate",

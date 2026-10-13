@@ -10,7 +10,7 @@ export async function POST(request: Request, context: RouteContext) {
   try {
     const { companyId, postingId } = await context.params;
     if (!isUuid(companyId) || !isUuid(postingId)) return jsonWithCors(request, { error: "Invalid company or Debit Note id." }, { status: 400 });
-    const { company, userId } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator"]);
+    const { userId } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator"]);
     const body = await request.json().catch(() => ({})) as { reason?: unknown };
     const reason = typeof body.reason === "string" ? body.reason.trim() : "";
     if (reason.length < 3) return jsonWithCors(request, { error: "A reason for checking again is required." }, { status: 400 });

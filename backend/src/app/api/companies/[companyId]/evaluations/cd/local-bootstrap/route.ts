@@ -33,7 +33,15 @@ export async function GET(request: Request, context: RouteContext) {
     const requestedRuleVersionId = url.searchParams.get("ruleVersionId");
     const ruleVersionId = requestedRuleVersionId && isUuid(requestedRuleVersionId) ? requestedRuleVersionId : null;
     // Fast path: 1 RPC (was 3 hops sequential) — falls back if RPC not yet deployed
-    const user = ruleVersionId ? null : await requireRequestUser(request);
+    // The get_cd_local_bootstrap RPC only understands percentage rules. A per-MT
+    // rule sends customers per segment, which only loadLiveCdLocalBootstrap
+    // builds, so skip the RPC shortcut while such a rule is active.
+    const { data: perMtRule, error: perMtError } = await createSupabaseAdminClient()
+      .from("scheme_versions").select("id")
+      .eq("company_id", company.id).eq("scheme_type", "cd").eq("status", "active").eq("cd_discount_basis", "amount_per_tonne")
+      .limit(1).maybeSingle();
+    if (perMtError) throw perMtError;
+    const user = ruleVersionId || perMtRule ? null : await requireRequestUser(request);
     if (user) {
       const supabase = createSupabaseAdminClient();
       const { data: rpcData, error: rpcError } = await supabase.rpc("get_cd_local_bootstrap", {

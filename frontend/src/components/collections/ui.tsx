@@ -89,7 +89,7 @@ export function Dialog({ open, onClose, title, description, children, width = "n
 export function formatDate(value: string | null | undefined, fallback = "Not yet") {
   if (!value) return fallback;
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? fallback : date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  return Number.isNaN(date.getTime()) ? fallback : date.toLocaleString("en-IN", { day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 export function formatMoney(value: string | number | null | undefined) {

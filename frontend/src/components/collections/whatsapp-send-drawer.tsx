@@ -1,16 +1,19 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, CheckCircle2, Send } from "lucide-react";
+import { CheckCircle2, Send } from "lucide-react";
 
 import { apiRequest, jsonBody } from "@/lib/api";
 import { userFacingError } from "@/lib/user-copy";
 
 import { useCompany } from "./company-context";
 import type { Contact } from "./types";
-import { Button, Drawer, InlineMessage, StatusBadge, formatMoney } from "./ui";
+import { Button, Drawer, InlineMessage, formatMoney } from "./ui";
+import { displayTeamPhone, type TeamContact } from "./team-contacts";
 import { accessToken } from "./workspace";
 import styles from "./whatsapp-send.module.css";
+// Same visual language as the Credit Note panel (hero card, hairline sections, bordered lists).
+import panel from "./cd-invoice-panel.module.css";
 
 type CreditOrDebitRequest = { kind: "credit_note" | "debit_note"; postingId: string };
 type ReminderRequest = { kind: "cd_reminder"; evaluationRunId: string; customerName: string; invoiceNumber: string; invoiceDate: string; billReference: string };
@@ -25,7 +28,9 @@ export type WhatsAppTarget = {
   request: CreditOrDebitRequest | ReminderRequest;
 };
 
-type SendResult = { key: string; ok: boolean; error?: string; code?: string; recipient?: string };
+type SendResult = { key: string; ok: boolean; error?: string; code?: string; recipient?: string; copiedTo?: string[]; copyFailed?: string[] };
+
+const TEAM_CHOICE_KEY = "meenakshi.whatsapp.copyTeam";
 
 /** Mirrors the backend: a bare 10-digit number is Indian. */
 export function normalizePhone(value: string) {
@@ -57,7 +62,12 @@ export function WhatsAppSendDrawer({ open, title, targets, onClose, onSent, onIn
 }) {
   const { company } = useCompany();
   const [phones, setPhones] = useState<Record<string, string>>({});
+  // Every known number per customer: Tally ledger mobiles, saved contacts, the last one used.
+  const [choices, setChoices] = useState<Record<string, Array<{ phone: string; source: string; shared?: number }>>>({});
+  const [typing, setTyping] = useState<Set<string>>(new Set());
   const [results, setResults] = useState<Record<string, SendResult>>({});
+  const [team, setTeam] = useState<TeamContact[]>([]);
+  const [copyIds, setCopyIds] = useState<Set<string>>(new Set());
   const [sending, setSending] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -70,20 +80,43 @@ export function WhatsAppSendDrawer({ open, title, targets, onClose, onSent, onIn
     const targets = targetsRef.current;
     setResults({}); setError(null); setStatus(null);
     let cancelled = false;
-    // Pre-fill with the number last used for each customer; it stays editable.
-    const fallback = Object.fromEntries(targets.map((target) => [target.key, displayPhone(target.lastMessage?.recipient)]));
+    setTyping(new Set()); setChoices({});
+    const fallback = Object.fromEntries(targets.map((target) => [target.key, normalizePhone(target.lastMessage?.recipient ?? "") ?? ""]));
     setPhones(fallback);
     void (async () => {
       const token = await accessToken(); if (!token) return;
-      try {
-        const { contacts } = await apiRequest<{ contacts: Contact[] }>(token, `/api/companies/${company.id}/contacts`);
-        if (cancelled) return;
-        const active = contacts.filter((contact) => contact.is_active).sort((left, right) => Number(right.is_primary) - Number(left.is_primary));
-        setPhones((current) => Object.fromEntries(targets.map((target) => {
-          const contact = active.find((item) => (target.customerId && item.customer_id === target.customerId) || item.customer?.ledgerName === target.customerName);
-          return [target.key, current[target.key] || displayPhone(contact?.phone_e164)];
-        })));
-      } catch { /* Numbers can still be typed in. */ }
+      const response = await apiRequest<{ teamContacts: TeamContact[] }>(token, `/api/companies/${company.id}/team-contacts`).catch(() => ({ teamContacts: [] as TeamContact[] }));
+      if (cancelled) return;
+      const active = response.teamContacts.filter((member) => member.is_active);
+      setTeam(active);
+      // Start from the people copied last time, so a regular CC is one click.
+      let remembered: string[] = [];
+      try { remembered = JSON.parse(localStorage.getItem(`${TEAM_CHOICE_KEY}.${company.id}`) ?? "[]"); } catch { /* storage unavailable */ }
+      setCopyIds(new Set(active.filter((member) => remembered.includes(member.id)).map((member) => member.id)));
+    })();
+    void (async () => {
+      const token = await accessToken(); if (!token) return;
+      const [contactResult, tallyResult] = await Promise.all([
+        apiRequest<{ contacts: Contact[] }>(token, `/api/companies/${company.id}/contacts`).catch(() => ({ contacts: [] as Contact[] })),
+        apiRequest<{ customers: Array<{ id: string; name: string; numbers: string[] }>; sharedBy?: Record<string, number> }>(token, `/api/companies/${company.id}/customers/whatsapp-numbers`).catch(() => ({ customers: [], sharedBy: {} as Record<string, number> })),
+      ]);
+      if (cancelled) return;
+      const active = contactResult.contacts.filter((contact) => contact.is_active).sort((left, right) => Number(right.is_primary) - Number(left.is_primary));
+      const next: Record<string, Array<{ phone: string; source: string; shared?: number }>> = {};
+      const sharedBy = tallyResult.sharedBy ?? {};
+      for (const target of targets) {
+        const list: Array<{ phone: string; source: string; shared?: number }> = [];
+        const add = (value: string | null | undefined, source: string) => { const phone = normalizePhone(value ?? ""); if (phone && !list.some((item) => item.phone === phone)) list.push({ phone, source, shared: sharedBy[phone.replace(/\D/g, "").slice(-10)] }); };
+        const sameCustomer = (id?: string | null, name?: string | null) => Boolean((target.customerId && id === target.customerId) || (name && name === target.customerName));
+        for (const contact of active) if (sameCustomer(contact.customer_id, contact.customer?.ledgerName)) add(contact.phone_e164, contact.is_primary ? "Saved · main" : "Saved");
+        add(target.lastMessage?.recipient, "Last used");
+        for (const customer of tallyResult.customers) if (sameCustomer(customer.id, customer.name)) for (const number of customer.numbers) add(number, "From Tally");
+        next[target.key] = list;
+      }
+      setChoices(next);
+      // Pick the first known number that belongs to this customer alone; a number
+      // shared by many customers (usually the salesperson's) is never picked for you.
+      setPhones((current) => Object.fromEntries(targets.map((target) => [target.key, current[target.key] || next[target.key]?.find((item) => (item.shared ?? 1) <= 1)?.phone || ""])));
     })();
     return () => { cancelled = true; };
   }, [company.id, open, targetSignature]);
@@ -99,13 +132,14 @@ export function WhatsAppSendDrawer({ open, title, targets, onClose, onSent, onIn
     if (!token) throw new Error("Sign in again before sending.");
     const response = await apiRequest<{ results: SendResult[] }>(token, `/api/companies/${company.id}/notifications/send`, {
       method: "POST", timeoutMs: 60_000,
-      body: jsonBody({ items: items.map((target) => ({ key: target.key, ...target.request, phone: phones[target.key] ?? "" })) }),
+      body: jsonBody({ teamContactIds: [...copyIds], items: items.map((target) => ({ key: target.key, ...target.request, phone: phones[target.key] ?? "" })) }),
     });
     return response.results;
   }
 
   async function send() {
     if (sending || !pending.length || invalid.length) return;
+    try { localStorage.setItem(`${TEAM_CHOICE_KEY}.${company.id}`, JSON.stringify([...copyIds])); } catch { /* storage unavailable */ }
     setSending(true); setError(null); setStatus(`Sending ${pending.length} message${pending.length === 1 ? "" : "s"}…`);
     try {
       let batch = await post(pending);
@@ -129,36 +163,83 @@ export function WhatsAppSendDrawer({ open, title, targets, onClose, onSent, onIn
     } finally { setSending(false); }
   }
 
-  const heading = title ?? (targets.length === 1 ? "Send WhatsApp" : `Send ${targets.length} WhatsApp messages`);
-  return <Drawer open={open} onClose={() => { if (!sending) onClose(); }} title={heading} description="Check each number, then send. Messages go to the number shown." width="wide">
-    <div className={styles.panel}>
+  const single = targets.length === 1;
+  const heading = title ?? (single ? "Send on WhatsApp" : `Send ${targets.length} WhatsApp messages`);
+  const selectNumber = (key: string, phone: string) => { setTyping((current) => { const next = new Set(current); next.delete(key); return next; }); setPhones((current) => ({ ...current, [key]: phone })); };
+  const typeNumber = (key: string) => { setTyping((current) => new Set(current).add(key)); setPhones((current) => ({ ...current, [key]: "" })); };
+
+  return <Drawer open={open} onClose={() => { if (!sending) onClose(); }} title={heading} description={single ? targets[0]?.customerName : undefined} width="wide">
+    <div className={`${panel.panel} ${styles.sendPanel}`}>
       {templateProblem && <InlineMessage tone="warning">{templateProblem}</InlineMessage>}
       {error && <InlineMessage tone="error">{error}</InlineMessage>}
-      <ul className={styles.list}>{targets.map((target) => {
+      {targets.map((target) => {
         const result = results[target.key];
         const phone = phones[target.key] ?? "";
         const phoneInvalid = Boolean(phone.trim()) && !normalizePhone(phone);
-        return <li key={target.key} className={styles.row} data-state={result?.ok ? "sent" : result ? "failed" : "pending"}>
-          <div className={styles.identity}>
-            <strong>{target.customerName}</strong>
-            <small>{target.detail}{target.amount !== undefined && target.amount !== null ? ` · ${formatMoney(target.amount)}` : ""}</small>
-            {target.lastMessage && !result && <span className={styles.previous}><StatusBadge status={target.lastMessage.status} />{target.lastMessage.recipient ? `to ${displayPhone(target.lastMessage.recipient)}` : ""}</span>}
-          </div>
-          {result?.ok ? <p className={styles.outcome} data-tone="ok"><CheckCircle2 size={16} />Queued to {displayPhone(result.recipient)}</p> : <label className={styles.phone}>
-            <span>WhatsApp number</span>
-            <input value={phone} disabled={sending} inputMode="tel" autoComplete="off" placeholder="98765 43210" aria-invalid={phoneInvalid} onChange={(event) => setPhones((current) => ({ ...current, [target.key]: event.target.value }))} />
-            {phoneInvalid && <small className={styles.hint}>Enter a 10-digit mobile number, or +country code.</small>}
-          </label>}
-          {result && !result.ok && <p className={styles.outcome} data-tone="error"><AlertTriangle size={15} />{result.error}</p>}
-        </li>;
-      })}</ul>
-      <footer className={styles.footer}>
-        <p>{done ? `${sentCount} message${sentCount === 1 ? "" : "s"} queued. Delivery status appears in Messages.` : status ?? (invalid.length ? `Enter a number for ${invalid.length} customer${invalid.length === 1 ? "" : "s"}.` : "Sending does not change anything in Tally.")}</p>
-        <div>
-          <Button className="button-secondary" disabled={sending} onClick={onClose}>{done ? "Done" : "Cancel"}</Button>
-          {!done && <Button disabled={sending || !pending.length || invalid.length > 0} onClick={() => void send()}><Send size={15} />{sending ? "Sending…" : Object.keys(results).length ? `Retry ${pending.length}` : `Send ${pending.length}`}</Button>}
-        </div>
-      </footer>
+        const list = choices[target.key] ?? [];
+        const typingHere = typing.has(target.key) || !list.length;
+        const [docTitle, ...docRest] = target.detail.split(" · ");
+        const hasAmount = target.amount !== undefined && target.amount !== null;
+        return <div key={target.key} className={styles.block} data-state={result?.ok ? "sent" : result ? "failed" : "pending"}>
+          {/* What is being sent: the same hero card as the Credit Note panel. */}
+          <header className={panel.hero}>
+            <div className={panel.heroTop}>
+              <span className={styles.heroTitle}>{!single && <small>{target.customerName}</small>}<strong>{docTitle}</strong></span>
+              {hasAmount && <span className={panel.heroAmount}><strong>{formatMoney(target.amount!)}</strong></span>}
+            </div>
+            {docRest.length > 0 && <p className={panel.heroContext}>{docRest.join(" · ")}</p>}
+            {result?.ok && <p className={styles.sentLine}><CheckCircle2 size={14} />Sent to {displayPhone(result.recipient)}{result.copiedTo?.length ? ` · copied to ${result.copiedTo.join(", ")}` : ""}</p>}
+            {result?.copyFailed?.length ? <p className={panel.error}>Could not copy to {result.copyFailed.join(", ")}. The customer&apos;s message was sent.</p> : null}
+          </header>
+
+          {!result?.ok && <section className={panel.section} aria-label={`Number for ${target.customerName}`}>
+            <div className={panel.sectionHeading}><h3>Send to</h3><span>{list.length ? `${list.length} known number${list.length === 1 ? "" : "s"}` : "No number on record"}</span></div>
+            <ul className={`${panel.payments} ${styles.numbers}`} role="radiogroup">
+              {list.map((choice) => {
+                const selected = !typing.has(target.key) && normalizePhone(phone) === choice.phone;
+                return <li key={choice.phone} data-selected={selected}>
+                  <label>
+                    <input type="radio" name={`to-${target.key}`} checked={selected} disabled={sending} onChange={() => selectNumber(target.key, choice.phone)} />
+                    <span><strong>{displayPhone(choice.phone)}</strong><small>{choice.source}</small></span>
+                    {(choice.shared ?? 1) > 1 && <em className={styles.shared}>Shared by {choice.shared} customers</em>}
+                  </label>
+                </li>;
+              })}
+              <li data-selected={typingHere}>
+                <label>
+                  <input type="radio" name={`to-${target.key}`} checked={typingHere} disabled={sending} onChange={() => typeNumber(target.key)} />
+                  <span><strong>{list.length ? "Another number" : "Enter a number"}</strong><small>Any mobile, with +country code if outside India</small></span>
+                </label>
+                {typingHere && <input className={styles.numberInput} value={phone} disabled={sending} inputMode="tel" autoComplete="off" autoFocus={typing.has(target.key)} placeholder="98765 43210" aria-label={`WhatsApp number for ${target.customerName}`} aria-invalid={phoneInvalid} onChange={(event) => setPhones((current) => ({ ...current, [target.key]: event.target.value }))} />}
+              </li>
+            </ul>
+            {phoneInvalid && <p className={panel.error}>Enter a 10-digit mobile number, or +country code.</p>}
+          </section>}
+          {result && !result.ok && <p className={panel.error}>{result.error}</p>}
+        </div>;
+      })}
+      {team.length > 0 && !done && <section className={panel.section} aria-label="Copy to team">
+        <div className={panel.sectionHeading}><h3>Also copy to</h3><span>{copyIds.size ? `${copyIds.size} selected` : "Optional"}</span></div>
+        <ul className={`${panel.payments} ${styles.numbers}`}>
+          {team.map((member) => {
+            const selected = copyIds.has(member.id);
+            return <li key={member.id} data-selected={selected}>
+              <label>
+                <input type="checkbox" checked={selected} disabled={sending} onChange={() => setCopyIds((current) => { const next = new Set(current); if (next.has(member.id)) next.delete(member.id); else next.add(member.id); return next; })} />
+                <span><strong>{member.name}</strong><small>{[member.role_label, displayTeamPhone(member.phone_e164)].filter(Boolean).join(" · ")}</small></span>
+              </label>
+            </li>;
+          })}
+        </ul>
+        {copyIds.size > 0 && <p className={styles.source}>Each selected person gets the same message{targets.length > 1 ? " for every customer above" : ""}.</p>}
+      </section>}
     </div>
+    <footer className={styles.actions}>
+      <span>{done ? `${sentCount} sent · delivery shows in Messages` : status ?? (invalid.length ? `Choose a number${single ? "" : ` for ${invalid.length} customer${invalid.length === 1 ? "" : "s"}`}` : targets.every((target) => "postingId" in target.request) ? "PDF attached" : "")}</span>
+      <div>
+        <Button className="button-secondary" disabled={sending} onClick={onClose}>{done ? "Done" : "Cancel"}</Button>
+        {!done && <Button disabled={sending || !pending.length || invalid.length > 0} onClick={() => void send()}><Send size={15} />{sending ? "Sending…" : Object.keys(results).length ? `Retry ${pending.length}` : single ? "Send WhatsApp" : `Send ${pending.length} messages`}</Button>}
+      </div>
+    </footer>
   </Drawer>;
 }

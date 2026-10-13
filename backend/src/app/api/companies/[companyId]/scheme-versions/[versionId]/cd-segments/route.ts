@@ -1,5 +1,5 @@
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
-import { appendRulebookAudit, readInteger, readPositiveDecimal, readRequiredText, readRequiredUuid, requireCurrentMasterSync, requireDraftVersion, requireRulebookVersionForCompany, requireSundryDebtorsGroup, RulebookRequestError, rulebookErrorResponse } from "@/lib/rulebook/shared";
+import { appendRulebookAudit, readInteger, readPositiveDecimal, readRequiredText, readRequiredUuid, requireCurrentMasterSync, requireDraftVersion, requireRulebookVersionForCompany, loadCustomerGroupTree, assertUnderSundryDebtors, RulebookRequestError, rulebookErrorResponse } from "@/lib/rulebook/shared";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 type RouteContext = { params: Promise<{ companyId: string; versionId: string }> };
@@ -36,15 +36,19 @@ export async function PUT(request: Request, context: RouteContext) {
     const { scope, version } = await requireRulebookVersionForCompany(request, companyId, versionId);
     requireDraftVersion(version);
     if (version.scheme_type !== "cd") throw new RulebookRequestError("Segments apply only to Cash Discount rules.");
-    await requireCurrentMasterSync(scope.company.id);
-    const body = (await request.json().catch(() => ({}))) as Record<string, unknown>;
+    const [, body, groupsById] = await Promise.all([
+      requireCurrentMasterSync(scope.company.id),
+      request.json().catch(() => ({})) as Promise<Record<string, unknown>>,
+      loadCustomerGroupTree(scope.company.id),
+    ]);
     const segments = readSegments(body.segments);
 
-    // Every group must be under Sundry Debtors; collect the group tree once.
-    let groupsById: Map<string, { id: string; name: string; parent_group_id: string | null; is_available: boolean }> | undefined;
-    for (const groupId of segments.flatMap((segment) => segment.customerGroupIds)) groupsById = await requireSundryDebtorsGroup(scope.company.id, groupId);
+    // Every group must be under Sundry Debtors. Load the group tree once and
+    // check each group against it (one query instead of one per group).
+    const allGroupIds = segments.flatMap((segment) => segment.customerGroupIds);
+    for (const groupId of allGroupIds) assertUnderSundryDebtors(groupsById, groupId);
     const children = new Map<string, string[]>();
-    for (const group of groupsById?.values() ?? []) if (group.parent_group_id) children.set(group.parent_group_id, [...(children.get(group.parent_group_id) ?? []), group.id]);
+    for (const group of groupsById.values()) if (group.parent_group_id) children.set(group.parent_group_id, [...(children.get(group.parent_group_id) ?? []), group.id]);
     const owner = new Map<string, number>();
     segments.forEach((segment, index) => {
       const stack = [...segment.customerGroupIds];
@@ -55,7 +59,7 @@ export async function PUT(request: Request, context: RouteContext) {
         seen.add(id);
         const previous = owner.get(id);
         if (previous !== undefined && previous !== index) {
-          const name = groupsById?.get(id)?.name ?? "A customer group";
+          const name = groupsById.get(id)?.name ?? "A customer group";
           throw new RulebookRequestError(`${name} is in both "${segments[previous].label}" and "${segment.label}". Each group, including its sub-groups, may be in only one segment.`, 409);
         }
         owner.set(id, index);
@@ -63,39 +67,13 @@ export async function PUT(request: Request, context: RouteContext) {
       }
     });
 
-    const supabase = createSupabaseAdminClient();
-    // Switch the draft to per-MT; days and rate now live on the segments.
-    const switched = await supabase.from("scheme_versions")
-      .update({ cd_discount_basis: "amount_per_tonne", discount_percentage: null, allowed_working_days: null })
-      .eq("id", version.id).eq("status", "draft");
-    if (switched.error) throw switched.error;
-    const cleared = await Promise.all([
-      supabase.from("scheme_version_cd_slabs").delete().eq("scheme_version_id", version.id),
-      supabase.from("scheme_version_cd_segments").delete().eq("scheme_version_id", version.id),
-    ]);
-    for (const result of cleared) if (result.error) throw result.error;
-    // Groups picked before segments existed are replaced by the segment groups.
-    const oldGroups = await supabase.from("scheme_version_customer_groups").delete().eq("scheme_version_id", version.id);
-    if (oldGroups.error) throw oldGroups.error;
-
-    for (const [index, segment] of segments.entries()) {
-      const inserted = await supabase.from("scheme_version_cd_segments").insert({
-        scheme_version_id: version.id,
-        company_id: scope.company.id,
-        label: segment.label,
-        allowed_working_days: segment.allowedWorkingDays,
-        amount_per_tonne: segment.amountPerTonne,
-        sort_order: index,
-      }).select("id").single();
-      if (inserted.error) throw inserted.error;
-      const members = await supabase.from("scheme_version_cd_segment_groups").insert(segment.customerGroupIds.map((customerGroupId) => ({
-        scheme_version_id: version.id,
-        segment_id: inserted.data.id,
-        company_id: scope.company.id,
-        customer_group_id: customerGroupId,
-      })));
-      if (members.error) throw members.error;
-    }
+    // One call, one transaction (migration 20260927120000_save_cd_segments_function.sql).
+    const saved = await createSupabaseAdminClient().rpc("save_meenakshi_cd_segments", {
+      p_company_id: scope.company.id,
+      p_version_id: version.id,
+      p_segments: segments,
+    });
+    if (saved.error) throw saved.error;
 
     await appendRulebookAudit({ scope, action: "scheme_version_cd_segments_saved", entityType: "scheme_version", entityId: version.id, newValue: { segments } });
     return jsonWithCors(request, { segments });

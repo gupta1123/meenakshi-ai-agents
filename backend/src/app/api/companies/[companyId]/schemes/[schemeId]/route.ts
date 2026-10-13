@@ -51,3 +51,25 @@ export async function PATCH(request: Request, context: RouteContext) {
     return rulebookErrorResponse(request, error, "update scheme");
   }
 }
+
+/**
+ * Delete a rule completely. Only a rule that was never used (every version
+ * still a draft) can be deleted; the database refuses anything with history
+ * (migration 20260927140000_delete_unused_rule.sql). Rules in use are retired.
+ */
+export async function DELETE(request: Request, context: RouteContext) {
+  try {
+    const { companyId, schemeId } = await context.params;
+    const { scope, scheme } = await requireRulebookSchemeForCompany(request, companyId, schemeId);
+    const { error } = await createSupabaseAdminClient().rpc("delete_meenakshi_unused_rule", { p_company_id: scope.company.id, p_scheme_id: scheme.id });
+    if (error) {
+      // 23503: something still references the rule (calculations, Credit Notes…).
+      const inUse = error.code === "23503" || /in use|cannot be deleted|immutable/i.test(error.message);
+      return jsonWithCors(request, { error: inUse ? "This rule has been used, so its history must be kept. Pause and retire it instead." : error.message }, { status: 409 });
+    }
+    await appendRulebookAudit({ scope, action: "scheme_deleted", entityType: "scheme", entityId: scheme.id, previousValue: { name: scheme.name, code: scheme.code, status: scheme.status } });
+    return jsonWithCors(request, { deleted: true });
+  } catch (error) {
+    return rulebookErrorResponse(request, error, "delete rule");
+  }
+}

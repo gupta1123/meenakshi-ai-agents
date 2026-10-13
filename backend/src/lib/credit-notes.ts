@@ -23,10 +23,9 @@ type ProposalRow = {
 type EvaluationRow = { id: string; evaluation_run_id: string | null; source_fingerprint: string; evaluated_at: string; formula_snapshot: unknown };
 type SourceLedgerAllocation = { id: string; guid: string; name: string; amount: string };
 
-// A Credit Note may be created from any completed Tally calculation of this
-// proposal (a full TOD run or a single-customer refresh) up to 5 days old.
+// A Credit Note may be created from the latest completed Tally calculation of
+// this proposal (a full TOD run or a single-customer refresh), whatever its age.
 // The created voucher is still read back from Tally and verified.
-export const REVIEW_REFRESH_MAX_AGE_MS = 5 * 24 * 60 * 60 * 1_000;
 type PostingInput = {
   proposalId: string;
   proposalEvaluationId: string;
@@ -226,13 +225,10 @@ export async function buildCreditNoteApprovalInput(companyId: string, proposalId
     .eq("company_id", companyId)
     .maybeSingle();
   if (reviewRefreshError) throw reviewRefreshError;
-  const completedAt = reviewRefresh?.completed_at ? new Date(reviewRefresh.completed_at).getTime() : Number.NaN;
-  if (
-    reviewRefresh?.status !== "completed"
-    || !Number.isFinite(completedAt)
-    || Date.now() - completedAt > REVIEW_REFRESH_MAX_AGE_MS
-  ) {
-    throw new Error("This result was calculated more than 5 days ago. Check the latest Tally information, then create the Credit Note.");
+  // The latest saved calculation is the result staff are looking at, however
+  // old; creation only needs it to have completed.
+  if (reviewRefresh?.status !== "completed" || !reviewRefresh.completed_at) {
+    throw new Error("The latest calculation for this customer did not finish. Calculate the period again, then create the Credit Note.");
   }
 
   const [{ data: company, error: companyError }, { data: customer, error: customerError }, { data: version, error: versionError }] = await Promise.all([

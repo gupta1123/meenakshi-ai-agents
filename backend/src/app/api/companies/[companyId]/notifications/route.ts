@@ -2,6 +2,7 @@ import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { requireMeenakshiCompanyAccess, MeenakshiAccessError } from "@/lib/authorization";
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { customerGroupsFor } from "@/lib/customer-groups";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 const allowedStatuses = new Set(["queued", "sending", "sent", "delivered", "read", "failed", "suppressed", "cancelled"]);
@@ -26,12 +27,31 @@ export async function GET(request: Request, context: RouteContext) {
     if (status) query = query.eq("status", status);
     const { data, error } = await query;
     if (error) throw error;
-    const messages = (data ?? []).map(({ payload, ...message }) => ({
-      ...message,
-      customer_name: payload && typeof payload === "object" && typeof (payload as Record<string, unknown>).customerName === "string"
-        ? (payload as Record<string, unknown>).customerName
-        : null,
-    }));
+    // Customer and Tally group of each message (via its contact), for grouping on the page.
+    const contactIds = [...new Set((data ?? []).map((message) => message.customer_contact_id).filter(Boolean))] as string[];
+    const contactCustomer = new Map<string, string>();
+    for (let index = 0; index < contactIds.length; index += 200) {
+      const { data: contacts, error: contactError } = await createSupabaseAdminClient().from("customer_contacts").select("id, customer_id").in("id", contactIds.slice(index, index + 200));
+      if (contactError) throw contactError;
+      for (const contact of contacts ?? []) contactCustomer.set(contact.id, contact.customer_id);
+    }
+    const groups = await customerGroupsFor(createSupabaseAdminClient(), company.id, { ids: [...contactCustomer.values()] });
+    const messages = (data ?? []).map(({ payload, ...message }) => {
+      const body = (payload && typeof payload === "object" ? payload : {}) as Record<string, unknown>;
+      const text = (key: string) => typeof body[key] === "string" && body[key] ? String(body[key]) : null;
+      const amount = (key: string) => typeof body[key] === "number" || (typeof body[key] === "string" && body[key] !== "") ? String(body[key]) : null;
+      // What the message was about, in the user's terms (shown on the Messages page).
+      const document = {
+        kind: text("creditNoteNumber") ? "credit_note" : text("debitNoteNumber") ? "debit_note" : null,
+        number: text("creditNoteNumber") ?? text("debitNoteNumber"),
+        amount: amount("creditNoteAmount") ?? amount("debitNoteAmount") ?? amount("benefitAmount"),
+        periodStart: text("todPeriodStart"),
+        periodEnd: text("todPeriodEnd"),
+        invoiceReference: text("invoiceReference")?.startsWith("TOD:") ? null : text("invoiceReference"),
+      };
+      const customer = message.customer_contact_id ? groups.byId.get(contactCustomer.get(message.customer_contact_id) ?? "") : undefined;
+      return { ...message, customer_name: text("customerName"), team_member_name: text("teamMemberName"), document, customer_id: customer?.customerId ?? null, customer_group: customer?.groupName ?? null };
+    });
     return jsonWithCors(request, { messages });
   } catch (error) {
     if (error instanceof MeenakshiAccessError) return jsonWithCors(request, { error: error.message }, { status: error.status });

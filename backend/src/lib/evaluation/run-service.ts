@@ -15,7 +15,7 @@ export type EvaluationWorkerRun = EvaluationRunRecord & {
   created_at: string;
 };
 
-export type EvaluationProcessState = "refresh_requested" | "waiting_for_tally" | "persisted";
+export type EvaluationProcessState = "refresh_requested" | "waiting_for_tally" | "waiting_for_local_result" | "persisted";
 
 function errorText(error: unknown) {
   if (error instanceof Error) return error.message;
@@ -127,7 +127,16 @@ export async function processEvaluationRun(run: EvaluationWorkerRun): Promise<Ev
     return "persisted";
   }
 
+  // The local-result endpoint owns this short save window. A worker claiming
+  // the initial queued row must not start another read before evidence lands.
+  if (run.request_context.localFirst === true) return "waiting_for_local_result";
+
   if (requiresTallyRefresh(run)) {
+    const { data: current, error: currentError } = await createSupabaseAdminClient().from("evaluation_runs")
+      .select("status,request_context").eq("id", run.id).eq("company_id", run.company_id).single();
+    if (currentError) throw currentError;
+    if (["completed", "completed_with_issues", "cancelled"].includes(current.status)) return "persisted";
+    if (current.request_context?.localFirst === true) return "waiting_for_local_result";
     let scope;
     try {
       scope = await deriveRefreshScope(run);

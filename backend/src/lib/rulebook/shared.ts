@@ -193,14 +193,24 @@ export function readCashDiscountSlabs(value: unknown) {
 }
 
 /** Discount rules may cover only Sundry Debtors or one of its customer sub-groups. */
-export async function requireSundryDebtorsGroup(companyId: string, customerGroupId: string) {
+type CustomerGroupNode = { id: string; name: string; parent_group_id: string | null; is_available: boolean };
+
+/** The company's customer group tree, keyed by id. */
+export async function loadCustomerGroupTree(companyId: string) {
   const { data, error } = await createSupabaseAdminClient()
     .from("customer_groups")
     .select("id, name, parent_group_id, is_available")
     .eq("company_id", companyId);
   if (error) throw error;
-  const groups = (data ?? []) as Array<{ id: string; name: string; parent_group_id: string | null; is_available: boolean }>;
-  const byId = new Map(groups.map((group) => [group.id, group]));
+  return new Map(((data ?? []) as CustomerGroupNode[]).map((group) => [group.id, group]));
+}
+
+export async function requireSundryDebtorsGroup(companyId: string, customerGroupId: string) {
+  return assertUnderSundryDebtors(await loadCustomerGroupTree(companyId), customerGroupId);
+}
+
+/** Checks one group against an already-loaded group tree. */
+export function assertUnderSundryDebtors(byId: Map<string, CustomerGroupNode>, customerGroupId: string) {
   const selected = byId.get(customerGroupId);
   if (!selected || selected.is_available !== true) throw new RulebookRequestError("Customer group is unavailable for this company.", 409);
   const visited = new Set<string>();
@@ -276,8 +286,8 @@ export async function requireRulebookVersionAdmin(request: Request, versionId: s
 }
 
 export async function requireRulebookVersionForCompany(request: Request, companyId: string, versionId: string) {
-  const scope = await requireRulebookCompanyAdmin(request, companyId);
-  const version = await findRulebookVersion(versionId);
+  // Independent lookups: run them together (one round trip of waiting, not two).
+  const [scope, version] = await Promise.all([requireRulebookCompanyAdmin(request, companyId), findRulebookVersion(versionId)]);
   if (version.company_id !== scope.company.id) throw new RulebookRequestError("Scheme version was not found for this company.", 404);
   return { scope, version };
 }
@@ -289,16 +299,25 @@ export function requireDraftVersion(version: RulebookVersionRow) {
 }
 
 export async function getMasterSyncReadiness(companyId: string) {
-  const { data, error } = await createSupabaseAdminClient()
+  const runs = () => createSupabaseAdminClient()
     .from("tally_sync_runs")
     .select("id, status, completed_at, error_summary, source_fingerprint")
     .eq("company_id", companyId)
-    .eq("sync_kind", "masters")
+    .eq("sync_kind", "masters");
+  // A stopped or failed update changes nothing, so the last successful one
+  // still decides whether the company data is current.
+  const { data: completed, error } = await runs()
+    .eq("status", "completed")
     .order("completed_at", { ascending: false, nullsFirst: false })
-    .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
   if (error) throw error;
+  let data = completed;
+  if (!data) {
+    const latest = await runs().order("created_at", { ascending: false }).limit(1).maybeSingle();
+    if (latest.error) throw latest.error;
+    data = latest.data;
+  }
   const row = data as { id: string; status: string; completed_at: string | null; error_summary: string | null; source_fingerprint: string | null } | null;
   const completedAt = row?.completed_at ?? null;
   const stale = !completedAt || Date.now() - new Date(completedAt).getTime() > TALLY_SYNC_STALE_MS;
@@ -312,11 +331,21 @@ export async function getMasterSyncReadiness(companyId: string) {
   };
 }
 
+// A rule save makes several requests in a row; asking the database each time
+// whether Tally data is current adds up. A "current" answer is reused for 30s
+// (the data goes stale only after hours); any other answer is never cached.
+const CURRENT_SYNC_CACHE_MS = 30_000;
+const currentSyncCache = new Map<string, { expiresAt: number; readiness: Awaited<ReturnType<typeof getMasterSyncReadiness>> }>();
+
 export async function requireCurrentMasterSync(companyId: string) {
+  const cached = currentSyncCache.get(companyId);
+  if (cached && cached.expiresAt > Date.now()) return cached.readiness;
   const readiness = await getMasterSyncReadiness(companyId);
   if (readiness.status !== "current") {
+    currentSyncCache.delete(companyId);
     throw new RulebookRequestError("A current successful Tally master synchronization is required for this action.", 409);
   }
+  currentSyncCache.set(companyId, { expiresAt: Date.now() + CURRENT_SYNC_CACHE_MS, readiness });
   return readiness;
 }
 

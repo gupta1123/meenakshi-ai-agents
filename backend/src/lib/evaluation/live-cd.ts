@@ -10,7 +10,6 @@ import { decimal, money, nonNegative, percentOf } from "./decimal";
 import { loadLiveCdBatchRule, loadLiveCdLocalBootstrap, type EvaluationRunRecord } from "./evidence";
 import type { FrozenCdRule } from "./contracts";
 import { evaluateCashDiscountSettlements } from "./cd-settlement.mjs";
-import { getCompanyLaunchControl } from "@/lib/launch-control";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 type LiveCdPayment = {
@@ -345,10 +344,9 @@ export function mergeVerifiedDebitNotes(invoices: LiveCdInvoice[], postings: Ver
 
 /**
  * Per-MT Cash Discount (docs/CD_LOGIC.md): re-run the settlement calculation on
- * the connector's evidence, save the current snapshot, and queue a Credit Note
- * for every Discounted payment when Credit Note creation is on. More-than-90%
- * payments wait for staff. Re-running never duplicates: the queue key is per
- * invoice, and the database allows one live Credit Note per invoice.
+ * the connector's evidence and save the current snapshot. No Credit Note is
+ * queued here: staff create each one from the Cash Discount page. The
+ * database allows one live Credit Note per invoice.
  */
 export async function completeCdSettlementRun(run: EvaluationRunRecord, batch: LiveCdBatch) {
   const supabase = createSupabaseAdminClient();
@@ -359,7 +357,44 @@ export async function completeCdSettlementRun(run: EvaluationRunRecord, batch: L
     candidates: Array<Record<string, unknown> & { customerId: string; invoiceGuid: string; category: string }>;
     totals: Record<string, unknown>;
   };
-  const summary = { schemeType: "cd", cdDiscountBasis: "amount_per_tonne", outcome: "completed", liveOnly: true, ...result.totals, settlementResults: result.results };
+  // Not-eligible invoices (paid late or under 90%) need no action and were
+  // ~96% of a large period (14 MB per check). Keep full rows only for the
+  // rest and store the not-eligible ones as a count.
+  const actionable = result.results.filter((row) => row.category !== "not_eligible");
+  // Tag each row with the customer's Tally group (the salesperson), which the
+  // Cash Discount page filters by.
+  const customerIds = [...new Set(actionable.map((row) => String(row.customerId ?? "")).filter(Boolean))];
+  const groupByCustomer = new Map<string, string>();
+  for (let index = 0; index < customerIds.length; index += 200) {
+    const { data: customers, error: customerError } = await supabase.from("customers")
+      .select("tally_ledger_guid, customer_groups(name)")
+      .eq("company_id", run.company_id).in("tally_ledger_guid", customerIds.slice(index, index + 200));
+    if (customerError) throw customerError;
+    for (const customer of customers ?? []) {
+      const group = customer.customer_groups as { name?: string } | { name?: string }[] | null;
+      const name = Array.isArray(group) ? group[0]?.name : group?.name;
+      if (name) groupByCustomer.set(customer.tally_ledger_guid, name);
+    }
+  }
+  for (const row of actionable) row.customerGroup = groupByCustomer.get(String(row.customerId ?? "")) ?? null;
+  const summary = {
+    schemeType: "cd", cdDiscountBasis: "amount_per_tonne", outcome: "completed", liveOnly: true, ...result.totals,
+    invoicesChecked: result.results.length,
+    notEligibleCount: result.results.length - actionable.length,
+    // Not-eligible invoices are not stored one by one (size); the dashboard
+    // needs them per quarter and group, so keep a compact tally:
+    // "YYYY-MM|customer ledger GUID" -> [invoices, MT].
+    notEligibleByMonth: result.results.filter((row) => row.category === "not_eligible").reduce<Record<string, [number, number]>>((tally, row) => {
+      const key = `${String(row.invoiceDate ?? "").slice(0, 7)}|${String(row.customerId ?? "")}`;
+      const entry: [number, number] = tally[key] ?? [0, 0];
+      entry[0] += 1;
+      entry[1] = Math.round((entry[1] + Number(row.eligibleTonnes ?? 0)) * 1000) / 1000;
+      tally[key] = entry;
+      return tally;
+    }, {}),
+    invoicePeriod: { from: batch.dateFrom, to: (bootstrap.voucherScope as { invoiceDateTo?: string }).invoiceDateTo ?? batch.dateTo },
+    settlementResults: actionable,
+  };
   const { error: snapshotError } = await supabase.rpc("replace_meenakshi_cd_settlement_snapshot", {
     p_company_id: run.company_id,
     p_evaluation_run_id: run.id,
@@ -372,22 +407,9 @@ export async function completeCdSettlementRun(run: EvaluationRunRecord, batch: L
   });
   if (snapshotError) throw snapshotError;
 
-  let autoQueued = 0;
-  const control = await getCompanyLaunchControl(run.company_id);
-  if (control.mode === "posting_enabled") {
-    const { data: ready, error } = await supabase.from("cash_discount_recovery_candidates")
-      .select("id, invoice_tally_guid").eq("company_id", run.company_id).eq("current_snapshot", true)
-      .eq("candidate_kind", "settlement").eq("status", "action_required");
-    if (error) throw error;
-    for (const candidate of ready ?? []) {
-      const { error: queueError } = await supabase.rpc("enqueue_meenakshi_cd_credit_note", {
-        p_company_id: run.company_id, p_candidate_id: candidate.id, p_actor_id: run.requested_by, p_idempotency_key: `cd-cn-auto:${candidate.invoice_tally_guid}`,
-      });
-      // An invoice that already has a Credit Note is skipped, not a failure.
-      if (queueError && !/already exists|already being prepared/i.test(queueError.message)) throw queueError;
-      if (!queueError) autoQueued += 1;
-    }
-  }
+  // Credit Notes are never created automatically: staff create each one
+  // from the Cash Discount page (cash-discount/settlements/[id]/credit-note).
+  const autoQueued = 0;
   return { totals: { ...result.totals, autoQueued }, rule, evaluatedOn: bootstrap.evaluatedOn };
 }
 

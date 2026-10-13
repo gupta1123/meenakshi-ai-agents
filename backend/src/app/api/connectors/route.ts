@@ -36,7 +36,25 @@ export async function POST(request: Request) {
     }
     const scope = await requireMeenakshiOrganizationAccess(request, organizationId, ["administrator"]);
     const controlToken = createConnectorControlToken();
-    const { data, error } = await createSupabaseAdminClient().from("tally_connectors").insert({
+    const supabase = createSupabaseAdminClient();
+    // Clicking "Connect this computer" again must not pile up rows. A connector that was set up
+    // but never claimed by a machine has never been used, so hand it out again with fresh credentials.
+    if (!body.installationKey && !body.machineFingerprint) {
+      const { data: unused } = await supabase.from("tally_connectors").select(TALLY_CONNECTOR_SELECT)
+        .eq("organization_id", organizationId).eq("status", "pending_pairing").like("machine_fingerprint", "pending:%").is("last_heartbeat_at", null)
+        .order("created_at", { ascending: false }).limit(1).maybeSingle();
+      if (unused) {
+        const reused = await supabase.from("tally_connectors").update({
+          installation_key: installationKey, control_token_hash: hashConnectorSecret(controlToken), machine_fingerprint: machineFingerprint, paired_by: scope.userId, updated_at: new Date().toISOString(),
+        }).eq("id", (unused as unknown as TallyConnectorRow).id).eq("status", "pending_pairing").select(TALLY_CONNECTOR_SELECT).maybeSingle();
+        if (reused.error) throw reused.error;
+        if (reused.data) {
+          const connector = reused.data as unknown as TallyConnectorRow;
+          return jsonWithCors(request, { connector: serializeTallyConnector(connector), controlToken, tallyUrl: "http://localhost:9000" }, { status: 200 });
+        }
+      }
+    }
+    const { data, error } = await supabase.from("tally_connectors").insert({
       organization_id: organizationId, installation_key: installationKey, display_name: displayName, machine_fingerprint: machineFingerprint,
       control_token_hash: hashConnectorSecret(controlToken), status: "pending_pairing", paired_by: scope.userId,
     }).select(TALLY_CONNECTOR_SELECT).single();

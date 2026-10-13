@@ -26,7 +26,19 @@ begin
   from pg_constraint con
   where con.conrelid = 'public.scheme_versions'::regclass
     and con.contype = 'c'
-    and pg_get_constraintdef(con.oid) like '%near_eligibility_percent = 80%';
+    and con.conname <> 'scheme_versions_scheme_type_settings_check'
+    -- Postgres stores the literal as "(80)::numeric", so match on the column names.
+    and pg_get_constraintdef(con.oid) like '%scheme_type%'
+    and pg_get_constraintdef(con.oid) like '%near_eligibility_percent%'
+    and pg_get_constraintdef(con.oid) like '%period_anchor_date%'
+  limit 1;
+  if v_constraint is null and exists (
+    select 1 from pg_constraint
+    where conrelid = 'public.scheme_versions'::regclass and conname = 'scheme_versions_scheme_type_settings_check'
+  ) then
+    -- Already replaced by an earlier run of this migration.
+    return;
+  end if;
   if v_constraint is null then
     raise exception 'scheme_versions scheme-type check was not found';
   end if;
@@ -34,6 +46,8 @@ begin
 end;
 $$;
 
+alter table public.scheme_versions
+  drop constraint if exists scheme_versions_scheme_type_settings_check;
 alter table public.scheme_versions
   add constraint scheme_versions_scheme_type_settings_check check (
     (scheme_type = 'cd'
@@ -582,3 +596,29 @@ comment on table public.scheme_version_cd_segments is
   'Cash Discount v2 segments: working-day window and ₹ per MT for a set of customer groups (docs/CD_LOGIC.md).';
 comment on table public.scheme_version_cd_segment_groups is
   'Customer groups of a Cash Discount segment. A group belongs to one segment per rule version.';
+
+-- 9. A per-MT rule keeps its payment windows on its segments, not in
+--    scheme_version_cd_slabs. The single-active-rule trigger from
+--    20260812000000 only knew slabs, so it blocked every per-MT activation.
+create or replace function public.prepare_single_active_meenakshi_cd_rule()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  if new.scheme_type = 'cd' and new.status = 'active' then
+    if new.cd_discount_basis = 'amount_per_tonne' then
+      if not exists (select 1 from public.scheme_version_cd_segments segment where segment.scheme_version_id = new.id) then
+        raise exception 'Cash Discount requires at least one segment';
+      end if;
+    elsif not exists (select 1 from public.scheme_version_cd_slabs slab where slab.scheme_version_id = new.id) then
+      raise exception 'Cash Discount requires at least one payment window';
+    end if;
+    update public.scheme_versions
+    set status = 'retired', updated_at = now()
+    where company_id = new.company_id and scheme_type = 'cd' and status = 'active' and id <> new.id;
+  end if;
+  return new;
+end;
+$$;

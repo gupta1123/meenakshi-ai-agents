@@ -117,7 +117,12 @@ export async function GET(request: Request, context: RouteContext) {
     if (!isUuid(companyId) || !isUuid(proposalId)) return jsonWithCors(request, { error: "Invalid company or proposal id." }, { status: 400 });
     const { company } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
     const supabase = createSupabaseAdminClient();
-    const { data: rpcData, error: rpcError } = await supabase.rpc("get_proposal_detail", { p_proposal_id: proposalId, p_company_id: company.id });
+    // slim=1 leaves out the long payment-check and voucher lists (the drawer's first screen only needs counts).
+    const slim = new URL(request.url).searchParams.get("slim") === "1";
+    const rpcArgs = { p_proposal_id: proposalId, p_company_id: company.id };
+    let rpcResult = slim ? await supabase.rpc("get_proposal_detail_light", rpcArgs) : null;
+    if (!rpcResult || rpcResult.error) rpcResult = await supabase.rpc("get_proposal_detail", rpcArgs);
+    const { data: rpcData, error: rpcError } = rpcResult;
     const isMissingRpc = rpcError && (String((rpcError as { code?: string }).code) === "42883" || String(rpcError.message ?? "").includes("get_proposal_detail"));
     if (!isMissingRpc && rpcData) {
       const raw = rpcData as { proposal: Record<string, unknown> | null; error?: string; latestEvaluation: Record<string, unknown> | null; openIssues: unknown[]; reviews: unknown[]; creditNotePosting: Record<string, unknown> | null; tallyEvidence: { tiers: unknown[]; vouchers: unknown[]; lines: unknown[]; tallyLines: unknown[] }; notification: NotificationSummary };
@@ -155,7 +160,7 @@ export async function GET(request: Request, context: RouteContext) {
         proposal: raw.proposal as { id: string; customer_id: string; scheme_type: string; status: string; shortfall_amount: string | number | null; achieved_tier_id: string | null },
         posting: posting as { id: string; status: string } | null,
       });
-      return jsonWithCors(request, { proposal: raw.proposal, latestEvaluation: raw.latestEvaluation ?? null, openIssues: raw.openIssues ?? [], reviews: raw.reviews ?? [], creditNotePosting: posting ? { ...posting, document: safeDocument } : null, notification, tallyEvidence: mappedEvidence }, { headers: { "Cache-Control": "no-store", "X-Cache": "MISS" } });
+      return jsonWithCors(request, { proposal: raw.proposal, latestEvaluation: raw.latestEvaluation ?? null, openIssues: raw.openIssues ?? [], reviews: raw.reviews ?? [], creditNotePosting: posting ? { ...posting, document: safeDocument } : null, notification, tallyEvidence: formulaSnapshot.light ? { ...mappedEvidence, voucherCount: Number(formulaSnapshot.contributionTotal) || 0 } : mappedEvidence }, { headers: { "Cache-Control": "no-store", "X-Cache": "MISS" } });
     }
     if (rpcError && !isMissingRpc) console.warn("get_proposal_detail RPC failed, falling back:", rpcError);
     const fallback = await loadProposalDetailFallback(company, proposalId);

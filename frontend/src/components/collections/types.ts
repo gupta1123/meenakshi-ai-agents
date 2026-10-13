@@ -137,6 +137,8 @@ export type CreditNotePosting = {
 };
 
 export type NotificationMessage = {
+  /** Set when this is a copy sent to a Meenakshi team member rather than to the customer. */
+  team_member_name?: string | null;
   id: string;
   proposal_id: string | null;
   credit_note_posting_id: string | null;
@@ -153,6 +155,12 @@ export type NotificationMessage = {
   created_at: string;
   opt_in_snapshot?: Record<string, unknown>;
   customer_name?: string | null;
+  business_event_key?: string | null;
+  delivered_at?: string | null;
+  read_at?: string | null;
+  customer_id?: string | null;
+  customer_group?: string | null;
+  document?: { kind: "credit_note" | "debit_note" | null; number: string | null; amount: string | null; periodStart: string | null; periodEnd: string | null; invoiceReference: string | null } | null;
 };
 
 export type NotificationHealth = { counts: Record<string, number>; retrying: number; terminalFailures: number };
@@ -350,6 +358,8 @@ export type ProposalDetail = {
   creditNotePosting: (CreditNotePosting & { verified_tally_guid?: string | null; verified_amount?: string | null; document: SafeCreditNoteDocument | null }) | null;
   notification: NotificationSummary;
   tallyEvidence: {
+    /** Set on the light detail, where the voucher list itself is left out. */
+    voucherCount?: number;
     tiers: Array<{ id: string; minimum_tonnes: string | number; discount_percentage: string | number | null; discount_amount_per_tonne?: string | number | null }>;
     vouchers: Array<{
       tallyVoucherId: string;
@@ -378,3 +388,15 @@ export type ProposalDetail = {
 
 export type SafeCreditNoteDocument = { id: string; status: string; mimeType: string | null; fileSizeBytes: number | null; attachedAt: string | null; verifiedAt: string | null; failureReason: string | null; available: boolean; downloadUrl?: string };
 export type NotificationSummary = { eventType: string | null; messageId: string | null; status: string | null; canQueue: boolean; blockedReason: string | null };
+
+/** A per-MT Cash Discount Credit Note (stored with Debit Notes, note_kind = credit_note). */
+export type CashDiscountCreditNote = {
+  id: string; status: string; amount: string; voucherNumber: string | null; noteDate: string | null; verifiedAt: string | null; createdAt: string;
+  failureReason: string | null; customerName: string | null; invoiceNumber: string | null; invoiceDate: string | null;
+  eligibleTonnes: string | null; amountPerTonne: string | null; category: string | null; segmentLabel: string | null;
+  invoiceGuid?: string | null; windowDeadline?: string | null; discountAmount?: string | null;
+  customerId?: string | null; customerGroup?: string | null;
+  whatsapp: CashDiscountNoteMessage | null;
+  whatsappHistory?: CashDiscountNoteMessage[];
+};
+export type CashDiscountNoteMessage = { status: string; sentAt: string | null; deliveredAt: string | null; readAt: string | null; recipient: string | null; failureReason: string | null; createdAt?: string };

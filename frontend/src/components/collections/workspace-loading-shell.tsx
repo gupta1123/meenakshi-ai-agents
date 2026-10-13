@@ -55,7 +55,8 @@ export function TodPageSkeleton() {
   </div>;
 }
 
-function DiscountLoading() {
+/** Cash Discount loading. The same shape is used at app start, while the rules resolve and while the check loads, so it does not change between steps. */
+export function DiscountLoading() {
   return <><PageHeading action /><div className="workspace-loading-readiness"><Block className="loading-chip" /><Rows count={3} /></div><div className="workspace-loading-panel"><div className="workspace-loading-panel-header"><Block className="loading-panel-title" /><Block className="loading-action small" /></div><Rows count={5} /></div></>;
 }
 

@@ -1,0 +1,26 @@
+.card { display: grid; gap: 0; padding: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+.head { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 12px 24px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+.head h2 { margin: 2px 0 4px; color: var(--ink); font-size: 1.05rem; letter-spacing: -.01em; }
+.head p { max-width: 520px; margin: 0; color: var(--muted); font-size: .8rem; line-height: 1.5; }
+.eyebrow { color: var(--green); font-size: .68rem; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+.list { display: grid; margin: 0; padding: 0; list-style: none; }
+.row { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; align-items: center; gap: 14px; padding: 13px 20px; border-bottom: 1px solid var(--line); }
+.row:last-child { border-bottom: 0; }
+.row:hover { background: #fafaf7; }
+.row[data-off="true"] .who, .row[data-off="true"] .avatar { opacity: .55; }
+.avatar { display: grid; width: 40px; height: 40px; place-items: center; border-radius: 50%; color: var(--green); background: var(--green-soft, #eaf5ee); font-size: .8rem; font-weight: 750; letter-spacing: .02em; }
+.who { display: grid; min-width: 0; gap: 2px; }
+.who strong { overflow: hidden; color: var(--ink); font-size: .88rem; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.who span { display: flex; flex-wrap: wrap; gap: 4px 10px; color: var(--muted); font-size: .76rem; }
+.phone { font-variant-numeric: tabular-nums; }
+.off { padding: 1px 7px; border-radius: 99px; color: var(--muted); background: #efece6; font-size: .66rem; font-weight: 700; }
+.actions { display: flex; align-items: center; gap: 6px; }
+.empty { display: grid; justify-items: center; gap: 10px; padding: 44px 20px; color: var(--muted); text-align: center; }
+.empty span { display: grid; width: 44px; height: 44px; place-items: center; border-radius: 50%; color: var(--green); background: var(--green-soft, #eaf5ee); }
+.empty h3 { margin: 0; color: var(--ink); font-size: .95rem; }
+.empty p { max-width: 380px; margin: 0; font-size: .8rem; line-height: 1.5; }
+.skeleton { padding: 20px; }
+@media (max-width: 640px) {
+  .row { grid-template-columns: 40px minmax(0, 1fr); }
+  .actions { grid-column: 2; }
+}
