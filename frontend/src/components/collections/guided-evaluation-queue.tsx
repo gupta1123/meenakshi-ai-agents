@@ -123,7 +123,7 @@ export function GuidedEvaluationQueue({ scheme, ruleVersionId, latestRun, onErro
   useEffect(() => {
     if (!hasLiveRun) return;
     void load(true);
-    const interval = window.setInterval(() => { if (document.visibilityState === "visible") void load(true); }, scheme === "cd" ? 1_000 : 1_500);
+    const interval = window.setInterval(() => { if (document.visibilityState === "visible") void load(true); }, scheme === "cd" ? 1_000 : 5_000);
     return () => window.clearInterval(interval);
   }, [hasLiveRun, load, scheme]);
   useEffect(() => {

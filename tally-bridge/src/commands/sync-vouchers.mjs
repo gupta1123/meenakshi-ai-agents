@@ -27,6 +27,14 @@ const TARGETED_DAYS_PER_CHUNK = 92;
 const CUSTOMER_BATCH_SIZE = 50;
 const TARGETED_CUSTOMER_LIMIT = 250;
 
+// Turnover Discount reads the same data as a per-MT Cash Discount (invoices,
+// receipts and their bill allocations, plus product quantities), so it uses the
+// same lean field list and the same short, paced date windows. Asking for every
+// field in 31-day windows back to back is what froze Tally.
+function usesPacedLiveRead(scope) {
+  return scope.purpose === "live_cd_evaluation" || scope.purpose === "live_tod_evaluation";
+}
+
 function normalized(value) {
   return String(value ?? "").trim().toLowerCase();
 }
@@ -116,8 +124,8 @@ export async function syncVouchers(command, { config, activeCompany, isCancelled
   const syncRunId = typeof command.payload?.syncRunId === "string" ? command.payload.syncRunId : "";
   const scope = command.payload?.requestedScope && typeof command.payload.requestedScope === "object" ? command.payload.requestedScope : {};
   const customerLedgerNames = uniqueCustomerLedgerNames(scope);
-  const cashDiscountFastPath = scope.purpose === "live_cd_evaluation";
-  const cashDiscountPerMt = cashDiscountFastPath && scope.cdDiscountBasis === "amount_per_tonne";
+  const cashDiscountFastPath = usesPacedLiveRead(scope);
+  const cashDiscountPerMt = cashDiscountFastPath && (scope.purpose === "live_tod_evaluation" || scope.cdDiscountBasis === "amount_per_tonne");
   const localLiveCalculation = cashDiscountFastPath || scope.purpose === "live_tod_evaluation";
   if (!syncRunId && !localLiveCalculation) throw new Error("Voucher sync command did not contain syncRunId.");
   const targeted = customerLedgerNames.length > 0 && customerLedgerNames.length <= TARGETED_CUSTOMER_LIMIT;

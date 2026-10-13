@@ -62,7 +62,7 @@ test("Turnover Discount local fast path needs no cloud voucher-sync record", asy
       },
     }, { config: { tallyUrl: "http://localhost:9000" }, activeCompany: { name: "Test Company", guid: "company-1" }, isCancelled: () => false });
 
-    assert.equal(calls, 1, "TOD live aggregation needs only the voucher export");
+    assert.equal(calls, 4, "a 31-day period is read in four paced windows of at most 10 days, with only voucher exports");
     assert.equal(result.mode, "live_tod_batch_aggregate");
     assert.equal(result.customerAggregates.length, 1);
     assert.equal(result.customerAggregates[0].customerId, "customer-1");

@@ -17,12 +17,16 @@ function validDate(value: unknown): value is string {
 }
 
 export async function POST(request: Request, context: RouteContext) {
+  const startedAt = Date.now();
+  const marks: string[] = [];
+  const mark = (stage: string) => marks.push(`${stage}=${Date.now() - startedAt}ms`);
   try {
     const { companyId } = await context.params;
     if (!isUuid(companyId)) return jsonWithCors(request, { error: "Invalid company id." }, { status: 400 });
     const idempotencyKey = readIdempotencyKey(request);
     if (!idempotencyKey) return jsonWithCors(request, { error: "Idempotency-Key header is required." }, { status: 400 });
     const { organization, company, userId } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
+    mark("access");
     const body = await request.json().catch(() => null) as { asOfDate?: unknown; evaluatedOn?: unknown; evidence?: unknown } | null;
     if (!body || !isLiveTodBatchAggregate(body.evidence)) return jsonWithCors(request, { error: "Valid local Tally evidence is required." }, { status: 400 });
     if (!body.evidence.customerAggregates.length || body.evidence.customerAggregates.length > 10_000) {
@@ -45,7 +49,9 @@ export async function POST(request: Request, context: RouteContext) {
       if (error) throw error;
       return data as CreatedRun;
     }
+    mark("body");
     let run = await createRun();
+    mark("createRun");
     if (run.request_context.batch !== true) {
       // A retry after a successful fan-out returns the original parent, whose
       // batch marker is intentionally removed by the database function.
@@ -72,15 +78,20 @@ export async function POST(request: Request, context: RouteContext) {
     const { error: localModeError } = await supabase.from("evaluation_runs")
       .update({ request_context: { ...run.request_context, ...requestContext } }).eq("id", run.id).eq("company_id", company.id);
     if (localModeError) throw localModeError;
+    mark("markLocal");
     await retireObsoleteEvaluationReads(supabase, { companyId: company.id, runId: run.id });
+    mark("retireReads");
     const { error: fanoutError } = await supabase.rpc("fanout_meenakshi_tod_batch_evaluation", {
       p_parent_run_id: run.id,
       p_company_id: company.id,
       p_batch_result: evidence,
     });
     if (fanoutError) throw fanoutError;
+    mark("fanout");
     const { data: queuedRun, error: queuedError } = await supabase.from("evaluation_runs").select("*").eq("id", run.id).eq("company_id", company.id).single();
     if (queuedError) throw queuedError;
+    mark("done");
+    console.info(`TOD local-result timing customers=${body.evidence.customerAggregates.length} ${marks.join(" ")}`);
     return jsonWithCors(request, { evaluationRun: queuedRun }, { status: 201 });
   } catch (error) {
     if (error instanceof MeenakshiAccessError) return jsonWithCors(request, { error: error.message }, { status: error.status });
