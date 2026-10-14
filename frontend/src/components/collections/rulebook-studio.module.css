@@ -221,7 +221,7 @@
 .editorStep small { font-size: 11px; }
 .editorStep[data-active="true"] { color: var(--green); background: var(--green-soft); }
 .editorStep[data-active="true"] > span { color: #fff; background: var(--green); }
-.editorFooter { position: absolute; right: 0; bottom: 0; left: 0; z-index: 3; display: flex; align-items: center; justify-content: flex-end; gap: 14px; margin: 0; padding: 8px 20px; border-top: 0; background: rgb(255 255 255 / 97%); box-shadow: 0 -8px 18px rgb(50 43 33 / 4%); backdrop-filter: blur(8px); }
+.editorFooter { flex: 0 0 auto; display: flex; align-items: center; justify-content: flex-end; gap: 14px; margin: 0; padding: 8px 20px; border-top: 0; background: rgb(255 255 255 / 97%); box-shadow: 0 -8px 18px rgb(50 43 33 / 4%); backdrop-filter: blur(8px); }
 .editorFooter button { min-width: 176px; min-height: 36px; font-size: 11px; }
 .applyNote { max-width: 330px; color: var(--muted); font-size: 10px; line-height: 1.35; }
 .applySummary { display: grid; border-top: 1px solid #e4e0d8; }
@@ -237,12 +237,10 @@
 :global(.drawer):has(.ruleEditorForm) :global(.drawer-header) h2 { font-size: 15px; letter-spacing: -.02em; }
 :global(.drawer):has(.ruleEditorForm) :global(.drawer-header) :global(.icon-button) { width: 28px; height: 28px; border-radius: 6px; }
 :global(.drawer):has(.ruleEditorForm) :global(.drawer-header) :global(.icon-button) svg { width: 15px; height: 15px; }
-:global(.drawer):has(.ruleEditorForm) :global(.drawer-body) { display: flex; padding: 10px 20px 68px; overflow-x: hidden; }
-.ruleEditorForm { display: flex; flex: 1; min-height: 100%; flex-direction: column; gap: 10px; }
-/* The Save bar is overlaid on the drawer bottom. Scroll containers can drop their
-   bottom padding in flex layouts, so a real spacer keeps the last field (e.g. the
-   5th discount level) scrollable above the bar. */
-.ruleEditorForm::after { content: ""; flex: 0 0 76px; }
+:global(.drawer):has(.ruleEditorForm) :global(.drawer-body) { display: block; padding: 0; overflow: hidden; }
+.ruleEditorForm { display: flex; height: 100%; min-height: 0; flex-direction: column; gap: 0; overflow: hidden; }
+.editorBody { flex: 1 1 auto; min-height: 0; display: grid; align-content: start; gap: 10px; padding: 10px 20px 20px; overflow-y: auto; overflow-x: hidden; }
+/* The fields scroll independently; the Save bar reserves its own space. */
 .ruleEditorForm :global(.rule-editor-scope) { min-height: 0; flex: 1 1 250px; grid-template-rows: auto minmax(0, 1fr) auto auto; overflow: hidden; }
 .ruleEditorForm label { gap: 3px; font-size: 10.5px; font-weight: 650; }
 .ruleEditorForm input,
@@ -291,8 +289,7 @@
   .editorStep:last-child { border-bottom: 0; }
   .editorFooter { align-items: stretch; flex-direction: column; }
   .editorFooter button { width: 100%; }
-  :global(.drawer):has(.ruleEditorForm) :global(.drawer-body) { padding-bottom: 108px; }
-  .ruleEditorForm::after { flex-basis: 116px; }
+  .editorBody { padding-inline: 17px; }
   .applySummary > div { grid-template-columns: 1fr; gap: 4px; }
 }
 

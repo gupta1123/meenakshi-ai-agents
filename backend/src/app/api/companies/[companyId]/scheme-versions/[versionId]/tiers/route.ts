@@ -60,6 +60,7 @@ export async function DELETE(request: Request, context: RouteContext) {
     const { error } = await createSupabaseAdminClient().from("scheme_version_tiers").delete().eq("id", tierId).eq("scheme_version_id", version.id);
     if (error) throw error;
     await appendRulebookAudit({ scope, action: "scheme_version_tier_removed", entityType: "scheme_version", entityId: version.id, previousValue: { tierId } });
+    return jsonWithCors(request, { success: true });
   } catch (error) {
     return rulebookErrorResponse(request, error, "remove TOD tier");
   }

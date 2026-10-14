@@ -8,7 +8,8 @@ import { userFacingError } from "@/lib/user-copy";
 
 import { useCompany } from "./company-context";
 import { standardTonnesFactor } from "./guided-draft-setup";
-import type { ReferenceData, Scheme, VersionDetail } from "./types";
+import { saveTierLevels, validTierLevels } from "./rule-editor-state";
+import type { ReferenceData, Scheme, SchemeDetail, VersionDetail } from "./types";
 import { Button, Drawer, IconButton, InlineMessage } from "./ui";
 import { accessToken } from "./workspace";
 import studio from "./rulebook-studio.module.css";
@@ -137,6 +138,26 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
 
   const sourceVersionId = source?.version.id ?? null;
 
+  async function loadActiveLevels() {
+    if (!company || !scheme || busy) return;
+    setBusy(true);
+    try {
+      const token = await accessToken();
+      if (!token) throw new Error("Sign in again before loading discount levels.");
+      const detail = await apiRequest<SchemeDetail>(token, `/api/companies/${company.id}/schemes/${scheme.id}`, { cache: "no-store" });
+      const active = detail.versions.find((version) => version.status === "active" && version.todBenefitBasis === todBenefitBasis);
+      if (!active) throw new Error("No active rule with the same benefit calculation is available. Add and review the discount levels manually.");
+      const saved = await apiRequest<VersionDetail>(token, `/api/companies/${company.id}/scheme-versions/${active.id}`, { cache: "no-store" });
+      if (!saved.configuration.tiers.length) throw new Error("The active rule has no saved discount levels.");
+      setTodTiers(saved.configuration.tiers.map((tier) => ({ key: tier.id, minimumTonnes: String(tier.minimum_tonnes), benefitValue: String(todBenefitBasis === "amount_per_eligible_tonne" ? tier.discount_amount_per_tonne ?? "" : tier.discount_percentage ?? "") })));
+      setEditorError(null);
+    } catch (cause) {
+      setEditorError({ message: userFacingError(cause, "Could not load the active discount levels."), area: "benefit" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
   useEffect(() => {
     if (!open) return;
     createAttempt.current = null;
@@ -162,12 +183,14 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
     setStockSearch("");
     setExpandedStockGroupIds([]);
     setPickerView(null);
-    setTodTiers(source?.configuration.tiers.length ? source.configuration.tiers.map((tier) => ({ key: tier.id, minimumTonnes: String(tier.minimum_tonnes), benefitValue: String(source.version.todBenefitBasis === "amount_per_eligible_tonne" ? tier.discount_amount_per_tonne ?? "" : tier.discount_percentage ?? "") })) : clientTodTiers());
+    setTodTiers(source ? source.configuration.tiers.map((tier) => ({ key: tier.id, minimumTonnes: String(tier.minimum_tonnes), benefitValue: String(source.version.todBenefitBasis === "amount_per_eligible_tonne" ? tier.discount_amount_per_tonne ?? "" : tier.discount_percentage ?? "") })) : clientTodTiers());
     setTodConversions(source?.configuration.conversions.map((conversion) => ({ key: conversion.source_uom_id, sourceUomId: conversion.source_uom_id, tonnesPerSourceUnit: String(conversion.tonnes_per_source_unit), isBuiltin: conversion.is_builtin })) ?? []);
     setSegments(normalizedSegments(source ?? null));
     setEditingSegmentKey(null);
     setUnitFactors(Object.fromEntries(source?.configuration.conversions.map((conversion) => [conversion.source_uom_id, String(conversion.tonnes_per_source_unit)]) ?? []));
-    setEditorError(null);
+    setEditorError(type === "tod" && source && !source.configuration.tiers.length
+      ? { message: "This draft has no saved discount levels. Add and review its levels before saving; default rates have not been substituted.", area: "benefit" }
+      : null);
     onError(null);
   }, [open, sourceVersionId, scheme?.id, editingDraft, preparingUpdate]);
 
@@ -209,8 +232,8 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
         setEditorError({ message: "Select at least one eligible product or product group.", area: "general" });
         return;
       }
-      if (!todTiers.length || todTiers.some((tier) => !tier.minimumTonnes || !tier.benefitValue)) {
-        setEditorError({ message: "Complete at least one valid discount level.", area: "benefit" });
+      if (!validTierLevels(todTiers)) {
+        setEditorError({ message: "Enter positive benefits and unique, non-negative minimum quantities for every discount level.", area: "benefit" });
         return;
       }
       if (todConversions.some((conversion) => !conversion.sourceUomId || !conversion.tonnesPerSourceUnit)) {
@@ -323,15 +346,17 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
         await Promise.all([
           ...selectedStockTargets.filter((target) => !existingStocks.has(target)).map((target) => { const [kind, id] = target.split(":"); return apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/stocks`, { method: "POST", body: jsonBody({ kind, id }) }); }),
           ...[...existingStocks].filter((target) => !nextStocks.has(target)).map((target) => { const [kind, id] = target.split(":"); return apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/stocks`, { method: "DELETE", body: jsonBody({ kind, id }) }); }),
-          ...draft.configuration.tiers.map((tier) => apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/tiers`, { method: "DELETE", body: jsonBody({ tierId: tier.id }) })),
         ]);
         const existingConversions = new Map(draft.configuration.conversions.map((item) => [item.source_uom_id, item]));
         const nextConversionIds = new Set(todConversions.map((item) => item.sourceUomId));
         await Promise.all([
           ...[...existingConversions.keys()].filter((id) => !nextConversionIds.has(id)).map((sourceUomId) => apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/conversions`, { method: "DELETE", body: jsonBody({ sourceUomId }) })),
           ...todConversions.map((conversion) => apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/conversions`, { method: "POST", body: jsonBody({ sourceUomId: conversion.sourceUomId, tonnesPerSourceUnit: conversion.tonnesPerSourceUnit, isBuiltin: conversion.isBuiltin }) })),
-          ...todTiers.map((tier) => apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/tiers`, { method: "POST", body: jsonBody(todBenefitBasis === "amount_per_eligible_tonne" ? { minimumTonnes: tier.minimumTonnes, amountPerTonne: tier.benefitValue } : { minimumTonnes: tier.minimumTonnes, discountPercentage: tier.benefitValue }) })),
         ]);
+        await saveTierLevels(draft.configuration.tiers, todTiers, {
+          save: (tier) => apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/tiers`, { method: "POST", body: jsonBody(todBenefitBasis === "amount_per_eligible_tonne" ? { minimumTonnes: tier.minimumTonnes, amountPerTonne: tier.benefitValue } : { minimumTonnes: tier.minimumTonnes, discountPercentage: tier.benefitValue }) }),
+          remove: (tier) => apiRequest(token, `/api/companies/${company.id}/scheme-versions/${versionId}/tiers`, { method: "DELETE", body: jsonBody({ tierId: tier.id }) }),
+        });
       }
       if (newRule) {
         await onSaved({ schemeId: newRule.scheme.id, versionId });
@@ -367,7 +392,7 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
         } catch { /* Preserve the uncertain outcome; never claim rollback. */ }
       }
       const prefix = updating
-        ? editingDraft ? "Could not save these changes." : "Could not start editing this rule."
+        ? "Could not finish saving these changes. Refresh Rulebook before retrying."
         : "Could not confirm whether this rule was saved. Refresh Rulebook before trying again.";
       const message = userFacingError(cause, prefix);
       const area = /tier|benefit|calculated/i.test(message) ? "benefit" : /period|start|end date|active through/i.test(message) ? "period" : "general";
@@ -532,6 +557,7 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
       event.preventDefault();
       void submit(event.currentTarget);
     }}>
+      <div className={studio.editorBody}>
       {editorError?.area === "general" && <InlineMessage tone="error">{editorError.message}</InlineMessage>}
       {!scheme &&
         <div className="rule-type-choice" role="radiogroup" aria-label="Discount type">
@@ -632,10 +658,12 @@ export function RuleEditor({ open, scheme, source, reference, onClose, onSaved, 
 
         <section className="rule-editor-section">
           <div className="rule-editor-section-heading"><div><h3>Discount levels</h3><p>The highest level reached applies to the customer’s full eligible quantity for that period.</p></div><Button type="button" className="button-secondary rule-editor-add" onClick={() => setTodTiers((current) => [...current, emptyTier()])}><Plus size={15} />Add level</Button></div>
+          {editingDraft && !todTiers.length && <Button type="button" className="button-secondary" disabled={busy} onClick={() => void loadActiveLevels()}>Load levels from active rule for review</Button>}
           <div className="tod-tier-list"><div className="tod-tier-header"><span /><span>Purchase at least</span><span>{todBenefitBasis === "amount_per_eligible_tonne" ? "Amount" : "Discount"}</span><span /></div>{todTiers.map((tier, index) => <div className="tod-tier-row" key={tier.key}><span className="cd-slab-index">{index + 1}</span><div className="input-with-suffix"><input aria-label={`Minimum MT, level ${index + 1}`} inputMode="decimal" value={tier.minimumTonnes} onChange={(event) => setTodTiers((current) => current.map((item) => item.key === tier.key ? { ...item, minimumTonnes: event.target.value } : item))} /><span>MT</span></div><div className="input-with-suffix"><input aria-label={`Benefit, level ${index + 1}`} inputMode="decimal" value={tier.benefitValue} onChange={(event) => setTodTiers((current) => current.map((item) => item.key === tier.key ? { ...item, benefitValue: event.target.value } : item))} /><span>{todBenefitBasis === "amount_per_eligible_tonne" ? "₹ / MT" : "%"}</span></div><IconButton label={`Remove discount level ${index + 1}`} disabled={todTiers.length === 1} onClick={() => setTodTiers((current) => current.filter((item) => item.key !== tier.key))}><Trash2 size={15} /></IconButton></div>)}</div>
         </section>
       </div>}
 
+      </div>
       <div className={studio.editorFooter}>
         {scheme && <span className={studio.applyNote}>Saving validates and applies the rule. Its previous version remains in history.</span>}
         <Button type="submit" disabled={busy || (preparingUpdate && unchanged) || Boolean(selectedType === "cd"

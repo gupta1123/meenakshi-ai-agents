@@ -10,7 +10,7 @@
     "dev": "next dev --turbopack --port 3000",
     "build": "next build --turbopack",
     "start": "next start --port 3000",
-    "test": "node -e \"console.log('no frontend unit tests')\"",
+    "test": "node --test src/components/collections/rule-editor-state.test.mjs",
     "lint": "eslint .",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
