@@ -9,6 +9,7 @@ import { supabase } from "@/lib/supabase";
 import { userFacingDetail, userFacingError } from "@/lib/user-copy";
 
 import { useCompany } from "./company-context";
+import { useTallyCompanySelection } from "./tally-company-selection";
 import { WorkspacePageHeader } from "./app-shell";
 import type { TallyHealth } from "./types";
 import { Button, InlineMessage, Skeleton } from "./ui";
@@ -187,6 +188,7 @@ function Step({ state, label, detail }: { state: StepState; label: string; detai
 
 export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: TallyHealth | null; onRefresh?: () => Promise<void> }) {
   const { company, organization, companyKey, isAdministrator, availableCompanies } = useCompany();
+  const { selectCompany } = useTallyCompanySelection();
   const health = initialHealth ?? null;
   const [connectors, setConnectors] = useState<Connector[]>([]);
   const [showOlderComputers, setShowOlderComputers] = useState(false);
@@ -229,7 +231,8 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
   // The browser only reflects its live selection; it never picks another
   // detected company on the user's behalf.
   const selectedTallyCompany = activeTallyCompany;
-  const selectedCompanyAlreadyRegistered = Boolean(selectedTallyCompany && availableCompanies.some((item) => item.company.tally_company_guid.toLowerCase() === selectedTallyCompany.guid.toLowerCase()));
+  const registeredActiveCompany = selectedTallyCompany ? availableCompanies.find((item) => item.organization.id === organization.id && item.company.tally_company_guid.toLowerCase() === selectedTallyCompany.guid.toLowerCase())?.company : null;
+  const selectedCompanyAlreadyRegistered = Boolean(registeredActiveCompany);
   const selectedConnectorCanTakeCompany = Boolean(
     connectorId
     && connectorId !== health?.connector?.id
@@ -474,6 +477,30 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
     }
   }
 
+  async function connectRegisteredActiveCompany() {
+    if (!connectorId || !registeredActiveCompany || !bridgeConnected || !tallyReachable) return;
+    const accessToken = await token();
+    if (!accessToken) return;
+    setAssigningCompany(true);
+    setActionError(null);
+    setNotice(null);
+    try {
+      await apiRequest(accessToken, `/api/connectors/${connectorId}/bindings`, {
+        method: "POST",
+        body: jsonBody({ companyId: registeredActiveCompany.id }),
+      });
+      setLaunching(false);
+      setAddingComputer(false);
+      setNotice(`${registeredActiveCompany.tally_company_name} is linked to this computer. Confirming the connection…`);
+      selectCompany(registeredActiveCompany.id);
+      await refresh();
+    } catch (cause) {
+      setActionError(userFacingError(cause, "Could not connect this Tally company."));
+    } finally {
+      setAssigningCompany(false);
+    }
+  }
+
   async function disconnect() {
     if (!connectorId) return;
     const accessToken = await token();
@@ -497,7 +524,7 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
   if (!health) return <TallyReadinessSkeleton />;
 
   // One headline, one sentence, one next action.
-  const waitingForConnector = launching || addingComputer;
+  const waitingForConnector = !bridgeConnected && (launching || addingComputer);
   const useNewComputer = !connectorId || selectedConnectorHasClaimedMachine;
   const connectLabel = useNewComputer ? "Connect this computer" : "Connect Tally";
   const recheckButton = (primary = false) => <Button type="button" className={primary ? "" : "button-secondary"} disabled={rechecking} onClick={() => void recheck()}><RefreshCw size={15} className={rechecking ? s.spin : undefined} />{rechecking ? "Checking…" : "Check again"}</Button>;
@@ -520,6 +547,11 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
     title = "Use this computer for this company?";
     description = `${company.tally_company_name} is open here, but it is saved to another computer. Switch it to this one to continue.`;
     primary = isAdministrator ? <Button type="button" disabled={assigningCompany} onClick={() => void assignCompanyToSelectedComputer()}><Monitor size={15} />{assigningCompany ? "Switching…" : "Use this computer"}</Button> : null;
+  } else if (bridgeConnected && tallyReachable && registeredActiveCompany && !connectorVerified) {
+    tone = "attention";
+    title = `Connect ${registeredActiveCompany.tally_company_name}`;
+    description = `${registeredActiveCompany.tally_company_name} is open in Tally. Link it to this computer and open its workspace.`;
+    primary = isAdministrator ? <Button type="button" disabled={assigningCompany} onClick={() => void connectRegisteredActiveCompany()}><PlugZap size={15} />{assigningCompany ? "Connecting…" : "Connect company"}</Button> : null;
   } else if (hasMismatch) {
     tone = "attention";
     title = `Open ${company.tally_company_name} in Tally`;
