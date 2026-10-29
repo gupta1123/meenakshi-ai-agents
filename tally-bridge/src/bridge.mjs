@@ -6,8 +6,9 @@ import { configurePdfCapture, displayConfigPath, getPdfExportDirectory, loadConf
 import { executeCommand } from "./commands/dispatch.mjs";
 import { probeActiveCompany, probeCurrentCompanyName, probeTallyCompanies, probeMasterChangeCounter } from "./tally/company-probe.mjs";
 import { startLocalApi } from "./local-api.mjs";
+import { busyTallySnapshot, tallyActivity, tryAcquireTallyTask, recordVerifiedCompany } from "./tally/read-coordinator.mjs";
 
-const BRIDGE_VERSION = "0.2.3";
+const BRIDGE_VERSION = "0.3.8";
 const MAX_RETRY_DELAY_MS = 60_000;
 const COMMAND_LEASE_RENEWAL_MS = 30_000;
 
@@ -99,16 +100,26 @@ async function readTallySnapshot(config, cachedCompanies = null) {
 const CHANGE_COUNTER_INTERVAL_MS = 3 * 60 * 1000;
 let changeCounter = { value: null, readAt: 0, company: null };
 
-async function heartbeat(config, cachedCompanies = null) {
-  const snapshot = await readTallySnapshot(config, cachedCompanies);
-  if (snapshot.companyLoaded && snapshot.activeCompany?.name) {
-    const company = snapshot.activeCompany.name;
-    if (company !== changeCounter.company || Date.now() - changeCounter.readAt > CHANGE_COUNTER_INTERVAL_MS) {
-      const value = await probeMasterChangeCounter(config.tallyUrl, company).catch(() => null);
-      changeCounter = { value: value ?? (company === changeCounter.company ? changeCounter.value : null), readAt: Date.now(), company };
-    }
-    snapshot.masterChangeCounter = changeCounter.company === company ? changeCounter.value : null;
+async function heartbeat(config, cachedCompanies = null, previousSnapshot = null) {
+  const task = tryAcquireTallyTask(config.tallyUrl, "connection_check");
+  if (!task) {
+    const snapshot = busyTallySnapshot(tallyActivity(config.tallyUrl), previousSnapshot);
+    const cloud = await sendHeartbeat(config, BRIDGE_VERSION, snapshot);
+    console.log(`MEENAKSHI_STATUS ${JSON.stringify({ ...snapshot, cloudConnected: true, bindings: cloud.bindings ?? [] })}`);
+    return snapshot;
   }
+  const snapshot = await task.run(async () => {
+    const snapshot = await readTallySnapshot(config, cachedCompanies);
+    if (snapshot.companyLoaded && snapshot.activeCompany?.name) {
+      const company = snapshot.activeCompany.name;
+      if (company !== changeCounter.company || Date.now() - changeCounter.readAt > CHANGE_COUNTER_INTERVAL_MS) {
+        const value = await probeMasterChangeCounter(config.tallyUrl, company).catch(() => null);
+        changeCounter = { value: value ?? (company === changeCounter.company ? changeCounter.value : null), readAt: Date.now(), company };
+      }
+      snapshot.masterChangeCounter = changeCounter.company === company ? changeCounter.value : null;
+    }
+    return snapshot;
+  });
   const cloud = await sendHeartbeat(config, BRIDGE_VERSION, snapshot);
   console.log(`MEENAKSHI_STATUS ${JSON.stringify({ ...snapshot, cloudConnected: true, bindings: cloud.bindings ?? [] })}`);
   return snapshot;
@@ -155,6 +166,7 @@ function commandLease(config, command, activeCompany) {
   heartbeatTimer.unref?.();
   return {
     get valid() { return valid; },
+    setActiveCompany(company) { activeCompany = company; },
     stop() { clearInterval(timer); clearInterval(heartbeatTimer); },
   };
 }
@@ -170,38 +182,48 @@ function tallyCompaniesMatch(expectedCompany, activeCompany) {
 
 async function processOneCommand(config, activeCompany) {
   if (!activeCompany) return false;
-  const { command } = await claimNextCommand(config);
-  if (!command) return false;
-  commandActivity(command, "running");
-  const lease = commandLease(config, command, activeCompany);
-  try {
-    if (!tallyCompaniesMatch(command.expectedTallyCompany, activeCompany)) {
+  const task = tryAcquireTallyTask(config.tallyUrl, "command_poll");
+  if (!task) return false;
+  return task.run(async () => {
+    const { command } = await claimNextCommand(config);
+    if (!command) return false;
+    task.setName("cloud_command");
+    commandActivity(command, "running");
+    const lease = commandLease(config, command, activeCompany);
+    try {
+      // A cached heartbeat is liveness evidence only. Recheck identity inside
+      // this exclusive task before any read or accounting command is executed.
+      activeCompany = await probeActiveCompany(config.tallyUrl);
+      recordVerifiedCompany(config.tallyUrl, activeCompany);
+      lease.setActiveCompany(activeCompany);
+      if (!tallyCompaniesMatch(command.expectedTallyCompany, activeCompany)) {
+        lease.stop();
+        await reportCommandResult(config, command.id, {
+          status: "failed",
+          error: "The active Tally company does not match this Meenakshi command.",
+          result: { activeCompany, expectedCompany: command.expectedTallyCompany },
+          attempt: command.attempt,
+        });
+        commandActivity(command, "failed", "The active Tally company does not match Meenakshi.");
+        return true;
+      }
+      const result = await executeCommand(command, { config, activeCompany, isCancelled: () => !lease.valid });
       lease.stop();
+      if (!lease.valid) throw new Error("The command lease was lost before its result could be confirmed.");
+      await reportCommandResult(config, command.id, { status: "verified", result, attempt: command.attempt });
+      commandActivity(command, "completed");
+    } catch (error) {
+      lease.stop();
+      if (!lease.valid) throw error;
       await reportCommandResult(config, command.id, {
         status: "failed",
-        error: "The active Tally company does not match this Meenakshi command.",
-        result: { activeCompany, expectedCompany: command.expectedTallyCompany },
+        error: error instanceof Error ? error.message : String(error),
         attempt: command.attempt,
       });
-      commandActivity(command, "failed", "The active Tally company does not match Meenakshi.");
-      return true;
+      commandActivity(command, "failed", error instanceof Error ? error.message : String(error));
     }
-    const result = await executeCommand(command, { config, activeCompany, isCancelled: () => !lease.valid });
-    lease.stop();
-    if (!lease.valid) throw new Error("The command lease was lost before its result could be confirmed.");
-    await reportCommandResult(config, command.id, { status: "verified", result, attempt: command.attempt });
-    commandActivity(command, "completed");
-  } catch (error) {
-    lease.stop();
-    if (!lease.valid) throw error;
-    await reportCommandResult(config, command.id, {
-      status: "failed",
-      error: error instanceof Error ? error.message : String(error),
-      attempt: command.attempt,
-    });
-    commandActivity(command, "failed", error instanceof Error ? error.message : String(error));
-  }
-  return true;
+    return true;
+  });
 }
 
 function isTerminalConnectorError(error) {
@@ -226,7 +248,7 @@ async function startBridge(config) {
       const now = Date.now();
       if (!snapshot || now >= nextHeartbeatAt) {
         const refreshCompanyList = now >= nextCompanyListAt || cachedCompanies.length === 0;
-        snapshot = await heartbeat(config, refreshCompanyList ? null : cachedCompanies);
+        snapshot = await heartbeat(config, refreshCompanyList ? null : cachedCompanies, snapshot);
         cachedCompanies = snapshot.availableCompanies;
         nextHeartbeatAt = Date.now() + config.heartbeatIntervalMs;
         if (refreshCompanyList || snapshot.companySnapshotFresh) nextCompanyListAt = Date.now() + config.companyListIntervalMs;
@@ -249,6 +271,10 @@ async function startBridge(config) {
 async function run() {
   const [command = ""] = process.argv.slice(2);
   const args = parseArguments(process.argv.slice(3));
+  if (command === "--version") {
+    console.log(BRIDGE_VERSION);
+    return;
+  }
   if (command === "machine-id") {
     console.log(stableMachineFingerprint());
     return;

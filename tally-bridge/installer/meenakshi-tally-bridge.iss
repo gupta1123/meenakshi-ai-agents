@@ -1,5 +1,5 @@
 #define AppName "Meenakshi Tally Connector"
-#define AppVersion "0.3.1"
+#define AppVersion "0.3.8"
 #define AppPublisher "Meenakshi"
 #define AppInstallDir "C:\Meenakshi\tally-bridge"
 #define AppExeName "Meenakshi Tally Connector.exe"
@@ -14,7 +14,7 @@ DefaultDirName={#AppInstallDir}
 DisableProgramGroupPage=yes
 DisableReadyPage=no
 OutputDir=output
-OutputBaseFilename=MeenakshiTallyConnectorSetup
+OutputBaseFilename=MeenakshiTallyConnectorSetup-{#AppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -28,6 +28,8 @@ VersionInfoCompany={#AppPublisher}
 VersionInfoDescription={#AppName} Setup
 VersionInfoProductName={#AppName}
 VersionInfoProductVersion={#AppVersion}
+VersionInfoVersion={#AppVersion}
+VersionInfoTextVersion={#AppVersion}
 SetupIconFile=electron-app\app.ico
 UninstallDisplayIcon={app}\resources\app\app.ico
 

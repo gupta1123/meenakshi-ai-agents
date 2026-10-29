@@ -33,6 +33,8 @@ Configuration is stored outside this repository in `%APPDATA%\Meenakshi\TallyBri
 
 ## Meenakshi desktop connector
 
+The current release is **0.3.8**. Install `installer/output/MeenakshiTallyConnectorSetup-0.3.8.exe` on the Windows computer running the connector. Close the connector before upgrading and install into the existing location; its configuration remains in `%APPDATA%\Meenakshi\TallyBridge`. The connector footer displays its version. Open Tally Prime and load the required company before reconnecting from the portal. If prompted, choose **Use this computer** to assign the company to the connected computer.
+
 The repository now includes an isolated Electron shell and Windows installer definition under `installer/`. It uses the `meenakshi-tally://` protocol, installs into `C:\Meenakshi\tally-bridge`, and preserves the bridge configuration in `%APPDATA%\Meenakshi\TallyBridge`. It does not read, write, or register the Gajkesari connector.
 
 Validate the installer sources from this folder with:

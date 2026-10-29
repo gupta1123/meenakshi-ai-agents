@@ -32,6 +32,12 @@ async function request(config, path, { method = "GET", body, timeoutMs = DEFAULT
     return payload;
   } catch (error) {
     if (error?.name === "AbortError") throw new BridgeApiError(`Meenakshi API did not respond within ${timeoutMs / 1000} seconds.`);
+    if (error instanceof TypeError && error.message === "fetch failed") {
+      const code = error.cause?.code || error.cause?.errors?.[0]?.code || "network error";
+      const failure = new BridgeApiError(`Cannot reach the Meenakshi server at ${new URL(config.apiBase).origin} (${code}). Check this computer's internet, proxy, and certificate settings, then retry.`);
+      failure.cause = error;
+      throw failure;
+    }
     throw error;
   } finally {
     clearTimeout(timeout);

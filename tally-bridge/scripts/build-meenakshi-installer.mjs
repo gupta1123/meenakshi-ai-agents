@@ -11,6 +11,8 @@ const sourceRoot = path.join(bridgeRoot, "src");
 const payloadRoot = path.join(installerRoot, "payload-clean");
 const outputRoot = path.join(installerRoot, "output");
 const definitionPath = path.join(installerRoot, "meenakshi-tally-bridge.iss");
+const bridgeVersion = JSON.parse(fs.readFileSync(path.join(bridgeRoot, "package.json"), "utf8")).version;
+const installerFilename = `MeenakshiTallyConnectorSetup-${bridgeVersion}.exe`;
 const connector = {
   name: "Meenakshi Tally Connector",
   executableName: "Meenakshi Tally Connector.exe",
@@ -29,6 +31,16 @@ function ensureContains(filePath, value, label) {
 }
 
 function validateSources() {
+  ensureContains(path.join(sourceRoot, "bridge.mjs"), `const BRIDGE_VERSION = "${bridgeVersion}";`, "Bridge runtime version");
+  ensureContains(definitionPath, `#define AppVersion "${bridgeVersion}"`, "Installer version");
+  ensureContains(definitionPath, "OutputBaseFilename=MeenakshiTallyConnectorSetup-{#AppVersion}", "Versioned installer filename");
+  ensureContains(path.join(electronAppRoot, "index.html"), `Version ${bridgeVersion} ·`, "Visible connector version");
+  for (const packagePath of [path.join(bridgeRoot, "package-lock.json"), path.join(electronAppRoot, "package.json"), path.join(electronAppRoot, "package-lock.json")]) {
+    const metadata = JSON.parse(fs.readFileSync(packagePath, "utf8"));
+    if (metadata.version !== bridgeVersion || (metadata.packages?.[""] && metadata.packages[""].version !== bridgeVersion)) {
+      throw new Error(`Connector version mismatch in ${packagePath}; expected ${bridgeVersion}.`);
+    }
+  }
   ensureFile(path.join(electronAppRoot, "main.mjs"), "Electron main process");
   ensureFile(path.join(electronAppRoot, "preload.cjs"), "Electron preload");
   ensureFile(path.join(electronAppRoot, "index.html"), "Electron status page");
@@ -118,4 +130,4 @@ const compiler = findInnoCompiler();
 buildPayload(runtimeExecutable);
 fs.mkdirSync(outputRoot, { recursive: true });
 execFileSync(compiler, [definitionPath], { cwd: installerRoot, stdio: "inherit" });
-console.log(`Created ${path.join(outputRoot, "MeenakshiTallyConnectorSetup.exe")}.`);
+console.log(`Created ${path.join(outputRoot, installerFilename)}.`);
