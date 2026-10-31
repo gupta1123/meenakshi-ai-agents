@@ -1,5 +1,5 @@
 #define AppName "Meenakshi Tally Connector"
-#define AppVersion "0.3.2"
+#define AppVersion "0.3.9"
 #define AppPublisher "Meenakshi"
 #define AppInstallDir "C:\Meenakshi\tally-bridge"
 #define AppExeName "Meenakshi Tally Connector.exe"
@@ -14,7 +14,7 @@ DefaultDirName={#AppInstallDir}
 DisableProgramGroupPage=yes
 DisableReadyPage=no
 OutputDir=output
-OutputBaseFilename=MeenakshiTallyConnectorSetup
+OutputBaseFilename=MeenakshiTallyConnectorSetup-{#AppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -49,6 +49,7 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\resources\app\app.ico"
+Name: "{group}\{#AppName} logs"; Filename: "{localappdata}\Meenakshi\logs"
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent

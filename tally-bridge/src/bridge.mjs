@@ -7,7 +7,7 @@ import { executeCommand } from "./commands/dispatch.mjs";
 import { probeActiveCompany, probeCurrentCompanyName, probeTallyCompanies, probeMasterChangeCounter } from "./tally/company-probe.mjs";
 import { startLocalApi } from "./local-api.mjs";
 
-const BRIDGE_VERSION = "0.2.3";
+import { BRIDGE_VERSION } from "./version.mjs";
 const MAX_RETRY_DELAY_MS = 60_000;
 const COMMAND_LEASE_RENEWAL_MS = 30_000;
 

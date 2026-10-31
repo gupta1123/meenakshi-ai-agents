@@ -7,6 +7,8 @@ import { evaluateCashDiscountSettlements } from "./local-cd-settlement-evaluator
 import { evaluateLocalTurnoverDiscount } from "./local-tod-evaluator.mjs";
 import { probeActiveCompany } from "./tally/company-probe.mjs";
 import { readNoteEInvoice } from "./tally/einvoice.mjs";
+import { logLine } from "./connector-log.mjs";
+import { BRIDGE_VERSION } from "./version.mjs";
 
 export const LOCAL_TALLY_PORT = 3219;
 const MAX_REQUEST_BYTES = 2 * 1024 * 1024;
@@ -53,10 +55,20 @@ function readJson(request) {
   });
 }
 
+// Turns low-level Tally/network wording into something a person can act on.
+function plainTallyError(message) {
+  const text = String(message ?? "");
+  if (/ECONNREFUSED|ECONNRESET|fetch failed|connect/i.test(text) && !/Open .* in Tally/i.test(text)) return "Tally did not answer. Make sure Tally Prime is open with the company loaded, then calculate again.";
+  if (/timed out|timeout|ETIMEDOUT|did not answer within/i.test(text)) return "Tally didn't answer in time. Wait a minute for Tally to settle, then calculate again.";
+  return text || "The calculation could not be completed.";
+}
+
 export function startLocalApi(config) {
   let stopping = false;
   // Progress of the calculation in flight, read by the browser while it waits.
   let progress = null;
+  // Only one Tally read at a time: overlapping reads freeze Tally.
+  let activeRead = null;
   let retryTimer = null;
   const server = http.createServer(async (request, response) => {
     const origin = String(request.headers.origin ?? "").replace(/\/+$/, "");
@@ -84,7 +96,7 @@ export function startLocalApi(config) {
     if (request.method === "GET" && request.url === "/v1/identity") {
       // The connector ID is not a credential. It lets this browser choose
       // the connector running on this PC without exposing pairing secrets.
-      respond(response, 200, { connectorId: config.connectorId }, origin, config);
+      respond(response, 200, { connectorId: config.connectorId, version: BRIDGE_VERSION }, origin, config);
       return;
     }
     // IRN / Ack / signed QR of one Credit or Debit Note, for its PDF.
@@ -112,6 +124,18 @@ export function startLocalApi(config) {
       return;
     }
     const startedAt = performance.now();
+    const task = isCashDiscount ? "cash_discount" : "turnover_discount";
+    if (activeRead) {
+      logLine("WARN", `${task} refused: Tally is busy with ${activeRead.task}`);
+      respond(response, 409, { error: "Tally is busy with another read. Wait for it to finish, then calculate again.", failedStep: "tally_read", busy: true }, origin, config);
+      return;
+    }
+    let cancelled = false;
+    let step = "tally_read";
+    const lock = { task };
+    activeRead = lock;
+    // Closing the page (or reloading) ends the request; stop reading Tally.
+    response.on("close", () => { if (!response.writableEnded) { cancelled = true; logLine("INFO", `${task} cancelled: browser closed the request`); } });
     try {
       const body = await readJson(request);
       const expectedCompany = body.expectedCompany && typeof body.expectedCompany === "object" ? body.expectedCompany : {};
@@ -121,23 +145,40 @@ export function startLocalApi(config) {
         ? normalized(activeCompany.guid) === normalized(expectedGuid)
         : Boolean(expectedCompany.name) && normalized(activeCompany.name) === normalized(expectedCompany.name);
       if (!sameCompany) {
-        throw new Error(`Open ${expectedCompany.name || "the selected company"} in Tally Prime before running this calculation.`);
+        throw new Error(`Open ${expectedCompany.name || "the selected company"} in Tally Prime first, then calculate again.`);
       }
       const command = { payload: { evaluationRunId: null, voucherScope: body.voucherScope } };
-      progress = { task: isCashDiscount ? "cash_discount" : "turnover_discount", stage: "reading", done: 0, total: null, from: null, to: null, startedAt: new Date().toISOString() };
+      progress = { task, stage: "reading", done: 0, total: null, from: null, to: null, startedAt: new Date().toISOString() };
+      logLine("INFO", `${task} started`, { evaluatedOn: body.evaluatedOn, from: body.voucherScope?.from ?? body.periodStart, to: body.voucherScope?.to ?? body.periodEnd });
       const onProgress = (update) => { progress = { ...progress, ...update }; };
+      const readStarted = performance.now();
       const evidence = isCashDiscount
-        ? await fetchLiveCdEvidence(command, { config, activeCompany, isCancelled: () => false, onProgress }, null)
-        : await fetchLiveTodEvidence(command, { config, activeCompany, isCancelled: () => false });
+        ? await fetchLiveCdEvidence(command, { config, activeCompany, isCancelled: () => cancelled, onProgress }, null)
+        : await fetchLiveTodEvidence(command, { config, activeCompany, isCancelled: () => cancelled });
+      const tallyReadMs = Math.round(performance.now() - readStarted);
+      if (cancelled) throw new Error("The calculation was cancelled.");
+      step = "calculation";
       onProgress({ stage: "calculating" });
+      const calcStarted = performance.now();
       const calculation = isCashDiscount
         ? body.rule?.cdDiscountBasis === "amount_per_tonne"
           ? evaluateCashDiscountSettlements(body.rule, body.evaluatedOn, evidence.invoices)
           : evaluateLocalCashDiscount(body.rule, body.evaluatedOn, evidence.invoices)
         : evaluateLocalTurnoverDiscount(body.rule, body.evaluatedOn, body.periodStart, body.periodEnd, evidence.customerAggregates);
-      respond(response, 200, { ...calculation, evidence, durationMs: Math.round(performance.now() - startedAt) }, origin, config);
+      const calculationMs = Math.round(performance.now() - calcStarted);
+      const durationMs = Math.round(performance.now() - startedAt);
+      progress = { ...progress, stage: "done" };
+      logLine("INFO", `${task} finished`, { tallyReadMs, calculationMs, durationMs });
+      respond(response, 200, { ...calculation, evidence, durationMs, timings: { tallyReadMs, calculationMs } }, origin, config);
     } catch (error) {
-      respond(response, 422, { error: error instanceof Error ? error.message : String(error), durationMs: Math.round(performance.now() - startedAt) }, origin, config);
+      const raw = error instanceof Error ? error.message : String(error);
+      const message = plainTallyError(raw);
+      const lastProgress = progress ? { stage: progress.stage, done: progress.done, total: progress.total, from: progress.from, to: progress.to } : null;
+      progress = { ...(progress ?? {}), stage: "failed", error: message };
+      logLine("ERROR", `${task} failed at ${step}: ${raw}`, lastProgress ?? undefined);
+      respond(response, 422, { error: message, failedStep: step, cancelled, lastProgress, durationMs: Math.round(performance.now() - startedAt) }, origin, config);
+    } finally {
+      if (activeRead === lock) activeRead = null;
     }
   });
   const listen = () => {

@@ -9,7 +9,8 @@ import { apiRequest, jsonBody } from "@/lib/api";
 import { staffStatusLabel } from "@/lib/staff-status";
 import { userFacingDetail, userFacingError, userLabel } from "@/lib/user-copy";
 import { supabase } from "@/lib/supabase";
-import { runLocalCashDiscount, runLocalTurnoverDiscount, type LocalCdBootstrap, type LocalCdInvoiceCheck, type LocalCdRow, type LocalTodBootstrap } from "@/lib/local-tally";
+import { describeCalculationFailure, finishCalculationEvent, startCalculationEvent, type CalculationStep } from "@/lib/calculation-events";
+import { readLocalConnectorVersion, runLocalCashDiscount, runLocalTurnoverDiscount, type LocalCdBootstrap, type LocalCdInvoiceCheck, type LocalCdRow, type LocalTodBootstrap } from "@/lib/local-tally";
 
 import { AppShell, WorkspacePageHeader } from "./app-shell";
 import { useCompany } from "./company-context";
@@ -769,12 +770,27 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     setHistoryTodRows(null);
     setSavingTod(true);
     setCalculationStartedAt(new Date().toISOString());
+    let eventId: string | null = null;
+    let eventToken: string | null = null;
+    let step: CalculationStep = "server_prepare";
+    let version: string | null = null;
+    const timings: Record<string, number> = {};
     try {
+      eventToken = await accessToken();
+      version = await readLocalConnectorVersion();
+      if (eventToken) eventId = await startCalculationEvent(eventToken, company.id, "tod", null, asOfDate, version);
       // Rule periods can differ between customers because a prior TOD result
       // locks its period. Always refresh the lightweight bootstrap before
       // reading Tally so each group is calculated against the right period.
+      const prepareStarted = performance.now();
       const bootstrap = await preloadLocalTodBootstrap(asOfDate, true);
+      timings.serverPrepareMs = Math.round(performance.now() - prepareStarted);
+      step = "tally_read";
+      const readStarted = performance.now();
       const result = await runLocalTurnoverDiscount(bootstrap);
+      timings.tallyAndCalculationMs = Math.round(performance.now() - readStarted);
+      step = "save";
+      const saveStarted = performance.now();
       if (result.rows[0]) setSelectedTodPeriodKey(`${result.rows[0].periodStart}:${result.rows[0].periodEnd}`);
       // Keep the user on the progress view until every customer is saved;
       // showing unsaved rows (with no actions) made it look finished early.
@@ -804,6 +820,9 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
           throw new Error("This calculation did not finish. Review Calculation history before starting another check.");
         }
         if (saved.evaluationRun.status === "completed") {
+          timings.saveMs = Math.round(performance.now() - saveStarted);
+          await finishCalculationEvent(token, company.id, eventId, { outcome: "succeeded", timings, connectorVersion: version });
+          eventId = null;
           await refresh();
           setLocalTodRows([]);
           setShowEvaluationQueue(false);
@@ -814,8 +833,12 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       }
       throw new Error("The customer results are still being finalized. Open Calculation history before trying again.");
     } catch (cause) {
+      if (eventToken && eventId) {
+        const failure = describeCalculationFailure(cause, step);
+        await finishCalculationEvent(eventToken, company.id, eventId, { outcome: failure.outcome, step: failure.step, reason: failure.reason, timings, lastProgress: failure.lastProgress, connectorVersion: version });
+      }
       const message = cause instanceof Error ? cause.message : String(cause);
-      const connectorNeedsUpgrade = /route not found|failed to fetch|networkerror|load failed/i.test(message);
+      const connectorNeedsUpgrade = /route not found|failed to fetch|networkerror|load failed|connector on this PC is offline/i.test(message);
       if (!connectorNeedsUpgrade) throw cause;
       const token = await accessToken();
       if (!token) throw cause;

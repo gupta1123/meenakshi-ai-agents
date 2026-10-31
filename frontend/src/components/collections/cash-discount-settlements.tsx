@@ -10,7 +10,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 
 import { apiRequest, jsonBody } from "@/lib/api";
-import { readLocalProgress, runLocalCashDiscount, type LocalCdBootstrap, type LocalProgress } from "@/lib/local-tally";
+import { describeCalculationFailure, finishCalculationEvent, startCalculationEvent, type CalculationStep } from "@/lib/calculation-events";
+import { readLocalConnectorVersion, readLocalProgress, runLocalCashDiscount, type LocalCdBootstrap, type LocalProgress } from "@/lib/local-tally";
 import { userFacingError } from "@/lib/user-copy";
 
 import { WorkspacePageHeader } from "./app-shell";
@@ -178,21 +179,43 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice }: {
 
   const calculate = async () => {
     setPhase("reading"); setError(null); setFlash(null);
+    let eventId: string | null = null;
+    let eventToken: string | null = null;
+    let step: CalculationStep = "server_prepare";
+    let version: string | null = null;
+    const timings: Record<string, number> = {};
     try {
       const token = await accessToken(); if (!token) return;
+      eventToken = token;
       const evaluatedOn = new Date().toISOString().slice(0, 10);
+      version = await readLocalConnectorVersion();
+      eventId = await startCalculationEvent(token, company.id, "cd", null, evaluatedOn, version);
+      const prepareStarted = performance.now();
       const bootstrap = await apiRequest<LocalCdBootstrap>(token, `/api/companies/${company.id}/evaluations/cd/local-bootstrap?evaluatedOn=${evaluatedOn}`);
-      const result = await runLocalCashDiscount(bootstrap) as unknown as { results: CdSettlementRow[]; evidence: Record<string, unknown> };
+      timings.serverPrepareMs = Math.round(performance.now() - prepareStarted);
+      step = "tally_read";
+      const readStarted = performance.now();
+      const result = await runLocalCashDiscount(bootstrap) as unknown as { results: CdSettlementRow[]; evidence: Record<string, unknown>; timings?: { tallyReadMs?: number; calculationMs?: number } };
+      timings.tallyReadMs = result.timings?.tallyReadMs ?? Math.round(performance.now() - readStarted);
+      if (result.timings?.calculationMs !== undefined) timings.calculationMs = result.timings.calculationMs;
       setLiveRows((result.results ?? []).filter((row) => row.category !== "not_eligible"));
       setPhase("saving");
+      step = "save";
+      const saveStarted = performance.now();
       const saved = await apiRequest<{ totals?: { autoQueued?: number } }>(token, `/api/companies/${company.id}/evaluations/cd/local-result`, {
         method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body: jsonBody({ evaluatedOn, evidence: result.evidence }), timeoutMs: 300_000,
       });
+      timings.saveMs = Math.round(performance.now() - saveStarted);
+      await finishCalculationEvent(token, company.id, eventId, { outcome: "succeeded", timings, connectorVersion: version });
       await load();
       setLiveRows(null);
       const queued = saved.totals?.autoQueued ?? 0;
       setFlash(queued ? `${queued} Credit Note${queued === 1 ? " is" : "s are"} being created in Tally.` : "Cash Discount check saved. Create Credit Notes from the Full payment, Discounted payment and Short up to ₹10,000 lists.");
-    } catch (cause) { setError(userFacingError(cause, "The Cash Discount check did not finish. Keep Tally open and try again.")); }
+    } catch (cause) {
+      const failure = describeCalculationFailure(cause, step);
+      if (eventToken) await finishCalculationEvent(eventToken, company.id, eventId, { outcome: failure.outcome, step: failure.step, reason: failure.reason, timings, lastProgress: failure.lastProgress, connectorVersion: version });
+      setError(userFacingError(cause, "The Cash Discount check did not finish. Keep Tally open and try again."));
+    }
     finally { setPhase(null); }
   };
 

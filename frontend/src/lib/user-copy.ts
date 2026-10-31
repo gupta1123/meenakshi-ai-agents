@@ -1,4 +1,5 @@
 import { ApiError } from "./api";
+import { LocalCalculationError } from "./local-tally";
 
 const labels: Record<string, string> = {
   awaiting_pairing: "Connecting",
@@ -39,6 +40,8 @@ export function userLabel(value: string) {
 }
 
 export function userFacingError(cause: unknown, fallback: string) {
+  // Messages written for people by the connector or calculation flow are shown as they are.
+  if (cause instanceof LocalCalculationError) return cause.message;
   if (cause instanceof ApiError) {
     const apiMessage = cause.body && typeof cause.body === "object" && typeof (cause.body as Record<string, unknown>).error === "string"
       ? (cause.body as Record<string, unknown>).error as string

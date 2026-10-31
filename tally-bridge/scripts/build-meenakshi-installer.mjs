@@ -118,4 +118,4 @@ const compiler = findInnoCompiler();
 buildPayload(runtimeExecutable);
 fs.mkdirSync(outputRoot, { recursive: true });
 execFileSync(compiler, [definitionPath], { cwd: installerRoot, stdio: "inherit" });
-console.log(`Created ${path.join(outputRoot, "MeenakshiTallyConnectorSetup.exe")}.`);
+console.log(`Created ${path.join(outputRoot, `MeenakshiTallyConnectorSetup-${JSON.parse(fs.readFileSync(path.join(bridgeRoot, "package.json"), "utf8")).version}.exe`)}.`);

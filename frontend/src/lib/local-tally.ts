@@ -1,5 +1,36 @@
 const LOCAL_TALLY_BASE = "http://127.0.0.1:3219";
 
+/** A calculation that failed on this PC, with where it failed and how far it got. */
+export class LocalCalculationError extends Error {
+  constructor(message: string, readonly failedStep: "tally_read" | "calculation", readonly lastProgress: Record<string, unknown> | null = null, readonly timedOut = false) {
+    super(message);
+    this.name = "LocalCalculationError";
+  }
+}
+
+async function postToLocalConnector<T>(path: string, body: unknown, timeoutMs: number, signal: AbortSignal | undefined, timeoutMessage: string, fallbackMessage: string): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(`${LOCAL_TALLY_BASE}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      cache: "no-store",
+      signal: signal ?? AbortSignal.timeout(timeoutMs),
+    });
+  } catch (cause) {
+    if (cause instanceof DOMException && (cause.name === "TimeoutError" || cause.name === "AbortError")) {
+      throw new LocalCalculationError(timeoutMessage, "tally_read", null, cause.name === "TimeoutError");
+    }
+    throw new LocalCalculationError("The Meenakshi connector on this PC is offline. Open the Meenakshi Tally Connector, then calculate again.", "tally_read");
+  }
+  const payload = await response.json().catch(() => ({})) as T & { error?: string; failedStep?: string; lastProgress?: Record<string, unknown> | null };
+  if (!response.ok) {
+    throw new LocalCalculationError(payload.error || fallbackMessage, payload.failedStep === "calculation" ? "calculation" : "tally_read", payload.lastProgress ?? null);
+  }
+  return payload;
+}
+
 export async function detectLocalTallyConnector(signal?: AbortSignal): Promise<string | null> {
   try {
     const response = await fetch(`${LOCAL_TALLY_BASE}/v1/identity`, {
@@ -14,6 +45,16 @@ export async function detectLocalTallyConnector(signal?: AbortSignal): Promise<s
   } catch {
     return null;
   }
+}
+
+/** Version of the connector running on this PC; null if it is not reachable or is an older build. */
+export async function readLocalConnectorVersion(): Promise<string | null> {
+  try {
+    const response = await fetch(`${LOCAL_TALLY_BASE}/v1/identity`, { cache: "no-store", signal: AbortSignal.timeout(2_000) });
+    if (!response.ok) return null;
+    const payload = await response.json() as { version?: unknown };
+    return typeof payload.version === "string" ? payload.version.slice(0, 40) : null;
+  } catch { return null; }
 }
 
 export type LocalCdBootstrap = {
@@ -52,19 +93,10 @@ export type LocalCdResult = {
 };
 
 export async function runLocalCashDiscount(bootstrap: LocalCdBootstrap, signal?: AbortSignal): Promise<LocalCdResult> {
-  const response = await fetch(`${LOCAL_TALLY_BASE}/v1/cash-discount`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(bootstrap),
-    cache: "no-store",
-    // A per-MT rule reads every invoice since its effective date: 18 months is
-    // about 55 batches and 10 minutes. The page shows batch progress meanwhile;
-    // aborting early leaves the export running anyway.
-    signal: signal ?? AbortSignal.timeout(1_800_000),
-  });
-  const payload = await response.json().catch(() => ({})) as LocalCdResult & { error?: string };
-  if (!response.ok) throw new Error(payload.error || "The local Tally connector could not complete the Cash Discount check.");
-  return payload;
+  // A per-MT rule reads every invoice since its effective date: 18 months is
+  // about 55 batches and 10 minutes. The page shows batch progress meanwhile.
+  return postToLocalConnector<LocalCdResult>("/v1/cash-discount", bootstrap, 1_800_000, signal,
+    "Tally didn't finish within 30 minutes. Try a shorter period or check Tally.", "The local Tally connector could not complete the Cash Discount check.");
 }
 
 export type LocalTodBootstrap = {
@@ -112,19 +144,10 @@ export type LocalTodResult = {
 };
 
 async function runLocalTurnoverDiscountBatch(bootstrap: LocalTodBootstrap, batch: LocalTodBatchBootstrap, signal?: AbortSignal): Promise<LocalTodResult> {
-  const response = await fetch(`${LOCAL_TALLY_BASE}/v1/turnover-discount`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...batch, evaluatedOn: bootstrap.evaluatedOn, expectedCompany: bootstrap.expectedCompany }),
-    cache: "no-store",
-    // A completed quarter can contain materially more vouchers than the live
-    // projection. Give Tally enough time to finish its chunked read instead of
-    // turning a healthy, long-running calculation into a false failure.
-    signal: signal ?? AbortSignal.timeout(180_000),
-  });
-  const payload = await response.json().catch(() => ({})) as LocalTodResult & { error?: string };
-  if (!response.ok) throw new Error(payload.error || "The local Tally connector could not complete the Turnover Discount calculation.");
-  return payload;
+  // A completed quarter can contain materially more vouchers than the live
+  // projection; give Tally time to finish its paced read.
+  return postToLocalConnector<LocalTodResult>("/v1/turnover-discount", { ...batch, evaluatedOn: bootstrap.evaluatedOn, expectedCompany: bootstrap.expectedCompany }, 600_000, signal,
+    "Tally didn't answer within 10 minutes. Check that Tally is responding, then calculate again.", "The local Tally connector could not complete the Turnover Discount calculation.");
 }
 
 export async function runLocalTurnoverDiscount(bootstrap: LocalTodBootstrap, signal?: AbortSignal): Promise<LocalTodResult> {
@@ -167,7 +190,7 @@ export async function runLocalTurnoverDiscount(bootstrap: LocalTodBootstrap, sig
 
 export type LocalProgress = {
   task: "cash_discount" | "turnover_discount";
-  stage: "reading" | "calculating";
+  stage: "reading" | "calculating" | "done" | "failed";
   done: number;
   total: number | null;
   from: string | null;
