@@ -787,7 +787,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       timings.serverPrepareMs = Math.round(performance.now() - prepareStarted);
       step = "tally_read";
       const readStarted = performance.now();
-      const result = await runLocalTurnoverDiscount(bootstrap);
+      const result = await runLocalTurnoverDiscount(bootstrap, undefined, { onReconnecting: (state) => setNotice(state ? `Reconnecting to the Meenakshi connector… (try ${state.attempt}). The check keeps running on the PC; keep Tally and the connector open.` : null) });
       timings.tallyAndCalculationMs = Math.round(performance.now() - readStarted);
       step = "save";
       const saveStarted = performance.now();

@@ -11,7 +11,7 @@ import { ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 
 import { apiRequest, jsonBody } from "@/lib/api";
 import { describeCalculationFailure, finishCalculationEvent, startCalculationEvent, type CalculationStep } from "@/lib/calculation-events";
-import { readLocalConnectorVersion, readLocalProgress, runLocalCashDiscount, type LocalCdBootstrap, type LocalProgress } from "@/lib/local-tally";
+import { readLocalConnectorVersion, readLocalProgress, runLocalCashDiscount, type LocalCdBootstrap, type LocalProgress, type ReconnectState } from "@/lib/local-tally";
 import { userFacingError } from "@/lib/user-copy";
 
 import { WorkspacePageHeader } from "./app-shell";
@@ -88,6 +88,8 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice }: {
   const [liveRows, setLiveRows] = useState<CdSettlementRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [phase, setPhase] = useState<"reading" | "saving" | null>(null);
+  const [reconnect, setReconnect] = useState<ReconnectState>(null);
+  const cancelRun = useRef<AbortController | null>(null);
   const [tab, setTab] = useState<Tab>("all");
   const [query, setQuery] = useState("");
   const [groupFilter, setGroupFilter] = useState("all");
@@ -195,7 +197,8 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice }: {
       timings.serverPrepareMs = Math.round(performance.now() - prepareStarted);
       step = "tally_read";
       const readStarted = performance.now();
-      const result = await runLocalCashDiscount(bootstrap) as unknown as { results: CdSettlementRow[]; evidence: Record<string, unknown>; timings?: { tallyReadMs?: number; calculationMs?: number } };
+      cancelRun.current = new AbortController();
+      const result = await runLocalCashDiscount(bootstrap, undefined, { signal: cancelRun.current.signal, onReconnecting: setReconnect }) as unknown as { results: CdSettlementRow[]; evidence: Record<string, unknown>; timings?: { tallyReadMs?: number; calculationMs?: number } };
       timings.tallyReadMs = result.timings?.tallyReadMs ?? Math.round(performance.now() - readStarted);
       if (result.timings?.calculationMs !== undefined) timings.calculationMs = result.timings.calculationMs;
       setLiveRows((result.results ?? []).filter((row) => row.category !== "not_eligible"));
@@ -216,7 +219,7 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice }: {
       if (eventToken) await finishCalculationEvent(eventToken, company.id, eventId, { outcome: failure.outcome, step: failure.step, reason: failure.reason, timings, lastProgress: failure.lastProgress, connectorVersion: version });
       setError(userFacingError(cause, "The Cash Discount check did not finish. Keep Tally open and try again."));
     }
-    finally { setPhase(null); }
+    finally { setPhase(null); setReconnect(null); cancelRun.current = null; }
   };
 
   const createCreditNote = async (row: CdSettlementRow, candidateId: string) => {
@@ -316,6 +319,13 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice }: {
           <Button className="button-secondary" disabled={Boolean(phase)} onClick={() => void calculate()}><RefreshCw className={phase ? "spin" : undefined} size={15} />{phase ? "Checking Tally…" : "Calculate"}</Button>
           <Button className="button-quiet" onClick={openRulePanel}>Active rule</Button></div>
       </div>
+      {phase === "reading" && reconnect && <div className="cd-check-progress" role="alert">
+        <div className="cd-check-progress-copy">
+          <strong>Reconnecting to the Meenakshi connector… (try {reconnect.attempt})</strong>
+          <span>{reconnect.offlineMs > 0 ? `No answer for ${Math.round(reconnect.offlineMs / 1000)} s. ` : ""}The check keeps running on the PC. Make sure Tally and the connector are open; this page will pick it up automatically.</span>
+        </div>
+        <Button type="button" onClick={() => cancelRun.current?.abort()}>Stop checking</Button>
+      </div>}
       {phase && <div className="cd-check-progress" role="status" aria-live="polite">
         <div className="cd-check-progress-copy">
           <strong>{phase === "saving" ? "Saving the result…" : progress?.stage === "calculating" ? "Calculating discounts…" : progress?.total ? `Reading Tally · batch ${progress.done} of ${progress.total}` : "Connecting to Tally…"}</strong>

@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { createClient } from "@supabase/supabase-js";
 
 const env = Object.fromEntries(readFileSync(new URL("../.env.local", import.meta.url), "utf8").split(/\r?\n/).filter((l) => l.includes("=") && !l.startsWith("#")).map((l) => [l.slice(0, l.indexOf("=")).trim(), l.slice(l.indexOf("=") + 1).trim().replace(/^"|"$/g, "")]));
-const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SECRET_KEY, { auth: { persistSession: false } });
+const supabase = createClient(new URL(env.SUPABASE_URL).origin, env.SUPABASE_SECRET_KEY, { auth: { persistSession: false } });
 const count = Number(process.argv[2]) || 20;
 const { data, error } = await supabase.from("calculation_events").select("*").order("started_at", { ascending: false }).limit(count);
 if (error) { console.error(error.message); process.exit(1); }

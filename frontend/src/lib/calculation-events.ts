@@ -17,7 +17,7 @@ export async function startCalculationEvent(token: string, companyId: string, sc
 /** Works out how a failed calculation should be recorded. */
 export function describeCalculationFailure(cause: unknown, step: CalculationStep): { outcome: Outcome; step: CalculationStep; reason: string; lastProgress: Record<string, unknown> | null } {
   if (cause instanceof LocalCalculationError) {
-    return { outcome: cause.timedOut ? "timed_out" : "failed", step: cause.failedStep, reason: cause.message, lastProgress: cause.lastProgress };
+    return { outcome: cause.timedOut ? "timed_out" : /was cancelled/i.test(cause.message) ? "cancelled" : "failed", step: cause.failedStep, reason: cause.message, lastProgress: cause.lastProgress };
   }
   if (cause instanceof ApiError) return { outcome: "failed", step, reason: `${step === "save" ? "The result could not be saved" : "The server could not prepare the check"} (status ${cause.status}).`, lastProgress: null };
   const reason = cause instanceof Error ? cause.message : "Unknown error.";

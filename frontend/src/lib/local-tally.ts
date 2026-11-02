@@ -47,6 +47,87 @@ export async function detectLocalTallyConnector(signal?: AbortSignal): Promise<s
   }
 }
 
+
+export type ReconnectState = { attempt: number; offlineMs: number } | null;
+export type LocalRunOptions = { signal?: AbortSignal; onReconnecting?: (state: ReconnectState) => void };
+
+const MAX_OFFLINE_MS = 3 * 60_000;
+const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+/**
+ * Runs a check as a background job inside the connector and follows it. A
+ * dropped page, reload or short network blip no longer loses the read: the
+ * page keeps trying to reach the connector and picks the job back up.
+ */
+async function runLocalJob<T>(task: "cash_discount" | "turnover_discount", body: Record<string, unknown>, overallTimeoutMs: number, options: LocalRunOptions | undefined, legacy: () => Promise<T>, timeoutMessage: string): Promise<T> {
+  let jobId: string;
+  try {
+    const response = await fetch(`${LOCAL_TALLY_BASE}/v1/jobs`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, task }), cache: "no-store", signal: AbortSignal.timeout(15_000),
+    });
+    // An older connector has no job routes; use the single long request instead.
+    if (response.status === 404) return legacy();
+    const payload = await response.json().catch(() => ({})) as { jobId?: string; jobTask?: string; error?: string; failedStep?: string };
+    if (response.status === 409 && payload.jobId && payload.jobTask === task) jobId = payload.jobId; // a check is already running: follow it
+    else if (!response.ok || !payload.jobId) throw new LocalCalculationError(payload.error || "The connector could not start the check.", "tally_read");
+    else jobId = payload.jobId;
+  } catch (cause) {
+    if (cause instanceof LocalCalculationError) throw cause;
+    throw new LocalCalculationError("The Meenakshi connector on this PC is offline. Open the Meenakshi Tally Connector, then calculate again.", "tally_read");
+  }
+
+  const started = Date.now();
+  let offlineSince: number | null = null;
+  let attempt = 0;
+  for (;;) {
+    if (options?.signal?.aborted) {
+      void fetch(`${LOCAL_TALLY_BASE}/v1/jobs/${jobId}`, { method: "DELETE", cache: "no-store", signal: AbortSignal.timeout(5_000) }).catch(() => {});
+      throw new LocalCalculationError("The check was cancelled.", "tally_read");
+    }
+    if (Date.now() - started > overallTimeoutMs) {
+      void fetch(`${LOCAL_TALLY_BASE}/v1/jobs/${jobId}`, { method: "DELETE", cache: "no-store", signal: AbortSignal.timeout(5_000) }).catch(() => {});
+      throw new LocalCalculationError(timeoutMessage, "tally_read", null, true);
+    }
+    await sleep(1_500);
+    type JobSummary = { status: string; error?: string | null; failedStep?: string | null; lastProgress?: Record<string, unknown> | null };
+    let fetched = null as JobSummary | null;
+    try {
+      const response = await fetch(`${LOCAL_TALLY_BASE}/v1/jobs/${jobId}`, { cache: "no-store", signal: AbortSignal.timeout(6_000) });
+      if (response.status === 404) throw new LocalCalculationError("The connector was restarted, so this check was lost. Calculate again.", "tally_read");
+      const payload = await response.json() as { job: JobSummary };
+      fetched = payload.job;
+      if (offlineSince !== null) { offlineSince = null; attempt = 0; options?.onReconnecting?.(null); }
+    } catch (cause) {
+      if (cause instanceof LocalCalculationError) throw cause;
+      offlineSince ??= Date.now();
+      attempt += 1;
+      const offlineMs = Date.now() - offlineSince;
+      options?.onReconnecting?.({ attempt, offlineMs });
+      if (offlineMs > MAX_OFFLINE_MS) {
+        options?.onReconnecting?.(null);
+        throw new LocalCalculationError("Lost contact with the connector on this PC for over 3 minutes. If it is still open, the check keeps running there: press Calculate to pick it back up.", "tally_read");
+      }
+      continue;
+    }
+    const summary = fetched as JobSummary;
+    if (summary.status === "running") continue;
+    if (summary.status === "done") {
+      for (let tries = 0; ; tries += 1) {
+        try {
+          const response = await fetch(`${LOCAL_TALLY_BASE}/v1/jobs/${jobId}/result`, { cache: "no-store", signal: AbortSignal.timeout(60_000) });
+          if (!response.ok) throw new Error("result");
+          return await response.json() as T;
+        } catch {
+          if (tries >= 4) throw new LocalCalculationError("The check finished but its result could not be fetched from the connector. Calculate again.", "tally_read");
+          options?.onReconnecting?.({ attempt: tries + 1, offlineMs: 0 });
+          await sleep(2_000);
+        }
+      }
+    }
+    throw new LocalCalculationError(summary.error || "The check did not finish.", summary.failedStep === "calculation" ? "calculation" : "tally_read", summary.lastProgress ?? null);
+  }
+}
+
 /** Version of the connector running on this PC; null if it is not reachable or is an older build. */
 export async function readLocalConnectorVersion(): Promise<string | null> {
   try {
@@ -92,11 +173,13 @@ export type LocalCdResult = {
   durationMs: number;
 };
 
-export async function runLocalCashDiscount(bootstrap: LocalCdBootstrap, signal?: AbortSignal): Promise<LocalCdResult> {
+export async function runLocalCashDiscount(bootstrap: LocalCdBootstrap, signal?: AbortSignal, options?: LocalRunOptions): Promise<LocalCdResult> {
   // A per-MT rule reads every invoice since its effective date: 18 months is
   // about 55 batches and 10 minutes. The page shows batch progress meanwhile.
-  return postToLocalConnector<LocalCdResult>("/v1/cash-discount", bootstrap, 1_800_000, signal,
-    "Tally didn't finish within 30 minutes. Try a shorter period or check Tally.", "The local Tally connector could not complete the Cash Discount check.");
+  const timeoutMessage = "Tally didn't finish within 30 minutes. Try a shorter period or check Tally.";
+  return runLocalJob<LocalCdResult>("cash_discount", bootstrap as unknown as Record<string, unknown>, 1_800_000, { ...options, signal: options?.signal ?? signal },
+    () => postToLocalConnector<LocalCdResult>("/v1/cash-discount", bootstrap, 1_800_000, signal, timeoutMessage, "The local Tally connector could not complete the Cash Discount check."),
+    timeoutMessage);
 }
 
 export type LocalTodBootstrap = {
@@ -143,20 +226,23 @@ export type LocalTodResult = {
   durationMs: number;
 };
 
-async function runLocalTurnoverDiscountBatch(bootstrap: LocalTodBootstrap, batch: LocalTodBatchBootstrap, signal?: AbortSignal): Promise<LocalTodResult> {
+async function runLocalTurnoverDiscountBatch(bootstrap: LocalTodBootstrap, batch: LocalTodBatchBootstrap, signal?: AbortSignal, options?: LocalRunOptions): Promise<LocalTodResult> {
   // A completed quarter can contain materially more vouchers than the live
   // projection; give Tally time to finish its paced read.
-  return postToLocalConnector<LocalTodResult>("/v1/turnover-discount", { ...batch, evaluatedOn: bootstrap.evaluatedOn, expectedCompany: bootstrap.expectedCompany }, 600_000, signal,
-    "Tally didn't answer within 10 minutes. Check that Tally is responding, then calculate again.", "The local Tally connector could not complete the Turnover Discount calculation.");
+  const body = { ...batch, evaluatedOn: bootstrap.evaluatedOn, expectedCompany: bootstrap.expectedCompany };
+  const timeoutMessage = "Tally didn't answer within 15 minutes. Check that Tally is responding, then calculate again.";
+  return runLocalJob<LocalTodResult>("turnover_discount", body, 900_000, { ...options, signal: options?.signal ?? signal },
+    () => postToLocalConnector<LocalTodResult>("/v1/turnover-discount", body, 600_000, signal, timeoutMessage, "The local Tally connector could not complete the Turnover Discount calculation."),
+    timeoutMessage);
 }
 
-export async function runLocalTurnoverDiscount(bootstrap: LocalTodBootstrap, signal?: AbortSignal): Promise<LocalTodResult> {
+export async function runLocalTurnoverDiscount(bootstrap: LocalTodBootstrap, signal?: AbortSignal, options?: LocalRunOptions): Promise<LocalTodResult> {
   if (!bootstrap.batches.length) throw new Error("No eligible Turnover Discount customers are available for the current rule.");
   // The local Tally connector has one active company context. Running two
   // periods at the same time can make their Tally responses cross over, so
   // calculate each locked-period batch in order.
   const results: LocalTodResult[] = [];
-  for (const batch of bootstrap.batches) results.push(await runLocalTurnoverDiscountBatch(bootstrap, batch, signal));
+  for (const batch of bootstrap.batches) results.push(await runLocalTurnoverDiscountBatch(bootstrap, batch, signal, options));
   const primary = results[0];
   return {
     rows: results.flatMap((result) => result.rows),
