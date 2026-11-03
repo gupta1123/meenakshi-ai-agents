@@ -217,7 +217,7 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice }: {
     } catch (cause) {
       const failure = describeCalculationFailure(cause, step);
       if (eventToken) await finishCalculationEvent(eventToken, company.id, eventId, { outcome: failure.outcome, step: failure.step, reason: failure.reason, timings, lastProgress: failure.lastProgress, connectorVersion: version });
-      setError(userFacingError(cause, "The Cash Discount check did not finish. Keep Tally open and try again."));
+      setError(userFacingError(cause, "The Cash Discount check did not finish. Keep Tally and the Meenakshi connector open, then try again."));
     }
     finally { setPhase(null); setReconnect(null); cancelRun.current = null; }
   };
