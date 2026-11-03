@@ -60,21 +60,26 @@ const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve
  * page keeps trying to reach the connector and picks the job back up.
  */
 async function runLocalJob<T>(task: "cash_discount" | "turnover_discount", body: Record<string, unknown>, overallTimeoutMs: number, options: LocalRunOptions | undefined, legacy: () => Promise<T>, timeoutMessage: string): Promise<T> {
-  let jobId: string;
-  try {
-    const response = await fetch(`${LOCAL_TALLY_BASE}/v1/jobs`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, task }), cache: "no-store", signal: AbortSignal.timeout(15_000),
-    });
-    // An older connector has no job routes; use the single long request instead.
-    if (response.status === 404) return legacy();
-    const payload = await response.json().catch(() => ({})) as { jobId?: string; jobTask?: string; error?: string; failedStep?: string };
-    if (response.status === 409 && payload.jobId && payload.jobTask === task) jobId = payload.jobId; // a check is already running: follow it
-    else if (!response.ok || !payload.jobId) throw new LocalCalculationError(payload.error || "The connector could not start the check.", "tally_read");
-    else jobId = payload.jobId;
-  } catch (cause) {
-    if (cause instanceof LocalCalculationError) throw cause;
-    throw new LocalCalculationError("The Meenakshi connector on this PC is offline. Open the Meenakshi Tally Connector, then calculate again.", "tally_read");
-  }
+  const begin = async (): Promise<string | "legacy"> => {
+    try {
+      const response = await fetch(`${LOCAL_TALLY_BASE}/v1/jobs`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ...body, task }), cache: "no-store", signal: AbortSignal.timeout(15_000),
+      });
+      // An older connector has no job routes; use the single long request instead.
+      if (response.status === 404) return "legacy";
+      const payload = await response.json().catch(() => ({})) as { jobId?: string; jobTask?: string; error?: string; failedStep?: string };
+      if (response.status === 409 && payload.jobId && payload.jobTask === task) return payload.jobId; // a check is already running: follow it
+      if (!response.ok || !payload.jobId) throw new LocalCalculationError(payload.error || "The connector could not start the check.", "tally_read");
+      return payload.jobId;
+    } catch (cause) {
+      if (cause instanceof LocalCalculationError) throw cause;
+      throw new LocalCalculationError("The Meenakshi connector on this PC is offline. Open the Meenakshi Tally Connector, then calculate again.", "tally_read");
+    }
+  };
+  const first = await begin();
+  if (first === "legacy") return legacy();
+  let jobId: string = first;
+  let restarts = 0;
 
   const started = Date.now();
   let offlineSince: number | null = null;
@@ -93,7 +98,16 @@ async function runLocalJob<T>(task: "cash_discount" | "turnover_discount", body:
     let fetched = null as JobSummary | null;
     try {
       const response = await fetch(`${LOCAL_TALLY_BASE}/v1/jobs/${jobId}`, { cache: "no-store", signal: AbortSignal.timeout(6_000) });
-      if (response.status === 404) throw new LocalCalculationError("The connector was restarted, so this check was lost. Calculate again.", "tally_read");
+      if (response.status === 404) {
+        // The connector program restarted and lost the running check. It saves its
+        // progress after every batch, so starting the same check again resumes it.
+        if (restarts >= 3) throw new LocalCalculationError("The connector keeps restarting while it reads Tally, so the check could not finish. Send the connector log to support.", "tally_read");
+        restarts += 1;
+        const next = await begin();
+        if (next === "legacy") throw new LocalCalculationError("The connector was restarted, so this check was lost. Calculate again.", "tally_read");
+        jobId = next;
+        continue;
+      }
       const payload = await response.json() as { job: JobSummary };
       fetched = payload.job;
       if (offlineSince !== null) { offlineSince = null; attempt = 0; options?.onReconnecting?.(null); }

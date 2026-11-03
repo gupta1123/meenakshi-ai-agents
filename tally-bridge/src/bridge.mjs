@@ -8,6 +8,7 @@ import { probeActiveCompany, probeCurrentCompanyName, probeTallyCompanies, probe
 import { startLocalApi } from "./local-api.mjs";
 
 import { BRIDGE_VERSION } from "./version.mjs";
+import { logLine } from "./connector-log.mjs";
 const MAX_RETRY_DELAY_MS = 60_000;
 const COMMAND_LEASE_RENEWAL_MS = 30_000;
 
@@ -215,6 +216,13 @@ function sleep(milliseconds) {
 }
 
 async function startBridge(config) {
+  // Leave a trace of why the connector stopped: a hard kill leaves none, which is itself informative.
+  const mb = () => Math.round(process.memoryUsage().rss / 1048576);
+  logLine("INFO", `connector started`, { version: BRIDGE_VERSION, pid: process.pid, node: process.version, rssMb: mb() });
+  process.on("uncaughtException", (error) => { logLine("ERROR", `connector crashed: ${error?.stack || error}`, { rssMb: mb() }); process.exit(1); });
+  process.on("unhandledRejection", (reason) => { logLine("ERROR", `connector unhandled error: ${reason?.stack || reason}`, { rssMb: mb() }); });
+  process.on("SIGTERM", () => { logLine("WARN", "connector asked to stop (SIGTERM)", { rssMb: mb() }); process.exit(0); });
+  process.on("exit", (code) => logLine("INFO", `connector exiting with code ${code}`));
   const localApi = startLocalApi(config);
   let consecutiveFailures = 0;
   let snapshot = null;

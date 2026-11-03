@@ -4,11 +4,11 @@ import Decimal from "decimal.js";
 import { syncVouchers } from "./sync-vouchers.mjs";
 import { sourceSalesLedgerName } from "./voucher-ledgers.mjs";
 
-const MAX_CHUNKS = 60;
+const MAX_CHUNKS = 400;
 const MAX_INVOICES = 25_000;
 
 function normalized(value) { return String(value ?? "").trim().toLowerCase(); }
-function canonicalJson(value) {
+export function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value && typeof value === "object") return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, nested]) => `${JSON.stringify(key)}:${canonicalJson(nested)}`).join(",")}}`;
   return JSON.stringify(value);
@@ -65,14 +65,30 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
     || (perMt && voucher.voucherKind === "other" && /journal|payment/i.test(String(voucher.voucherTypeName ?? "")));
   let cursor = scope.dateFrom;
   let chunks = 0;
+  let vouchersScanned = 0;
+  // Resume after a crash or restart: the checkpoint holds everything read so far.
+  const checkpoint = context.checkpoint ?? null;
+  const saved = checkpoint?.load() ?? null;
+  const crashes = new Map(Object.entries(saved?.crashes ?? {}));
+  if (saved) {
+    invoices.push(...saved.invoices); allocations.push(...saved.allocations); debitNotes.push(...saved.debitNotes); creditNotes.push(...saved.creditNotes);
+    cursor = saved.cursor; chunks = saved.chunks; vouchersScanned = saved.vouchersScanned;
+    // A window that was being read when the connector last stopped is retried in smaller pieces.
+    if (saved.inFlight) crashes.set(saved.inFlight, (crashes.get(saved.inFlight) ?? 0) + 1);
+    context.onResume?.({ cursor, chunks, invoices: invoices.length, retriedWindow: saved.inFlight ?? null });
+  }
+  const windowDays = (at) => { const n = crashes.get(at) ?? 0; return n === 0 ? 10 : n === 1 ? 3 : n === 2 ? 1 : 0; };
+  const persist = (inFlight) => checkpoint?.save({ cursor, chunks, vouchersScanned, invoices, allocations, debitNotes, creditNotes, crashes: Object.fromEntries(crashes), inFlight });
   // Batches are 10 days (see sync-vouchers.mjs); report progress per batch.
   const totalChunks = Math.max(1, Math.ceil(((Date.parse(`${scope.dateTo}T00:00:00Z`) - Date.parse(`${scope.dateFrom}T00:00:00Z`)) / 86_400_000 + 1) / 10));
   context.onProgress?.({ done: 0, total: totalChunks, from: scope.dateFrom, to: scope.dateTo });
-  let vouchersScanned = 0;
   while (cursor) {
     if (context.isCancelled?.()) throw new Error("This Cash Discount check was stopped.");
     if (chunks >= MAX_CHUNKS) throw new Error("The Cash Discount period is too large for one live calculation.");
-    const result = await syncVouchers({ ...command, payload: { ...command.payload, syncRunId: command.payload.voucherSyncRunId, requestedScope: { ...scope, customers: eligibleCustomers, cursor } } }, context);
+    const days = windowDays(cursor);
+    if (days === 0) throw new Error(`Tally could not give the data for ${cursor} even one day at a time, and the connector stopped each time it tried. Ask support to look at that day in Tally.`);
+    persist(cursor); // marks this window as "being read": if the connector dies now, the next try uses a smaller window
+    const result = await syncVouchers({ ...command, payload: { ...command.payload, syncRunId: command.payload.voucherSyncRunId, requestedScope: { ...scope, customers: eligibleCustomers, cursor, chunkDays: days } } }, context);
     chunks += 1;
     vouchersScanned += result.vouchers.length;
     context.onProgress?.({ done: chunks, total: Math.max(totalChunks, chunks), nextDate: result.cursorTo ?? null, vouchersScanned });
@@ -136,6 +152,7 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
       }
     }
     cursor = result.cursorTo;
+    persist(null);
   }
   const paymentsByReference = new Map();
   for (const allocation of allocations) {

@@ -1,7 +1,8 @@
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 
-import { fetchLiveCdEvidence } from "./commands/live-cd-evidence.mjs";
+import { canonicalJson, fetchLiveCdEvidence } from "./commands/live-cd-evidence.mjs";
+import { createCheckpoint } from "./checkpoint.mjs";
 import { fetchLiveTodEvidence } from "./commands/live-tod-evidence.mjs";
 import { evaluateLocalCashDiscount } from "./local-cd-evaluator.mjs";
 import { evaluateCashDiscountSettlements } from "./local-cd-settlement-evaluator.mjs";
@@ -98,15 +99,21 @@ export function startLocalApi(config) {
       // One log line per 10 batches (and the first) so a stall is visible without flooding the file.
       if (typeof update.done === "number" && (update.done === 1 || update.done - lastLoggedBatch >= 10)) {
         lastLoggedBatch = update.done;
-        logLine("INFO", `${item.task} reading Tally`, { batch: update.done, of: progress.total, from: progress.from, to: progress.to });
+        const memory = process.memoryUsage();
+        logLine("INFO", `${item.task} reading Tally`, { batch: update.done, of: progress.total, from: progress.from, to: progress.to, heapMb: Math.round(memory.heapUsed / 1048576), rssMb: Math.round(memory.rss / 1048576) });
       }
     };
     const readStarted = performance.now();
     const isCancelled = () => item.cancelled;
+    // Cash Discount saves its progress after every batch, so a connector crash or restart resumes instead of starting over.
+    const checkpoint = isCashDiscount ? createCheckpoint(canonicalJson({ company: activeCompany.guid || activeCompany.name, scope: body.voucherScope, evaluatedOn: body.evaluatedOn })) : null;
+    item.checkpoint = checkpoint;
+    const onResume = (info) => logLine("WARN", `${item.task} resumed after the connector stopped`, { job: item.id, ...info });
     const evidence = isCashDiscount
-      ? await fetchLiveCdEvidence(command, { config, activeCompany, isCancelled, onProgress }, null)
+      ? await fetchLiveCdEvidence(command, { config, activeCompany, isCancelled, onProgress, checkpoint, onResume }, null)
       : await fetchLiveTodEvidence(command, { config, activeCompany, isCancelled });
     const tallyReadMs = Math.round(performance.now() - readStarted);
+    checkpoint?.clear();
     if (item.cancelled) throw new Error("The calculation was cancelled.");
     item.state.step = "calculation";
     onProgress({ stage: "calculating" });
@@ -141,6 +148,7 @@ export function startLocalApi(config) {
         item.status = item.cancelled ? "cancelled" : "failed";
         item.lastProgress = progress ? { stage: progress.stage, done: progress.done, total: progress.total, from: progress.from, to: progress.to } : null;
         progress = { ...(progress ?? {}), stage: "failed", error: item.error };
+        if (item.cancelled) item.checkpoint?.settle();
         logLine("ERROR", `${task} ${item.status} at ${item.failedStep}: ${raw}`, { job: item.id, ...(item.lastProgress ?? {}) });
       } finally {
         item.finishedAt = new Date().toISOString();

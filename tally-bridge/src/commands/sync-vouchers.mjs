@@ -131,7 +131,7 @@ export async function syncVouchers(command, { config, activeCompany, isCancelled
   const targeted = customerLedgerNames.length > 0 && customerLedgerNames.length <= TARGETED_CUSTOMER_LIMIT;
   // Cash Discount matches customers in memory but reads the period in short
   // windows; the caller loops on cursorTo until the period is complete.
-  const chunk = chunkScope(scope, cashDiscountFastPath ? CASH_DISCOUNT_DAYS_PER_CHUNK : targeted ? TARGETED_DAYS_PER_CHUNK : MAX_DAYS_PER_CHUNK);
+  const chunk = chunkScope(scope, cashDiscountFastPath ? (Number.isInteger(scope.chunkDays) && scope.chunkDays >= 1 && scope.chunkDays <= CASH_DISCOUNT_DAYS_PER_CHUNK ? scope.chunkDays : CASH_DISCOUNT_DAYS_PER_CHUNK) : targeted ? TARGETED_DAYS_PER_CHUNK : MAX_DAYS_PER_CHUNK);
   if (cashDiscountFastPath && typeof scope.cursor === "string" && scope.cursor !== scope.dateFrom) {
     await new Promise((resolve) => setTimeout(resolve, CASH_DISCOUNT_PAUSE_MS));
   }
