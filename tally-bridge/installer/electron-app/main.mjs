@@ -1,5 +1,6 @@
-import { app, BrowserWindow, dialog } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -16,6 +17,7 @@ const installedBridgePath = path.join(currentDirectory, "src", "bridge.mjs");
 const sourceBridgePath = path.resolve(currentDirectory, "..", "..", "src", "bridge.mjs");
 const bridgePath = fs.existsSync(installedBridgePath) ? installedBridgePath : sourceBridgePath;
 const installDirectory = path.resolve(currentDirectory, "..", "..");
+const connectorLogDirectory = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "Meenakshi", "logs");
 const logPath = path.join(installDirectory, "bridge.log");
 const errorLogPath = path.join(installDirectory, "bridge.err.log");
 const iconPath = path.join(currentDirectory, "app.ico");
@@ -91,6 +93,8 @@ function stopBridge() {
   if (bridgeRestartTimer) clearTimeout(bridgeRestartTimer);
   bridgeRestartTimer = null;
   if (!bridgeProcess || bridgeProcess.killed) return;
+  // Stopping a bridge that is still running is deliberate: tell it apart from a crash.
+  if (bridgeProcess.exitCode === null) { try { fs.rmSync(path.join(path.dirname(connectorLogDirectory), "running.json"), { force: true }); } catch { /* ignore */ } }
   bridgeProcess.kill();
   bridgeProcess = null;
 }
@@ -309,6 +313,28 @@ async function handleConnectUrl(value) {
 function handleProtocolUrl(value) {
   if (value?.startsWith(`${PROTOCOL_NAME}://connect`)) void handleConnectUrl(value);
 }
+
+ipcMain.handle("logs:list", () => {
+  try {
+    return fs.readdirSync(connectorLogDirectory)
+      .map((name) => /^connector-(\d{4}-\d{2}-\d{2})\.log$/.exec(name))
+      .filter(Boolean)
+      .map((match) => ({ day: match[1], kb: Math.max(1, Math.round(fs.statSync(path.join(connectorLogDirectory, match[0])).size / 1024)) }))
+      .sort((left, right) => right.day.localeCompare(left.day));
+  } catch { return []; }
+});
+ipcMain.handle("logs:send", async (_event, days) => {
+  const chosen = Array.isArray(days) ? days.filter((day) => /^\d{4}-\d{2}-\d{2}$/.test(day)).slice(0, 14) : [];
+  if (!chosen.length) return { ok: false, message: "Choose at least one day." };
+  try {
+    await runBridgeCommand("send-logs", [["days", chosen.join(",")]]);
+    return { ok: true, message: "Logs sent to Meenakshi. Thank you." };
+  } catch (error) {
+    return { ok: false, message: `Could not send the logs: ${formatError(error)}` };
+  }
+});
+ipcMain.handle("logs:open", () => { fs.mkdirSync(connectorLogDirectory, { recursive: true }); return shell.openPath(connectorLogDirectory); });
+ipcMain.handle("app:version", () => app.getVersion());
 
 function createWindow() {
   mainWindow = new BrowserWindow({

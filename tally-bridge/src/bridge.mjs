@@ -8,7 +8,8 @@ import { probeActiveCompany, probeCurrentCompanyName, probeTallyCompanies, probe
 import { startLocalApi } from "./local-api.mjs";
 
 import { BRIDGE_VERSION } from "./version.mjs";
-import { logLine } from "./connector-log.mjs";
+import { clearRunning, logLine, markRunning, previousRunEndedBadly } from "./connector-log.mjs";
+import { sendIncident, sendLogDays } from "./log-upload.mjs";
 const MAX_RETRY_DELAY_MS = 60_000;
 const COMMAND_LEASE_RENEWAL_MS = 30_000;
 
@@ -222,7 +223,13 @@ async function startBridge(config) {
   process.on("uncaughtException", (error) => { logLine("ERROR", `connector crashed: ${error?.stack || error}`, { rssMb: mb() }); process.exit(1); });
   process.on("unhandledRejection", (reason) => { logLine("ERROR", `connector unhandled error: ${reason?.stack || reason}`, { rssMb: mb() }); });
   process.on("SIGTERM", () => { logLine("WARN", "connector asked to stop (SIGTERM)", { rssMb: mb() }); process.exit(0); });
-  process.on("exit", (code) => logLine("INFO", `connector exiting with code ${code}`));
+  process.on("exit", (code) => { logLine("INFO", `connector exiting with code ${code}`); if (code === 0) clearRunning(); });
+  const previous = previousRunEndedBadly();
+  markRunning(BRIDGE_VERSION);
+  if (previous) {
+    logLine("WARN", "the connector did not shut down cleanly last time", { previousPid: previous.pid, startedAt: previous.startedAt, version: previous.version });
+    void sendIncident(config, "crash", `previous run (started ${previous.startedAt}, version ${previous.version}) ended without a clean shutdown`);
+  }
   const localApi = startLocalApi(config);
   let consecutiveFailures = 0;
   let snapshot = null;
@@ -312,6 +319,11 @@ async function run() {
     console.log(JSON.stringify({ activeCompany: snapshot.activeCompany, tallyReachable: snapshot.tallyReachable }));
     return;
   }
+  if (command === "send-logs") {
+    const days = String(args.days ?? "").split(",").map((day) => day.trim()).filter(Boolean);
+    console.log(JSON.stringify(await sendLogDays(config, days)));
+    return;
+  }
   if (command === "disconnect") {
     await sendDisconnect(config);
     return;
@@ -320,7 +332,7 @@ async function run() {
     await startBridge(config);
     return;
   }
-  throw new Error("Use one of: machine-id, configure, configure-pdf-capture, install-protocol, connect, connect-url, probe, pair, once, disconnect, start.");
+  throw new Error("Use one of: machine-id, configure, configure-pdf-capture, install-protocol, connect, connect-url, probe, pair, once, send-logs, disconnect, start.");
 }
 
 run().catch((error) => {

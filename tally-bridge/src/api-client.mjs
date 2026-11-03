@@ -69,6 +69,14 @@ export function sendHeartbeat(config, bridgeVersion, tallySnapshot) {
   });
 }
 
+export function uploadLogs(config, { kind, reason, bridgeVersion, days, contentGzBase64 }) {
+  return request(config, "/api/bridge/logs", {
+    method: "POST",
+    body: { connectorId: config.connectorId, machineFingerprint: config.machineFingerprint, kind, reason, bridgeVersion, days, contentGzBase64 },
+    timeoutMs: 60_000,
+  });
+}
+
 export function sendDisconnect(config) {
   return request(config, "/api/bridge/disconnect", {
     method: "POST",

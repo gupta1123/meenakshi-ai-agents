@@ -31,6 +31,26 @@
         color: white;
         background: var(--brand);
       }
+      .brandbar { justify-content: space-between; position: relative; }
+      .menu-button { width: 34px; height: 34px; border: 0; border-radius: 8px; color: white; background: transparent; font-size: 22px; line-height: 1; cursor: pointer; }
+      .menu-button:hover, .menu-button:focus-visible { background: rgba(255, 255, 255, .2); outline: none; }
+      .menu { position: absolute; top: 66px; right: 16px; z-index: 5; min-width: 190px; padding: 6px; border: 1px solid var(--line); border-radius: 10px; color: var(--ink); background: #fff; box-shadow: 0 12px 32px rgba(54, 37, 31, .18); }
+      .menu[hidden] { display: none; }
+      .menu button { display: block; width: 100%; padding: 9px 10px; border: 0; border-radius: 6px; color: var(--ink); background: transparent; text-align: left; font-size: 13px; cursor: pointer; }
+      .menu button:hover { background: var(--canvas); }
+      .menu .version { padding: 8px 10px 4px; color: var(--muted); font-size: 11px; }
+      .logs-panel { position: absolute; inset: 80px 0 0 0; z-index: 6; padding: 24px; overflow: auto; background: var(--paper); }
+      .logs-panel[hidden] { display: none; }
+      .logs-panel h2 { margin: 0 0 6px; font-size: 18px; }
+      .logs-panel p { margin: 0 0 12px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+      .logs-days { margin: 0 0 14px; padding: 0; list-style: none; border-top: 1px solid var(--line); }
+      .logs-days li { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+      .logs-days span { margin-left: auto; color: var(--muted); font-size: 11px; }
+      .logs-actions { display: flex; gap: 10px; }
+      .logs-actions button { padding: 9px 16px; border: 1px solid var(--line); border-radius: 8px; background: #fff; font-size: 13px; cursor: pointer; }
+      .logs-actions button.primary { border-color: var(--brand); color: white; background: var(--brand); }
+      .logs-actions button:disabled { opacity: .55; cursor: default; }
+      .logs-result { min-height: 18px; margin-top: 12px; font-size: 12px; }
       .brandbar img { width: 178px; height: 50px; object-fit: contain; object-position: left center; }
       .content { padding: 24px; }
       .eyebrow { margin: 0 0 7px; color: var(--muted); font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; }
@@ -98,7 +118,21 @@
   </head>
   <body>
     <main class="shell">
-      <header class="brandbar"><img src="brand.png" alt="Meenakshi TMT"></header>
+      <header class="brandbar"><img src="brand.png" alt="Meenakshi TMT">
+        <button class="menu-button" id="menu-button" type="button" aria-label="More options" aria-haspopup="true" aria-expanded="false">&#8942;</button>
+        <div class="menu" id="menu" hidden>
+          <button type="button" id="menu-send">Send logs&hellip;</button>
+          <button type="button" id="menu-open">Open logs folder</button>
+          <div class="version" id="menu-version"></div>
+        </div>
+      </header>
+      <section class="logs-panel" id="logs-panel" hidden>
+        <h2>Send logs to Meenakshi</h2>
+        <p>Pick the days to send. The logs only contain technical details (times, steps, errors), not customer names or amounts.</p>
+        <ul class="logs-days" id="logs-days"></ul>
+        <div class="logs-actions"><button class="primary" id="logs-send" type="button">Send</button><button id="logs-close" type="button">Close</button></div>
+        <div class="logs-result" id="logs-result" role="status" aria-live="polite"></div>
+      </section>
       <section class="content connection" id="connection" data-state="disconnected">
         <p class="eyebrow">Tally connection</p>
         <div class="headline"><span class="signal" aria-hidden="true"></span><h1 id="status-title">Not connected to Meenakshi</h1></div>
@@ -135,6 +169,47 @@
         if (Number.isNaN(date.getTime())) return "";
         return `Checked ${date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
       }
+
+      const menu = document.getElementById("menu");
+      const menuButton = document.getElementById("menu-button");
+      const logsPanel = document.getElementById("logs-panel");
+      const setMenu = (open) => { menu.hidden = !open; menuButton.setAttribute("aria-expanded", String(open)); };
+      menuButton.addEventListener("click", (event) => { event.stopPropagation(); setMenu(menu.hidden); });
+      document.addEventListener("click", () => setMenu(false));
+      window.meenakshiBridge?.version().then((value) => { document.getElementById("menu-version").textContent = `Connector ${value}`; });
+      document.getElementById("menu-open").addEventListener("click", () => window.meenakshiBridge?.logs.openFolder());
+      document.getElementById("menu-send").addEventListener("click", async () => {
+        const days = (await window.meenakshiBridge?.logs.list()) || [];
+        const list = document.getElementById("logs-days");
+        document.getElementById("logs-result").textContent = days.length ? "" : "There are no logs on this computer yet.";
+        document.getElementById("logs-send").disabled = days.length === 0;
+        list.replaceChildren(...days.map((entry, index) => {
+          const item = document.createElement("li");
+          const box = document.createElement("input");
+          box.type = "checkbox"; box.value = entry.day; box.checked = index === 0; box.id = `day-${entry.day}`;
+          const label = document.createElement("label");
+          label.htmlFor = box.id;
+          label.textContent = index === 0 ? `${entry.day} (today)` : entry.day;
+          const size = document.createElement("span");
+          size.textContent = `${entry.kb} KB`;
+          item.append(box, label, size);
+          return item;
+        }));
+        logsPanel.hidden = false;
+      });
+      document.getElementById("logs-close").addEventListener("click", () => { logsPanel.hidden = true; });
+      document.getElementById("logs-send").addEventListener("click", async () => {
+        const days = [...document.querySelectorAll("#logs-days input:checked")].map((box) => box.value);
+        const result = document.getElementById("logs-result");
+        const button = document.getElementById("logs-send");
+        button.disabled = true;
+        result.style.color = "";
+        result.textContent = "Sending…";
+        const outcome = await window.meenakshiBridge.logs.send(days);
+        result.style.color = outcome.ok ? "var(--green)" : "var(--red)";
+        result.textContent = outcome.message;
+        button.disabled = false;
+      });
 
       window.meenakshiBridge?.onStatus((status) => {
         const state = status.state || "disconnected";

@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 
 import { canonicalJson, fetchLiveCdEvidence } from "./commands/live-cd-evidence.mjs";
 import { createCheckpoint } from "./checkpoint.mjs";
+import { sendIncident } from "./log-upload.mjs";
 import { fetchLiveTodEvidence } from "./commands/live-tod-evidence.mjs";
 import { evaluateLocalCashDiscount } from "./local-cd-evaluator.mjs";
 import { evaluateCashDiscountSettlements } from "./local-cd-settlement-evaluator.mjs";
@@ -149,6 +150,7 @@ export function startLocalApi(config) {
         item.lastProgress = progress ? { stage: progress.stage, done: progress.done, total: progress.total, from: progress.from, to: progress.to } : null;
         progress = { ...(progress ?? {}), stage: "failed", error: item.error };
         if (item.cancelled) item.checkpoint?.settle();
+        else void sendIncident(config, "failure", `${task} failed at ${item.failedStep}: ${plainTallyError(raw)}`);
         logLine("ERROR", `${task} ${item.status} at ${item.failedStep}: ${raw}`, { job: item.id, ...(item.lastProgress ?? {}) });
       } finally {
         item.finishedAt = new Date().toISOString();
