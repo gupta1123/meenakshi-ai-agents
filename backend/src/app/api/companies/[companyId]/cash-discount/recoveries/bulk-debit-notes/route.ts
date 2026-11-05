@@ -1,3 +1,4 @@
+import { auditUserAction } from "@/lib/audit";
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/authorization";
 import { isUuid } from "@/lib/security";
@@ -10,7 +11,8 @@ export async function POST(request: Request, context: RouteContext) {
   try {
     const { companyId } = await context.params;
     if (!isUuid(companyId)) return jsonWithCors(request, { error: "Invalid company id." }, { status: 400 });
-    const { company, userId } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
+    const access = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
+    const { company, userId } = access;
     const body = await request.json().catch(() => ({})) as { candidateIds?: unknown };
     const candidateIds = Array.isArray(body.candidateIds) ? [...new Set(body.candidateIds.filter((id): id is string => typeof id === "string" && isUuid(id)))] : [];
     if (!candidateIds.length) return jsonWithCors(request, { error: "Choose at least one Debit Note." }, { status: 400 });
@@ -38,6 +40,10 @@ export async function POST(request: Request, context: RouteContext) {
       }
     }
     const queued = results.filter((result) => result.status === "queued").length;
+    await auditUserAction(access, {
+      action: "cd_debit_notes_bulk_requested", entityType: "cash_discount_recovery",
+      newValue: { requested: candidateIds.length, queued, skipped: results.length - queued, candidateIds },
+    });
     return jsonWithCors(request, { queued, skipped: results.length - queued, results, message: `${queued} Debit Note${queued === 1 ? "" : "s"} queued. Tally will create them one at a time.` }, { status: queued ? 202 : 409 });
   } catch (error) {
     if (error instanceof MeenakshiAccessError) return jsonWithCors(request, { error: error.message }, { status: error.status });

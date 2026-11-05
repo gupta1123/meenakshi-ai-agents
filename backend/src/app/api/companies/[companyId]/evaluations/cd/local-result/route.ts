@@ -1,3 +1,4 @@
+import { auditUserAction } from "@/lib/audit";
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/authorization";
 import { loadLiveCdBatchRule, type EvaluationRunRecord } from "@/lib/evaluation/evidence";
@@ -17,7 +18,8 @@ export async function POST(request: Request, context: RouteContext) {
     if (!isUuid(companyId)) return jsonWithCors(request, { error: "Invalid company id." }, { status: 400 });
     const idempotencyKey = readIdempotencyKey(request);
     if (!idempotencyKey) return jsonWithCors(request, { error: "Idempotency-Key header is required." }, { status: 400 });
-    const { organization, company, userId } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
+    const access = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
+    const { organization, company, userId } = access;
     const body = await request.json().catch(() => null) as { evaluatedOn?: unknown; evidence?: unknown } | null;
     if (!body || !isLiveCdBatch(body.evidence)) return jsonWithCors(request, { error: "Valid local Tally evidence is required." }, { status: 400 });
     if (!isUuid(body.evidence.ruleVersionId)) return jsonWithCors(request, { error: "A valid Cash Discount rule is required." }, { status: 400 });
@@ -52,6 +54,10 @@ export async function POST(request: Request, context: RouteContext) {
     const result = await completeLiveCdRun(run, evidence);
     const { data: completedRun, error: completedError } = await supabase.from("evaluation_runs").select("*").eq("id", run.id).eq("company_id", company.id).single();
     if (completedError) throw completedError;
+    await auditUserAction(access, {
+      action: "cd_result_saved", entityType: "evaluation_run", entityId: run.id,
+      newValue: { periodStart, periodEnd, ruleVersionId: evidence.ruleVersionId, invoices: evidence.invoices.length },
+    });
     return jsonWithCors(request, { evaluationRun: completedRun, totals: result.totals }, { status: 201 });
   } catch (error) {
     if (error instanceof MeenakshiAccessError || error instanceof RulebookRequestError) return jsonWithCors(request, { error: error.message }, { status: error.status });

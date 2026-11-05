@@ -1,3 +1,4 @@
+import { auditUserAction } from "@/lib/audit";
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/authorization";
 import { isUuid } from "@/lib/security";
@@ -17,7 +18,8 @@ export async function POST(request: Request, context: RouteContext) {
     if (!isUuid(companyId) || !isUuid(candidateId)) return jsonWithCors(request, { error: "Invalid recovery action." }, { status: 400 });
     const idempotencyKey = readIdempotencyKey(request);
     if (!idempotencyKey) return jsonWithCors(request, { error: "Idempotency-Key header is required." }, { status: 400 });
-    const { company, userId } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
+    const access = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
+    const { company, userId } = access;
     const supabase = createSupabaseAdminClientWithOptions({ timeoutMs: 12_000 });
     const { data: candidate, error: candidateError } = await supabase.from("cash_discount_recovery_candidates")
       // The posting RPC owns the authoritative Tally-ledger validation. Do
@@ -43,6 +45,10 @@ export async function POST(request: Request, context: RouteContext) {
     });
     if (error) throw error;
     const posting = Array.isArray(data) ? data[0] : data;
+    await auditUserAction(access, {
+      action: "cd_debit_note_requested", entityType: "cash_discount_recovery", entityId: candidateId,
+      newValue: { postingId: posting && typeof posting === "object" && "id" in posting ? posting.id : null, amount: posting && typeof posting === "object" && "amount" in posting ? posting.amount : null },
+    });
     return jsonWithCors(request, {
       debitNotePosting: posting && typeof posting === "object" ? {
         id: "id" in posting ? posting.id : null,

@@ -1,3 +1,4 @@
+import { auditUserAction } from "@/lib/audit";
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/authorization";
 import { isUuid } from "@/lib/security";
@@ -10,7 +11,8 @@ export async function POST(request: Request, context: RouteContext) {
   try {
     const { companyId, postingId } = await context.params;
     if (!isUuid(companyId) || !isUuid(postingId)) return jsonWithCors(request, { error: "Invalid company or Debit Note id." }, { status: 400 });
-    const { userId } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator"]);
+    const access = await requireMeenakshiCompanyAccess(request, companyId, ["administrator"]);
+    const { userId } = access;
     const body = await request.json().catch(() => ({})) as { reason?: unknown };
     const reason = typeof body.reason === "string" ? body.reason.trim() : "";
     if (reason.length < 3) return jsonWithCors(request, { error: "A reason for checking again is required." }, { status: 400 });
@@ -20,6 +22,7 @@ export async function POST(request: Request, context: RouteContext) {
       p_reason: reason,
     });
     if (error) throw error;
+    await auditUserAction(access, { action: "cd_debit_note_retry_requested", entityType: "cash_discount_debit_note_posting", entityId: postingId, metadata: { reason } });
     return jsonWithCors(request, { outboxId: data, message: "The existing Tally Debit Note will be checked again. No duplicate is created." }, { status: 202 });
   } catch (error) {
     if (error instanceof MeenakshiAccessError) return jsonWithCors(request, { error: error.message }, { status: error.status });

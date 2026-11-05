@@ -40,3 +40,6 @@ Thumbs.db
 # Local one-off backups and caches
 **/.next-backup-*/
 work-cache-backup-*/
+
+# Local-only files holding logins or other secrets (never commit)
+*.local.md

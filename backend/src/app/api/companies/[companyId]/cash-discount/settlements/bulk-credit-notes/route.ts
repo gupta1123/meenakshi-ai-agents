@@ -1,3 +1,4 @@
+import { auditUserAction } from "@/lib/audit";
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/authorization";
 import { requirePostingEnabled } from "@/lib/launch-control";
@@ -20,7 +21,8 @@ export async function POST(request: Request, context: RouteContext) {
   try {
     const { companyId } = await context.params;
     if (!isUuid(companyId)) return jsonWithCors(request, { error: "Invalid company id." }, { status: 400 });
-    const { company, userId } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator"]);
+    const access = await requireMeenakshiCompanyAccess(request, companyId, ["administrator"]);
+    const { company, userId } = access;
     await requirePostingEnabled(company.id);
     const body = await request.json().catch(() => ({})) as { candidateIds?: unknown };
     const candidateIds = [...new Set(Array.isArray(body?.candidateIds) ? body.candidateIds.filter((id): id is string => typeof id === "string" && isUuid(id)) : [])];
@@ -38,6 +40,11 @@ export async function POST(request: Request, context: RouteContext) {
       });
       if (error) skipped.push({ candidateId, reason: error.message }); else queued += 1;
     }
+    await auditUserAction(access, {
+      action: "cd_credit_notes_bulk_requested", entityType: "cash_discount_settlement",
+      newValue: { requested: candidateIds.length, queued, skipped: skipped.length, candidateIds },
+      metadata: { batch },
+    });
     const message = queued ? `${queued} Credit Note${queued === 1 ? " is" : "s are"} queued for Tally.` : "No Credit Notes were queued.";
     return jsonWithCors(request, { queued, skipped: skipped.length, skippedReasons: skipped, message }, { status: queued ? 201 : 409 });
   } catch (error) {

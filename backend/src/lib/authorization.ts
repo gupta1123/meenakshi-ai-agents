@@ -1,4 +1,5 @@
 import { requireRequestUser } from "@/lib/api/request-auth";
+import { auditApiWrite } from "@/lib/audit";
 import { MEENAKSHI_FEATURE, type MeenakshiRole } from "@/lib/constants";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
@@ -138,6 +139,7 @@ export async function requireMeenakshiCompanyAccess(request: Request, companyId:
   try {
     const scope = await requestForScope;
     assertAllowedRole(scope, allowedRoles);
+    auditApiWrite(request, scope);
     return scope;
   } catch (error) {
     companyAccessCache.delete(cacheKey);

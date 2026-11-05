@@ -1,3 +1,4 @@
+import { auditUserAction } from "@/lib/audit";
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/authorization";
 import { requirePostingEnabled } from "@/lib/launch-control";
@@ -21,7 +22,8 @@ export async function POST(request: Request, context: RouteContext) {
     if (!isUuid(companyId) || !isUuid(candidateId)) return jsonWithCors(request, { error: "Invalid id." }, { status: 400 });
     const idempotencyKey = readIdempotencyKey(request);
     if (!idempotencyKey) return jsonWithCors(request, { error: "Idempotency-Key header is required." }, { status: 400 });
-    const { company, userId } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator"]);
+    const access = await requireMeenakshiCompanyAccess(request, companyId, ["administrator"]);
+    const { company, userId } = access;
     await requirePostingEnabled(company.id);
     const db = createSupabaseAdminClient();
     await retireObsoleteEvaluationReads(db, { companyId: company.id });
@@ -29,6 +31,11 @@ export async function POST(request: Request, context: RouteContext) {
       p_company_id: company.id, p_candidate_id: candidateId, p_actor_id: userId, p_idempotency_key: idempotencyKey,
     });
     if (error) return jsonWithCors(request, { error: error.message }, { status: 409 });
+    const posting = Array.isArray(data) ? data[0] : data;
+    await auditUserAction(access, {
+      action: "cd_credit_note_requested", entityType: "cash_discount_settlement", entityId: candidateId,
+      newValue: { postingId: posting && typeof posting === "object" && "id" in posting ? posting.id : null, amount: posting && typeof posting === "object" && "amount" in posting ? posting.amount : null },
+    });
     return jsonWithCors(request, { posting: data }, { status: 201 });
   } catch (error) {
     if (error instanceof MeenakshiAccessError || error instanceof RulebookRequestError) return jsonWithCors(request, { error: error.message }, { status: error.status });
