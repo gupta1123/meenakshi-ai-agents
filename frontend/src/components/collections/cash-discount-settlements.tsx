@@ -198,14 +198,15 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice }: {
       step = "tally_read";
       const readStarted = performance.now();
       cancelRun.current = new AbortController();
-      const result = await runLocalCashDiscount(bootstrap, undefined, { signal: cancelRun.current.signal, onReconnecting: setReconnect, onStatus: setNotice }) as unknown as { results: CdSettlementRow[]; evidence: Record<string, unknown>; timings?: { tallyReadMs?: number; calculationMs?: number } };
+      const result = await runLocalCashDiscount(bootstrap, undefined, { signal: cancelRun.current.signal, onReconnecting: setReconnect, onStatus: setNotice, serverSave: {} }) as unknown as { results: CdSettlementRow[]; evidence: Record<string, unknown>; timings?: { tallyReadMs?: number; calculationMs?: number }; savedOnServer?: { totals?: { autoQueued?: number } } | null };
       timings.tallyReadMs = result.timings?.tallyReadMs ?? Math.round(performance.now() - readStarted);
       if (result.timings?.calculationMs !== undefined) timings.calculationMs = result.timings.calculationMs;
       setLiveRows((result.results ?? []).filter((row) => row.category !== "not_eligible"));
       setPhase("saving");
       step = "save";
       const saveStarted = performance.now();
-      const saved = await apiRequest<{ totals?: { autoQueued?: number } }>(token, `/api/companies/${company.id}/evaluations/cd/local-result`, {
+      // Server mode: the Tally server already saved it (PC mode never sets savedOnServer).
+      const saved = result.savedOnServer ?? await apiRequest<{ totals?: { autoQueued?: number } }>(token, `/api/companies/${company.id}/evaluations/cd/local-result`, {
         method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body: jsonBody({ evaluatedOn, evidence: result.evidence }), timeoutMs: 300_000,
       });
       timings.saveMs = Math.round(performance.now() - saveStarted);

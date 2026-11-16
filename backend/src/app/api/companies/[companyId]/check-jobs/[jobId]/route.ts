@@ -12,8 +12,10 @@ export async function GET(request: Request, context: RouteContext) {
     if (!isUuid(companyId) || !isUuid(jobId)) return jsonWithCors(request, { error: "Invalid id." }, { status: 400 });
     const access = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
     const db = createSupabaseAdminClient();
+    // ?result=0 leaves out the (large) result, for pages that only follow the save.
+    const withResult = new URL(request.url).searchParams.get("result") !== "0";
     const { data: job, error } = await db.from("tally_check_jobs")
-      .select("id, kind, scope_key, status, requested_by, attempts, cancel_requested, progress, result, failing_step, failure_reason, evaluation_run_id, created_at, started_at, finished_at, updated_at")
+      .select(`id, kind, scope_key, status, requested_by, attempts, cancel_requested, progress, ${withResult ? "result, " : ""}failing_step, failure_reason, evaluation_run_id, created_at, started_at, finished_at, updated_at`)
       .eq("id", jobId).eq("company_id", access.company.id).maybeSingle();
     if (error) throw error;
     if (!job) return jsonWithCors(request, { error: "Check not found." }, { status: 404 });

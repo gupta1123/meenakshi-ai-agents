@@ -790,7 +790,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       timings.serverPrepareMs = Math.round(performance.now() - prepareStarted);
       step = "tally_read";
       const readStarted = performance.now();
-      const result = await runLocalTurnoverDiscount(bootstrap, undefined, { onStatus: setNotice, onReconnecting: (state) => setNotice(state ? `Reconnecting to the Meenakshi connector… (try ${state.attempt}). The check keeps running on the PC; keep Tally and the connector open.` : null) });
+      const result = await runLocalTurnoverDiscount(bootstrap, undefined, { onStatus: setNotice, serverSave: { asOfDate }, onReconnecting: (state) => setNotice(state ? `Reconnecting to the Meenakshi connector… (try ${state.attempt}). The check keeps running on the PC; keep Tally and the connector open.` : null) });
       timings.tallyAndCalculationMs = Math.round(performance.now() - readStarted);
       step = "save";
       const saveStarted = performance.now();
@@ -802,12 +802,15 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       setNotice(`Calculated ${result.rows.length} customers from Tally. Saving each result — progress is shown below.`);
       const token = await accessToken();
       if (!token) return;
-      const response = await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/tod/local-result`, {
-        method: "POST",
-        headers: { "Idempotency-Key": idempotencyKey() },
-        body: jsonBody({ asOfDate, evaluatedOn: bootstrap.evaluatedOn, evidence: result.evidence }),
-        timeoutMs: 60_000,
-      });
+      // Server mode: the Tally server already saved it (PC mode never sets savedOnServer).
+      const response = result.savedOnServer
+        ? await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/runs/${result.savedOnServer.evaluationRunId}`, { cache: "no-store" })
+        : await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/tod/local-result`, {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey() },
+          body: jsonBody({ asOfDate, evaluatedOn: bootstrap.evaluatedOn, evidence: result.evidence }),
+          timeoutMs: 60_000,
+        });
       setLatestRun(response.evaluationRun);
       // Saving writes one result per customer; hundreds of customers can take
       // several minutes, so keep waiting (up to 20 minutes) instead of giving

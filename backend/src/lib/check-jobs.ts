@@ -52,19 +52,23 @@ export function buildCheckJobInput(body: unknown): CheckJobInput {
     if (JSON.stringify(v).length > MAX_BODY_BYTES) throw new CheckJobRequestError("body is too large.");
     return v as Record<string, unknown>;
   };
+  // save: the server saves the result itself when the check finishes, so the
+  // check completes even if the page is closed. TOD needs the as-of date it is saved under.
   if (b.kind === "cd") {
     const schemeVersionId = part("schemeVersionId", true);
-    return { kind: "cd", scopeKey: `cd:${schemeVersionId ?? "all"}`, request: { schemeVersionId, body: calculationBody() } };
+    const save = b.save === true ? {} : null;
+    return { kind: "cd", scopeKey: `cd:${schemeVersionId ?? "all"}`, request: { schemeVersionId, save, body: calculationBody() } };
   }
   if (b.kind === "tod") {
     const periodStart = date("periodStart");
     const periodEnd = date("periodEnd");
     if (periodEnd < periodStart) throw new CheckJobRequestError("periodEnd must not be before periodStart.");
     const schemeVersionId = part("schemeVersionId", true);
+    const save = b.saveAsOfDate === undefined || b.saveAsOfDate === null ? null : { asOfDate: date("saveAsOfDate") };
     return {
       kind: "tod",
       scopeKey: `tod:${periodStart}:${periodEnd}${schemeVersionId ? `:${schemeVersionId}` : ""}`,
-      request: { periodStart, periodEnd, schemeVersionId, body: calculationBody() },
+      request: { periodStart, periodEnd, schemeVersionId, save, body: calculationBody() },
     };
   }
   // One note's e-invoice details (IRN, Ack, signed QR), read from Tally by the server connector.

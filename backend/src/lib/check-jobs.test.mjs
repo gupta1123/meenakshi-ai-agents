@@ -53,3 +53,12 @@ test("server readiness explains each reason in plain words", () => {
   assert.equal(describeServerReadiness({ ...base, companyLoaded: false, activeCompanyName: null }).state, "company_not_open");
   assert.equal(describeServerReadiness({ ...base, activeCompanyName: "Another Co" }).state, "wrong_company");
 });
+
+test("a check can ask the server to save its result", () => {
+  assert.equal(buildCheckJobInput({ kind: "cd", body: {} }).request.save, null);
+  assert.deepEqual(buildCheckJobInput({ kind: "cd", save: true, body: {} }).request.save, {});
+  const tod = buildCheckJobInput({ kind: "tod", periodStart: "2026-04-01", periodEnd: "2026-06-30", saveAsOfDate: "2026-06-30", body: {} });
+  assert.deepEqual(tod.request.save, { asOfDate: "2026-06-30" });
+  assert.equal(buildCheckJobInput({ kind: "tod", periodStart: "2026-04-01", periodEnd: "2026-06-30", body: {} }).request.save, null);
+  assert.throws(() => buildCheckJobInput({ kind: "tod", periodStart: "2026-04-01", periodEnd: "2026-06-30", saveAsOfDate: "soon", body: {} }));
+});

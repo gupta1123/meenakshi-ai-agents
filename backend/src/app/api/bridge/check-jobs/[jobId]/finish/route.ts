@@ -1,4 +1,6 @@
+import { after } from "next/server";
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
+import { saveCheckJobResult } from "@/lib/check-job-save";
 import { authenticateMeenakshiBridge } from "@/lib/bridge";
 import { isUuid, readBridgeToken } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
@@ -7,9 +9,9 @@ type RouteContext = { params: Promise<{ jobId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
 
 /**
- * The connector ends a check. This records state only; saving the calculated
- * result as an evaluation run (the existing local-result logic) is attached
- * when the connector is wired up in Phase 2.
+ * The connector ends a check. A successful Cash Discount / Turnover Discount
+ * result is then saved as an evaluation run in the background (after the
+ * connector has its answer), so no page needs to be open for it to be saved.
  */
 export async function POST(request: Request, context: RouteContext) {
   try {
@@ -30,6 +32,7 @@ export async function POST(request: Request, context: RouteContext) {
     });
     if (error) throw error;
     if (!data) return jsonWithCors(request, { error: "This check is no longer yours (it was stopped, expired or finished)." }, { status: 409 });
+    if (body.status === "succeeded") after(() => saveCheckJobResult(jobId).catch((cause) => console.error("Could not save check job result:", cause)));
     return jsonWithCors(request, { ok: true });
   } catch (error) {
     console.error("Error in POST /api/bridge/check-jobs/:id/finish:", error);

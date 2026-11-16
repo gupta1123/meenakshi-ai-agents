@@ -10,6 +10,7 @@ import { userFacingDetail, userFacingError } from "@/lib/user-copy";
 
 import { useCompany } from "./company-context";
 import { useTallyCompanySelection } from "./tally-company-selection";
+import { TallyModeSetting } from "./tally-mode-setting";
 import { WorkspacePageHeader } from "./app-shell";
 import type { TallyHealth } from "./types";
 import { Button, InlineMessage, Skeleton } from "./ui";
@@ -659,6 +660,8 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
               <span>Companies in Tally Prime</span>
               <ul>{tallyCompanies.map((item) => <li key={item.guid} data-active={item.isActive}><Building2 size={14} />{item.name}{item.isActive && <em>Open</em>}</li>)}</ul>
             </div>}
+
+            {health?.connector?.id && <TallyModeSetting companyId={company.id} getToken={token} />}
 
             <div className={s.advancedActions}>
               <Button type="button" className="button-secondary" disabled={addingComputer} onClick={() => void addComputer()}><ServerCog size={15} />{addingComputer ? "Opening connector…" : "Add another computer"}</Button>

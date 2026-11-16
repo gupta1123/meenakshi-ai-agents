@@ -98,7 +98,7 @@ export async function runCheckJob(job, { config, activeCompany, isCancelled, onP
   try {
     calculation = isCashDiscount
       ? body.rule?.cdDiscountBasis === "amount_per_tonne"
-        ? deps.evaluateCashDiscountSettlements(body.rule, body.evaluatedOn, evidence.invoices)
+        ? deps.evaluateCashDiscountSettlements(body.rule, body.evaluatedOn, evidence.invoices, evidence.customerCredits ?? [])
         : deps.evaluateLocalCashDiscount(body.rule, body.evaluatedOn, evidence.invoices)
       : deps.evaluateLocalTurnoverDiscount(body.rule, body.evaluatedOn, body.periodStart, body.periodEnd, evidence.customerAggregates);
   } catch (error) {

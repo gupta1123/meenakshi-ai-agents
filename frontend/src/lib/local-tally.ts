@@ -68,9 +68,10 @@ async function runServerJob<T>(task: "cash_discount" | "turnover_discount", body
   const context = serverContext!;
   const token = async () => { const value = await context.getToken(); if (!value) throw new LocalCalculationError("You are signed out. Sign in again, then calculate.", "tally_read"); return value; };
   const base = `/api/companies/${context.companyId}/check-jobs`;
+  const serverSave = options?.serverSave;
   const input = task === "cash_discount"
-    ? { kind: "cd", body }
-    : { kind: "tod", periodStart: String(body.periodStart), periodEnd: String(body.periodEnd), body };
+    ? { kind: "cd", body, ...(serverSave ? { save: true } : {}) }
+    : { kind: "tod", periodStart: String(body.periodStart), periodEnd: String(body.periodEnd), body, ...(serverSave?.asOfDate ? { saveAsOfDate: serverSave.asOfDate } : {}) };
   let created: { job: { id: string }; joined: boolean; queuePosition: number };
   try {
     created = await apiRequest(await token(), base, { method: "POST", body: JSON.stringify(input), timeoutMs: 30_000 });
@@ -116,14 +117,39 @@ async function runServerJob<T>(task: "cash_discount" | "turnover_discount", body
         continue;
       }
       options?.onStatus?.(null);
-      if (job.status === "succeeded" && job.result) return job.result as T;
+      if (job.status === "succeeded" && job.result) {
+        const savedOnServer = serverSave ? await waitForServerSave(base, jobId, token, options) : null;
+        return (savedOnServer ? { ...job.result, savedOnServer } : job.result) as T;
+      }
       throw new LocalCalculationError(job.failure_reason || "The check did not finish.", job.failing_step === "calculation" ? "calculation" : "tally_read");
     }
   } finally { serverProgress = null; }
 }
 
+export type ServerSaved = { evaluationRunId: string; totals?: { autoQueued?: number } & Record<string, unknown> };
+
+/**
+ * Server mode saves the result itself when the check finishes (so it is saved
+ * even if this page closes). Wait for that; null means the page must save it.
+ */
+async function waitForServerSave(base: string, jobId: string, token: () => Promise<string>, options: LocalRunOptions | undefined): Promise<ServerSaved | null> {
+  const started = Date.now();
+  options?.onStatus?.("Saving the result on the server…");
+  try {
+    while (Date.now() - started < 15 * 60_000) {
+      type SaveState = { state: "saving" | "saved" | "failed"; evaluationRunId?: string; totals?: ServerSaved["totals"] };
+      const state = await apiRequest<{ job: { progress?: { save?: SaveState } | null } }>(await token(), `${base}/${jobId}?result=0`, { timeoutMs: 10_000 }).catch(() => null);
+      const save = state?.job.progress?.save;
+      if (save?.state === "saved" && save.evaluationRunId) return { evaluationRunId: save.evaluationRunId, totals: save.totals };
+      if (save?.state === "failed") return null;
+      await sleep(2_000);
+    }
+    return null;
+  } finally { options?.onStatus?.(null); }
+}
+
 export type ReconnectState = { attempt: number; offlineMs: number } | null;
-export type LocalRunOptions = { signal?: AbortSignal; onReconnecting?: (state: ReconnectState) => void; /** Server mode: a plain-language waiting message, or null when it clears. */ onStatus?: (message: string | null) => void };
+export type LocalRunOptions = { signal?: AbortSignal; onReconnecting?: (state: ReconnectState) => void; /** Server mode: a plain-language waiting message, or null when it clears. */ onStatus?: (message: string | null) => void; /** Server mode: the server saves the result itself (TOD: under this as-of date). */ serverSave?: { asOfDate?: string } };
 
 const MAX_OFFLINE_MS = 3 * 60_000;
 const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -256,6 +282,8 @@ export type LocalCdInvoiceCheck = {
 };
 
 export type LocalCdResult = {
+  /** Server mode: the server already saved this result as an evaluation run. */
+  savedOnServer?: ServerSaved | null;
   rows: LocalCdRow[];
   results: LocalCdInvoiceCheck[];
   totals: { invoicesChecked: number; actionRequired: number; reviewRequired: number; recoveryAmount: string; alreadyRecovered: string };
@@ -310,6 +338,8 @@ export type LocalTodBatchEvidence = {
 };
 
 export type LocalTodResult = {
+  /** Server mode: the server already saved this result as an evaluation run. */
+  savedOnServer?: ServerSaved | null;
   rows: LocalTodRow[];
   totals: { customersChecked: number; qualified: number; needAttention: number; projectedDiscount: string };
   evidence: LocalTodBatchEvidence;
@@ -332,9 +362,12 @@ export async function runLocalTurnoverDiscount(bootstrap: LocalTodBootstrap, sig
   // periods at the same time can make their Tally responses cross over, so
   // calculate each locked-period batch in order.
   const results: LocalTodResult[] = [];
-  for (const batch of bootstrap.batches) results.push(await runLocalTurnoverDiscountBatch(bootstrap, batch, signal, options));
+  // Server mode can save a run made of one period by itself; several periods are merged and saved by the page.
+  const batchOptions = options?.serverSave && bootstrap.batches.length !== 1 ? { ...options, serverSave: undefined } : options;
+  for (const batch of bootstrap.batches) results.push(await runLocalTurnoverDiscountBatch(bootstrap, batch, signal, batchOptions));
   const primary = results[0];
   return {
+    savedOnServer: results.length === 1 ? results[0].savedOnServer : undefined,
     rows: results.flatMap((result) => result.rows),
     totals: results.reduce((total, result) => ({
       customersChecked: total.customersChecked + result.totals.customersChecked,
