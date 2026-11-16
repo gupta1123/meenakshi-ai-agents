@@ -63,16 +63,26 @@ function applyContribution({ aggregate, voucher, voucherTaxableValue, voucherTon
   aggregate.contributions.push({ tallyGuid: voucher.guid, voucherNumber: voucher.voucherNumber || null, voucherDate: voucher.voucherDate, voucherKind: voucher.voucherKind, tallyAlterId: voucher.alterId || null, linkedSalesVoucherGuid: voucher.linkedSalesVoucherGuid || null, sourceSalesLedgerName: sourceSalesLedgerName(voucher), taxableValueContribution: voucherTaxableValue.toFixed(), tonneContribution: voucherTonnes.toFixed() });
 }
 
-/** Checks each period Sales invoice against its receipts; only invoices paid in full (GST-inclusive, ₹1 tolerance) by the due date count. */
-function checkPayments(pendingSales, allocations, paymentCheck, cdCreditByInvoice = new Map()) {
-  const paymentsByReference = new Map();
+function byReference(allocations) {
+  const map = new Map();
   for (const allocation of allocations) {
     for (const key of [allocation.targetVoucherGuid, allocation.billReference].map(normalized).filter(Boolean)) {
-      const list = paymentsByReference.get(key) ?? [];
+      const list = map.get(key) ?? [];
       list.push(allocation);
-      paymentsByReference.set(key, list);
+      map.set(key, list);
     }
   }
+  return map;
+}
+
+/**
+ * Checks each period Sales invoice against its receipts; only invoices paid in full (GST-inclusive, ₹1 tolerance) by the due date count.
+ * Credit Notes reduce what must be paid: our Cash Discount notes (by narration), and any other Credit Note
+ * set against the bill in Tally (for example a manual discount note), for the amount set against it.
+ */
+function checkPayments(pendingSales, allocations, paymentCheck, cdCreditByInvoice = new Map(), creditNoteAllocations = []) {
+  const paymentsByReference = byReference(allocations);
+  const creditNotesByReference = byReference(creditNoteAllocations);
   const checks = [];
   for (const entry of pendingSales) {
     const { voucher } = entry;
@@ -84,7 +94,11 @@ function checkPayments(pendingSales, allocations, paymentCheck, cdCreditByInvoic
     // A discounted payment plus its Cash Discount Credit Note settles the
     // invoice (docs/CD_LOGIC.md §8): the Credit Note reduces what must be paid.
     const cashDiscountCredit = voucher.voucherNumber ? (cdCreditByInvoice.get(`${normalized(voucher.partyLedgerName)}|${voucher.voucherNumber}`) ?? new Decimal(0)) : new Decimal(0);
-    const invoiceAmount = new Decimal(voucher.grossAmount || 0).abs().minus(cashDiscountCredit);
+    const creditNotes = [...new Map([voucher.guid, voucher.voucherNumber, ...billReferences]
+      .flatMap((reference) => creditNotesByReference.get(normalized(reference)) ?? [])
+      .map((note) => [`${note.receiptGuid}:${note.billReference}:${note.allocatedAmount}`, note])).values()];
+    const otherCredit = creditNotes.reduce((total, note) => total.plus(new Decimal(note.allocatedAmount || 0).abs()), new Decimal(0));
+    const invoiceAmount = new Decimal(voucher.grossAmount || 0).abs().minus(cashDiscountCredit).minus(otherCredit);
     const { nominalDueDate, dueDate, shiftedFor } = todPaymentDueDate(voucher.voucherDate, paymentCheck);
     let paidTotal = new Decimal(0);
     let paidByDueDate = new Decimal(0);
@@ -95,6 +109,8 @@ function checkPayments(pendingSales, allocations, paymentCheck, cdCreditByInvoic
       if (payment.receiptDate <= dueDate) paidByDueDate = paidByDueDate.plus(amount);
       if (!paidInFullOn && paidTotal.gte(invoiceAmount.minus(PAYMENT_TOLERANCE))) paidInFullOn = payment.receiptDate;
     }
+    // Settled by Credit Notes alone.
+    if (!paidInFullOn && creditNotes.length && invoiceAmount.lte(PAYMENT_TOLERANCE)) paidInFullOn = creditNotes.map((note) => note.receiptDate).sort().at(-1);
     const counted = Boolean(paidInFullOn && paidInFullOn <= dueDate);
     const reason = counted ? "paid_in_full_on_time" : paidInFullOn ? "paid_after_due_date" : paidTotal.gt(0) ? "partly_paid" : "not_paid";
     checks.push({
@@ -113,6 +129,7 @@ function checkPayments(pendingSales, allocations, paymentCheck, cdCreditByInvoic
       paidByDueDate: paidByDueDate.toFixed(),
       paidTotal: paidTotal.toFixed(),
       payments: payments.map((payment) => ({ receiptNumber: payment.receiptNumber, receiptDate: payment.receiptDate, amount: new Decimal(payment.allocatedAmount || 0).abs().toFixed() })),
+      ...(creditNotes.length ? { creditNotes: creditNotes.map((note) => ({ creditNoteNumber: note.receiptNumber, creditNoteDate: note.receiptDate, amount: new Decimal(note.allocatedAmount || 0).abs().toFixed() })) } : {}),
       tonnes: entry.voucherTonnes.toFixed(),
       taxableValue: entry.voucherTaxableValue.toFixed(),
       counted,
@@ -146,6 +163,8 @@ export async function fetchLiveTodEvidence(command, context) {
   // Cash Discount Credit Notes by "<customer>|<invoice number>", read from our
   // narration "Being Cash Discount allowed against Inv No. <n> dt. …".
   const cdCreditByInvoice = new Map();
+  // Other Credit Notes' "Agst Ref" allocations, which settle the bill they are set against.
+  const creditNoteAllocations = [];
   while (cursor) {
     if (chunks >= MAX_CHUNKS) throw new Error("The requested Tally period is too large for one live calculation.");
     const result = await syncVouchers({ ...command, payload: { ...command.payload, syncRunId: command.payload.voucherSyncRunId, requestedScope: { ...scope, customerLedgerName: null, customers: null, dateTo: readTo, cursor } } }, context);
@@ -162,6 +181,10 @@ export async function fetchLiveTodEvidence(command, context) {
         if (invoiceNumber) {
           const key = `${normalized(voucher.partyLedgerName)}|${invoiceNumber}`;
           cdCreditByInvoice.set(key, (cdCreditByInvoice.get(key) ?? new Decimal(0)).plus(new Decimal(voucher.grossAmount || 0).abs()));
+        } else {
+          for (const allocation of voucher.billAllocations ?? []) {
+            if (allocation.allocationType === "agst_ref") creditNoteAllocations.push({ receiptGuid: voucher.guid, receiptNumber: voucher.voucherNumber || null, receiptDate: voucher.voucherDate, billReference: allocation.billReference || null, targetVoucherGuid: allocation.targetVoucherGuid || null, allocatedAmount: allocation.allocatedAmount });
+          }
         }
       }
       // Vouchers after the period are read only for their receipts and Cash Discount Credit Notes.
@@ -196,7 +219,7 @@ export async function fetchLiveTodEvidence(command, context) {
     }
     cursor = result.cursorTo;
   }
-  const paymentChecks = paymentCheck ? checkPayments(pendingSales, allocations, paymentCheck, cdCreditByInvoice) : null;
+  const paymentChecks = paymentCheck ? checkPayments(pendingSales, allocations, paymentCheck, cdCreditByInvoice, creditNoteAllocations) : null;
 
   const customerAggregates = [...aggregates.values()].map((aggregate) => {
     aggregate.contributions.sort((left, right) => `${left.voucherDate}:${left.tallyGuid}`.localeCompare(`${right.voucherDate}:${right.tallyGuid}`));
