@@ -125,3 +125,23 @@ export async function uploadCreditNotePdf(config, commandId, { pdf, tallyGuid, a
   if (!response.ok) throw new Error(payload.error || `Meenakshi API returned HTTP ${response.status} while receiving the Credit Note PDF.`);
   return payload;
 }
+
+// --- Server mode: checks queued by web users for this server connector.
+export function claimNextCheckJob(config) {
+  return request(config, `/api/bridge/check-jobs/next?connectorId=${encodeURIComponent(config.connectorId)}`);
+}
+
+export function reportCheckJobProgress(config, jobId, progress) {
+  return request(config, `/api/bridge/check-jobs/${encodeURIComponent(jobId)}/progress`, {
+    method: "POST",
+    body: { connectorId: config.connectorId, progress },
+  });
+}
+
+export function finishCheckJob(config, jobId, { status, result, failingStep, failureReason }) {
+  return request(config, `/api/bridge/check-jobs/${encodeURIComponent(jobId)}/finish`, {
+    method: "POST",
+    body: { connectorId: config.connectorId, status, result, failingStep, failureReason },
+    timeoutMs: 120_000,
+  });
+}

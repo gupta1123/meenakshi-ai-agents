@@ -1,6 +1,6 @@
 # Plan: connector on a Tally server, alongside the current PC connector
 
-**Status:** plan only, nothing built. Written 2026-11-05.
+**Status:** built locally on branch `feature/server-connector` (Phases 1-3 for Cash Discount and Turnover Discount), not deployed, migration not applied. Written 2026-11-05. Not built yet: e-invoice read in server mode, saving the result on the backend when no page is open, setting a connector to `server` from the UI (done by SQL for now: `insert into tally_connector_modes`).
 **Goal:** the client's Tally runs permanently on a Windows server. One connector installed there serves every user from the web app. Nobody keeps a PC on or connects their own Tally. The current PC setup keeps working, unchanged.
 
 ## 1. How it works today, and what breaks
@@ -130,3 +130,10 @@ Local code, the deployed backend (Heroku), the deployed frontend (Netlify) and t
 - Calculation moves from "browser drives it" to "backend queue drives it". It is the largest change, which is why PC mode stays untouched and the rollout is gated.
 - A server connector with nobody at the machine needs good alerts and logs. The log upload and crash reports already exist.
 - Tally freezes under heavy reads (seen on 3 Nov). The one-at-a-time gate and paced windows help but do not remove it.
+
+## 7. Client answers (2026-11-05)
+1. Tally Prime on a Windows server.
+2. We can install the connector there.
+3. After a reboot someone opens Tally by hand. The connector starts at that user's logon; checks wait, and the app says why ("Tally is not open on the server", "company not loaded", "server not responding") until Tally is ready.
+4. Assumed: same data, correct clock. To confirm in the pilot by comparing totals.
+5. One person on their team does installs and updates; connector updates stay manual.

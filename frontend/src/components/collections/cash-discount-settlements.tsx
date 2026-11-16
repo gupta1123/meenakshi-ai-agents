@@ -198,7 +198,7 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice }: {
       step = "tally_read";
       const readStarted = performance.now();
       cancelRun.current = new AbortController();
-      const result = await runLocalCashDiscount(bootstrap, undefined, { signal: cancelRun.current.signal, onReconnecting: setReconnect }) as unknown as { results: CdSettlementRow[]; evidence: Record<string, unknown>; timings?: { tallyReadMs?: number; calculationMs?: number } };
+      const result = await runLocalCashDiscount(bootstrap, undefined, { signal: cancelRun.current.signal, onReconnecting: setReconnect, onStatus: setNotice }) as unknown as { results: CdSettlementRow[]; evidence: Record<string, unknown>; timings?: { tallyReadMs?: number; calculationMs?: number } };
       timings.tallyReadMs = result.timings?.tallyReadMs ?? Math.round(performance.now() - readStarted);
       if (result.timings?.calculationMs !== undefined) timings.calculationMs = result.timings.calculationMs;
       setLiveRows((result.results ?? []).filter((row) => row.category !== "not_eligible"));

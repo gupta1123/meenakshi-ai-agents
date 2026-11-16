@@ -1,3 +1,5 @@
+import { apiRequest } from "@/lib/api";
+
 const LOCAL_TALLY_BASE = "http://127.0.0.1:3219";
 
 /** A calculation that failed on this PC, with where it failed and how far it got. */
@@ -48,8 +50,80 @@ export async function detectLocalTallyConnector(signal?: AbortSignal): Promise<s
 }
 
 
+// --- Server mode -------------------------------------------------------------
+// When a company's Tally connector runs on a permanent server, the page cannot
+// reach it directly. Checks are queued in the cloud instead and followed from
+// there. PC-mode companies never set this context, so they keep the code path above.
+export type ServerCheckContext = { companyId: string; getToken: () => Promise<string | null> };
+let serverContext: ServerCheckContext | null = null;
+let modeReady: Promise<void> = Promise.resolve();
+let serverProgress: LocalProgress | null = null;
+
+/** Called by the page once it knows the company's mode (null = PC mode). */
+export function setServerCheckContext(context: ServerCheckContext | null) { serverContext = context; if (!context) serverProgress = null; }
+/** Lets runs wait for the page's mode lookup instead of racing it. */
+export function setServerModeLookup(lookup: Promise<void>) { modeReady = lookup; }
+
+async function runServerJob<T>(task: "cash_discount" | "turnover_discount", body: Record<string, unknown>, overallTimeoutMs: number, options: LocalRunOptions | undefined, timeoutMessage: string): Promise<T> {
+  const context = serverContext!;
+  const token = async () => { const value = await context.getToken(); if (!value) throw new LocalCalculationError("You are signed out. Sign in again, then calculate.", "tally_read"); return value; };
+  const base = `/api/companies/${context.companyId}/check-jobs`;
+  const input = task === "cash_discount"
+    ? { kind: "cd", body }
+    : { kind: "tod", periodStart: String(body.periodStart), periodEnd: String(body.periodEnd), body };
+  let created: { job: { id: string }; joined: boolean; queuePosition: number };
+  try {
+    created = await apiRequest(await token(), base, { method: "POST", body: JSON.stringify(input), timeoutMs: 30_000 });
+  } catch (cause) {
+    throw new LocalCalculationError(cause instanceof Error ? cause.message : "Could not start the check on the Tally server.", "tally_read");
+  }
+  const jobId = created.job.id;
+  const stop = () => { void token().then((t) => apiRequest(t, `${base}/${jobId}/cancel`, { method: "POST", timeoutMs: 10_000 })).catch(() => {}); };
+  const started = Date.now();
+  let offlineSince: number | null = null;
+  let attempt = 0;
+  try {
+    for (;;) {
+      if (options?.signal?.aborted) { stop(); throw new LocalCalculationError("The check was cancelled.", "tally_read"); }
+      if (Date.now() - started > overallTimeoutMs) { stop(); throw new LocalCalculationError(timeoutMessage, "tally_read", null, true); }
+      await sleep(2_000);
+      type ServerJob = { status: string; progress?: Partial<LocalProgress> | null; result?: T | null; failure_reason?: string | null; failing_step?: string | null; started_at?: string | null };
+      let state: { job: ServerJob; queuePosition: number };
+      try {
+        state = await apiRequest(await token(), `${base}/${jobId}`, { timeoutMs: 10_000 });
+        if (offlineSince !== null) { offlineSince = null; attempt = 0; options?.onReconnecting?.(null); }
+      } catch (cause) {
+        if (cause instanceof LocalCalculationError) throw cause;
+        offlineSince ??= Date.now();
+        attempt += 1;
+        const offlineMs = Date.now() - offlineSince;
+        options?.onReconnecting?.({ attempt, offlineMs });
+        if (offlineMs > 3 * 60_000) { options?.onReconnecting?.(null); throw new LocalCalculationError("Lost contact with Meenakshi for over 3 minutes. The check keeps running on the Tally server: press Calculate to pick it back up.", "tally_read"); }
+        continue;
+      }
+      const { job, queuePosition } = state;
+      if (job.status === "queued") {
+        // After a reboot Tally is opened by hand, so say plainly why a check is waiting.
+        const readiness = await apiRequest<{ message?: string | null }>(await token(), `${base}/mode`, { timeoutMs: 8_000 }).catch(() => null);
+        const ahead = queuePosition > 0 ? `${queuePosition} check${queuePosition === 1 ? "" : "s"} ahead of yours. ` : "";
+        options?.onStatus?.(readiness?.message ? `Waiting. ${ahead}${readiness.message}` : queuePosition > 0 ? `Waiting for the Tally server — ${ahead.trim()}` : "Waiting for the Tally server to pick this up…");
+        continue;
+      }
+      if (job.status === "running") {
+        options?.onStatus?.(null);
+        const p = job.progress ?? {};
+        serverProgress = { task, stage: p.stage ?? "reading", done: p.done ?? 0, total: p.total ?? null, from: p.from ?? null, to: p.to ?? null, nextDate: p.nextDate ?? null, vouchersScanned: p.vouchersScanned, startedAt: job.started_at ?? new Date(started).toISOString() };
+        continue;
+      }
+      options?.onStatus?.(null);
+      if (job.status === "succeeded" && job.result) return job.result as T;
+      throw new LocalCalculationError(job.failure_reason || "The check did not finish.", job.failing_step === "calculation" ? "calculation" : "tally_read");
+    }
+  } finally { serverProgress = null; }
+}
+
 export type ReconnectState = { attempt: number; offlineMs: number } | null;
-export type LocalRunOptions = { signal?: AbortSignal; onReconnecting?: (state: ReconnectState) => void };
+export type LocalRunOptions = { signal?: AbortSignal; onReconnecting?: (state: ReconnectState) => void; /** Server mode: a plain-language waiting message, or null when it clears. */ onStatus?: (message: string | null) => void };
 
 const MAX_OFFLINE_MS = 3 * 60_000;
 const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -60,6 +134,8 @@ const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve
  * page keeps trying to reach the connector and picks the job back up.
  */
 async function runLocalJob<T>(task: "cash_discount" | "turnover_discount", body: Record<string, unknown>, overallTimeoutMs: number, options: LocalRunOptions | undefined, legacy: () => Promise<T>, timeoutMessage: string): Promise<T> {
+  await modeReady;
+  if (serverContext) return runServerJob<T>(task, body, overallTimeoutMs, options, timeoutMessage);
   const begin = async (): Promise<string | "legacy"> => {
     try {
       const response = await fetch(`${LOCAL_TALLY_BASE}/v1/jobs`, {
@@ -302,6 +378,7 @@ export type LocalProgress = {
 
 /** Progress of the calculation the local connector is running; null if none or unsupported. */
 export async function readLocalProgress(signal?: AbortSignal): Promise<LocalProgress | null> {
+  if (serverContext) return serverProgress;
   try {
     const response = await fetch(`${LOCAL_TALLY_BASE}/v1/progress`, { cache: "no-store", signal: signal ?? AbortSignal.timeout(3_000) });
     if (!response.ok) return null;
@@ -318,6 +395,23 @@ export type LocalNoteEInvoice = { irn: string; ackNo: string; ackDate: string | 
  * the note is not e-invoiced yet; throws when the connector or Tally is not ready.
  */
 export async function readLocalNoteEInvoice(input: { expectedCompany: { guid?: string | null; name?: string | null }; date: string; voucherNumber: string; kind: "credit" | "debit" }): Promise<LocalNoteEInvoice | null> {
+  await modeReady;
+  if (serverContext) {
+    // Server mode: ask the Tally server through the cloud queue (a small read, answered in seconds).
+    const context = serverContext;
+    const token = await context.getToken();
+    if (!token) throw new Error("You are signed out. Sign in again.");
+    const base = `/api/companies/${context.companyId}/check-jobs`;
+    const created = await apiRequest<{ job: { id: string } }>(token, base, { method: "POST", body: JSON.stringify({ kind: "einvoice", noteKind: input.kind, date: input.date, voucherNumber: input.voucherNumber }), timeoutMs: 20_000 });
+    const started = Date.now();
+    while (Date.now() - started < 90_000) {
+      await sleep(1_500);
+      const state = await apiRequest<{ job: { status: string; result?: { einvoice?: LocalNoteEInvoice | null } | null; failure_reason?: string | null } }>(token, `${base}/${created.job.id}`, { timeoutMs: 10_000 });
+      if (state.job.status === "succeeded") return state.job.result?.einvoice ?? null;
+      if (state.job.status === "failed" || state.job.status === "cancelled" || state.job.status === "expired") throw new Error(state.job.failure_reason || "The Tally server could not read the e-Invoice.");
+    }
+    throw new Error("The Tally server did not answer in time. Try again in a moment.");
+  }
   const response = await fetch(`${LOCAL_TALLY_BASE}/v1/einvoice`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

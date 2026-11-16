@@ -87,6 +87,7 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
     if (chunks >= MAX_CHUNKS) throw new Error("The Cash Discount period is too large for one live calculation.");
     const days = windowDays(cursor);
     if (days === 0) throw new Error(`Tally could not give the data for ${cursor} even one day at a time, and the connector stopped each time it tried. Ask support to look at that day in Tally.`);
+    await context.betweenWindows?.(); // server mode: lets a waiting Credit Note run between read windows
     persist(cursor); // marks this window as "being read": if the connector dies now, the next try uses a smaller window
     const result = await syncVouchers({ ...command, payload: { ...command.payload, syncRunId: command.payload.voucherSyncRunId, requestedScope: { ...scope, customers: eligibleCustomers, cursor, chunkDays: days } } }, context);
     chunks += 1;
