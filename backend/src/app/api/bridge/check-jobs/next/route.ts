@@ -1,5 +1,5 @@
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
-import { authenticateMeenakshiBridge } from "@/lib/bridge";
+import { authenticateMeenakshiBridge, bridgeVersionIsOlder } from "@/lib/bridge";
 import { isUuid, readBridgeToken } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
@@ -13,9 +13,10 @@ export async function GET(request: Request) {
     if (!isUuid(connectorId) || !token) return jsonWithCors(request, { error: "connectorId and bridge credential are required." }, { status: 400 });
     const connector = await authenticateMeenakshiBridge(connectorId, token);
     if (!connector) return jsonWithCors(request, { error: "Invalid connector credential." }, { status: 401 });
+    if (!connector.bridge_version || bridgeVersionIsOlder(connector.bridge_version, "0.5.1")) return jsonWithCors(request, { error: "Server connector update required: install 0.5.1 or newer." }, { status: 426 });
     const workerId = `meenakshi-bridge:${connector.id}:${connector.machine_fingerprint.slice(-32)}`;
     const db = createSupabaseAdminClient();
-    const { data, error } = await db.rpc("claim_tally_check_job", { p_connector_id: connector.id, p_worker_id: workerId, p_lease_seconds: 180 });
+    const { data, error } = await db.rpc("claim_tally_check_job_v2", { p_connector_id: connector.id, p_worker_id: workerId, p_lease_seconds: 180 });
     if (error) throw error;
     const job = (data as Array<Record<string, unknown>> | null)?.[0];
     if (!job) return jsonWithCors(request, { job: null });

@@ -18,10 +18,11 @@ begin
   values (v_org, v_co, v_conn, 'smoke-guid', 'Solution Nyx', true);
 
   -- 1. A PC connector (no mode row) cannot receive jobs.
+  fin := false;
   begin
     perform public.request_tally_check_job(v_org, v_co, 'cd', 'cd:A', '{}'::jsonb, null);
-    raise exception 'expected the PC-mode refusal';
-  exception when sqlstate 'P0001' then null; end;
+  exception when sqlstate 'P0001' then fin := true; end;
+  if not fin then raise exception 'expected the PC-mode refusal'; end if;
   select count(*) into n from public.claim_tally_check_job(v_conn, 'w1', 60);
   if n <> 0 then raise exception 'a PC connector must not claim jobs'; end if;
 

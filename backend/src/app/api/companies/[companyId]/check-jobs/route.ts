@@ -17,7 +17,7 @@ export async function POST(request: Request, context: RouteContext) {
     if (!isUuid(companyId)) return jsonWithCors(request, { error: "Invalid company id." }, { status: 400 });
     const access = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
     const input = buildCheckJobInput(await request.json().catch(() => null));
-    const { data, error } = await createSupabaseAdminClient().rpc("request_tally_check_job", {
+    const { data, error } = await createSupabaseAdminClient().rpc("request_tally_check_job_v2", {
       p_organization_id: access.company.organization_id, p_company_id: access.company.id,
       p_kind: input.kind, p_scope_key: input.scopeKey, p_request: input.request, p_requested_by: access.userId,
     });

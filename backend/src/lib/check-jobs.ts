@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 /**
  * Pure helpers for server-mode check jobs (Cash Discount / Turnover Discount /
  * e-invoice reads queued for a Tally server connector). No database imports so
@@ -17,6 +19,16 @@ export class CheckJobRequestError extends Error {
 export type CheckJobInput = { kind: CheckJobKind; scopeKey: string; request: Record<string, unknown> };
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (value && typeof value === "object") return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => `${JSON.stringify(key)}:${canonical(item)}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+function calculationJob(kind: "cd" | "tod", request: Record<string, unknown>): CheckJobInput {
+  return { kind, scopeKey: `${kind}:${createHash("sha256").update(canonical(request)).digest("hex")}`, request };
+}
 
 export function isCheckJobKind(value: unknown): value is CheckJobKind {
   return typeof value === "string" && (CHECK_JOB_KINDS as readonly string[]).includes(value);
@@ -57,7 +69,7 @@ export function buildCheckJobInput(body: unknown): CheckJobInput {
   if (b.kind === "cd") {
     const schemeVersionId = part("schemeVersionId", true);
     const save = b.save === true ? {} : null;
-    return { kind: "cd", scopeKey: `cd:${schemeVersionId ?? "all"}`, request: { schemeVersionId, save, body: calculationBody() } };
+    return calculationJob("cd", { schemeVersionId, save, body: calculationBody() });
   }
   if (b.kind === "tod") {
     const periodStart = date("periodStart");
@@ -65,11 +77,7 @@ export function buildCheckJobInput(body: unknown): CheckJobInput {
     if (periodEnd < periodStart) throw new CheckJobRequestError("periodEnd must not be before periodStart.");
     const schemeVersionId = part("schemeVersionId", true);
     const save = b.saveAsOfDate === undefined || b.saveAsOfDate === null ? null : { asOfDate: date("saveAsOfDate") };
-    return {
-      kind: "tod",
-      scopeKey: `tod:${periodStart}:${periodEnd}${schemeVersionId ? `:${schemeVersionId}` : ""}`,
-      request: { periodStart, periodEnd, schemeVersionId, save, body: calculationBody() },
-    };
+    return calculationJob("tod", { periodStart, periodEnd, schemeVersionId, save, body: calculationBody() });
   }
   // One note's e-invoice details (IRN, Ack, signed QR), read from Tally by the server connector.
   const noteKind = b.noteKind === "credit" || b.noteKind === "debit" ? b.noteKind : null;

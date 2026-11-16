@@ -5,7 +5,7 @@ import { companiesMatch, processOneCheckJob, runCheckJob } from "../src/server-j
 const company = { guid: "G-1", name: "Meenakshi Udyog" };
 const baseJob = (over = {}) => ({
   id: "job-1", kind: "cd", attempt: 1, requestedBy: "u1", expectedTallyCompany: company,
-  request: { body: { rule: { cdDiscountBasis: "percent" }, evaluatedOn: "2026-06-30", voucherScope: { from: "2026-04-01", to: "2026-06-30" } } },
+  request: { body: { rule: { cdDiscountBasis: "percent" }, evaluatedOn: "2026-06-30", voucherScope: { dateFrom: "2026-04-01", dateTo: "2026-06-30" } } },
   ...over,
 });
 const checkpoint = () => ({ cleared: false, settled: false, clear() { this.cleared = true; }, settle() { this.settled = true; } });
@@ -23,6 +23,7 @@ function makeDeps(over = {}) {
     claimNextCheckJob: async () => ({ job: baseJob() }),
     reportCheckJobProgress: async (_c, id, p) => { calls.progress.push(p); return { ok: true, cancelRequested: false }; },
     finishCheckJob: async (_c, id, payload) => { calls.finish.push({ id, ...payload }); return { ok: true }; },
+    sendHeartbeat: async () => ({ ok: true }),
     ...over,
   };
   return { deps, calls, cp };
@@ -81,6 +82,7 @@ test("a calculation failure is reported as failed at the calculation step", asyn
 });
 
 test("a user's Stop ends the check as cancelled and keeps the progress", async () => {
+  let commandsAfterStop = 0;
   const { deps, calls, cp } = makeDeps({
     reportCheckJobProgress: async () => ({ ok: true, cancelRequested: true }),
     fetchLiveCdEvidence: async (_c, ctx) => {
@@ -89,7 +91,8 @@ test("a user's Stop ends the check as cancelled and keeps the progress", async (
       return { invoices: [] };
     },
   });
-  await processOneCheckJob({}, company, { processCommand: async () => { throw new Error("must not run a note after Stop"); } }, deps);
+  await processOneCheckJob({}, company, { processCommand: async () => { commandsAfterStop += 1; } }, deps);
+  assert.equal(commandsAfterStop, 0, "Stop must prevent even an attempted side command");
   assert.equal(calls.finish[0].status, "cancelled");
   assert.equal(cp.settled, true);
 });
@@ -148,4 +151,53 @@ test("tod check uses the turnover evaluator", async () => {
   const { deps, calls } = makeDeps({ claimNextCheckJob: async () => ({ job: baseJob({ kind: "tod", request: { body: { rule: {}, evaluatedOn: "2026-06-30", periodStart: "2026-04-01", periodEnd: "2026-06-30" } } }) }) });
   await processOneCheckJob({}, company, {}, deps);
   assert.deepEqual(calls.finish[0].result.rows, ["tod"]);
+});
+
+test("a successful read is not marked failed when uploading the result is interrupted", async () => {
+  const statuses = [];
+  const { deps } = makeDeps({ finishCheckJob: async (_c, _id, body) => {
+    statuses.push(body.status);
+    throw new Error("network interrupted");
+  } });
+  await processOneCheckJob({}, company, {}, deps);
+  assert.deepEqual(statuses, ["succeeded"], "leave the attempt recoverable instead of discarding the successful calculation");
+});
+
+test("a long read renews its lease and heartbeat before the three-minute lease expires", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval", "Date"] });
+  let renewals = 0, heartbeats = 0;
+  let release;
+  const waiting = new Promise((resolve) => { release = resolve; });
+  const { deps } = makeDeps({
+    fetchLiveCdEvidence: async () => { await waiting; return { invoices: [] }; },
+    reportCheckJobProgress: async (_c, _id, _p, attempt) => { assert.equal(attempt, 1); renewals++; return { ok: true }; },
+    sendHeartbeat: async () => { heartbeats++; },
+  });
+  const running = processOneCheckJob({ heartbeatIntervalMs: 15_000 }, company, {}, deps);
+  await Promise.resolve();
+  for (let i = 0; i < 6; i++) {
+    t.mock.timers.tick(20_000);
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  release();
+  await running;
+  assert.ok(renewals >= 5, "renew repeatedly during the real waiting read");
+  assert.ok(heartbeats >= 5, "the UI must continue seeing the connector online");
+});
+
+test("one queued TOD job reads every period and returns evidence ready for browser-independent saving", async () => {
+  const periods = [["2026-04-01","2026-06-30"],["2026-07-01","2026-09-30"]];
+  const read = [];
+  const {deps}=makeDeps({
+    fetchLiveTodEvidence: async (command) => {
+      read.push(command.payload.voucherScope.dateFrom);
+      return {mode:"live_tod_batch_aggregate",chunks:1,vouchersScanned:1,matchingVouchers:1,sourceFingerprint:command.payload.voucherScope.dateFrom,customerAggregates:[{customerId:"A",eligibleTaxableValue:"10000",eligibleTonnes:"2",missingUnits:[]}]};
+    },
+    evaluateLocalTurnoverDiscount: (_r,_d,start,end) => ({rows:[{periodStart:start,periodEnd:end}],totals:{customersChecked:1,qualified:1,needAttention:0,projectedDiscount:"700.00"}}),
+  });
+  const batches=periods.map(([periodStart,periodEnd])=>({periodStart,periodEnd,rule:{},voucherScope:{dateFrom:periodStart,dateTo:periodEnd}}));
+  const result=await runCheckJob(baseJob({kind:"tod",request:{body:{evaluatedOn:"2026-11-16",batches}}}),{config:{},activeCompany:company,isCancelled:()=>false,onProgress(){}},deps);
+  assert.deepEqual(read,periods.map(([start])=>start));
+  assert.equal(result.totals.projectedDiscount,"1400.00");
+  assert.deepEqual(result.evidence.customerAggregates.map((a)=>[a.periodStart,a.periodEnd]),periods);
 });

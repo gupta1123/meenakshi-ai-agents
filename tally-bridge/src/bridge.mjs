@@ -7,6 +7,7 @@ import { executeCommand } from "./commands/dispatch.mjs";
 import { probeActiveCompany, probeCurrentCompanyName, probeTallyCompanies, probeMasterChangeCounter } from "./tally/company-probe.mjs";
 import { startLocalApi } from "./local-api.mjs";
 import { processOneCheckJob } from "./server-jobs.mjs";
+import { acquireBridgeLock } from "./instance-lock.mjs";
 
 import { BRIDGE_VERSION } from "./version.mjs";
 import { clearRunning, logLine, markRunning, previousRunEndedBadly } from "./connector-log.mjs";
@@ -218,6 +219,7 @@ function sleep(milliseconds) {
 }
 
 async function startBridge(config) {
+  const instance = await acquireBridgeLock(config);
   // Leave a trace of why the connector stopped: a hard kill leaves none, which is itself informative.
   const mb = () => Math.round(process.memoryUsage().rss / 1048576);
   logLine("INFO", `connector started`, { version: BRIDGE_VERSION, pid: process.pid, node: process.version, rssMb: mb() });
@@ -270,7 +272,7 @@ async function startBridge(config) {
       snapshot = null;
       await sleep(retryDelay + Math.floor(Math.random() * 1_000));
     }
-  } } finally { localApi.close(); }
+  } } finally { localApi.close(); await instance.close(); }
 }
 
 async function run() {

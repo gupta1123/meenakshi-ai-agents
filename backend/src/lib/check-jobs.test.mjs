@@ -3,15 +3,14 @@ import assert from "node:assert/strict";
 import { buildCheckJobInput, describeJobStatus, describeServerReadiness } from "./check-jobs.ts";
 
 test("cd request key is per scheme version", () => {
-  assert.equal(buildCheckJobInput({ kind: "cd", body: {} }).scopeKey, "cd:all");
-  assert.equal(buildCheckJobInput({ kind: "cd", schemeVersionId: "abc-1", body: {} }).scopeKey, "cd:abc-1");
+  assert.notEqual(buildCheckJobInput({ kind: "cd", body: {} }).scopeKey, buildCheckJobInput({ kind: "cd", schemeVersionId: "abc-1", body: {} }).scopeKey);
 });
 
 test("same tod period gives the same key so users join one run", () => {
   const a = buildCheckJobInput({ kind: "tod", periodStart: "2026-04-01", periodEnd: "2026-06-30", body: {} });
   const b = buildCheckJobInput({ kind: "tod", periodStart: "2026-04-01", periodEnd: "2026-06-30", body: {} });
   assert.equal(a.scopeKey, b.scopeKey);
-  assert.equal(a.scopeKey, "tod:2026-04-01:2026-06-30");
+  assert.notEqual(a.scopeKey, buildCheckJobInput({ kind: "tod", periodStart: "2026-07-01", periodEnd: "2026-09-30", body: {} }).scopeKey);
 });
 
 test("bad input is refused", () => {
@@ -61,4 +60,21 @@ test("a check can ask the server to save its result", () => {
   assert.deepEqual(tod.request.save, { asOfDate: "2026-06-30" });
   assert.equal(buildCheckJobInput({ kind: "tod", periodStart: "2026-04-01", periodEnd: "2026-06-30", body: {} }).request.save, null);
   assert.throws(() => buildCheckJobInput({ kind: "tod", periodStart: "2026-04-01", periodEnd: "2026-06-30", saveAsOfDate: "soon", body: {} }));
+});
+
+test("browser requests share only identical calculation inputs, regardless of object key order", () => {
+  const input = { kind: "cd", save: true, body: { rule: { id: "version-A" }, evaluatedOn: "2026-11-16", voucherScope: { dateFrom: "2026-04-01", dateTo: "2026-11-16" } } };
+  const first = buildCheckJobInput(input);
+  assert.equal(first.scopeKey, buildCheckJobInput({ ...input, body: { voucherScope: input.body.voucherScope, evaluatedOn: input.body.evaluatedOn, rule: input.body.rule } }).scopeKey);
+  for (const change of [
+    { rule: { id: "version-B" } }, { evaluatedOn: "2026-11-17" },
+    { voucherScope: { ...input.body.voucherScope, dateFrom: "2025-04-01" } },
+  ]) assert.notEqual(first.scopeKey, buildCheckJobInput({ ...input, body: { ...input.body, ...change } }).scopeKey);
+});
+
+test("TOD cannot join a different rule or saving date in the same quarter", () => {
+  const input = { kind: "tod", periodStart: "2026-04-01", periodEnd: "2026-06-30", saveAsOfDate: "2026-06-30", body: { rule: { id: "A" } } };
+  const key = buildCheckJobInput(input).scopeKey;
+  assert.notEqual(key, buildCheckJobInput({ ...input, body: { rule: { id: "B" } } }).scopeKey);
+  assert.notEqual(key, buildCheckJobInput({ ...input, saveAsOfDate: "2026-07-01" }).scopeKey);
 });

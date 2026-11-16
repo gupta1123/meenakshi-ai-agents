@@ -72,6 +72,8 @@ function hasCompletedLocalTodEvidence(run) {
 async function main() {
   do {
     try {
+      const { processPendingCheckSaves } = await import("../src/lib/check-job-save.ts");
+      await processPendingCheckSaves(`${WORKER_NAME}:check-save`).catch(error => console.error("Check save recovery failed:", errorText(error)));
       const runs = await claim();
       // Locally calculated TOD children are independent database persistence
       // jobs. Process them concurrently so a 40-customer audit does not wait

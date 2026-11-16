@@ -23,6 +23,7 @@ function readCacheTtl(path: string) {
 }
 
 export async function apiRequest<T>(token: string, path: string, init?: ApiRequestInit): Promise<T> {
+  if (path.includes("/local-bootstrap")) path += `${path.includes("?") ? "&" : "?"}serverCapable=1`;
   const { timeoutMs = 20_000, ...requestInit } = init ?? {};
   const method = (requestInit.method ?? "GET").toUpperCase();
   const canDeduplicate = method === "GET" && !requestInit.body && !requestInit.signal;

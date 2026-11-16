@@ -56,19 +56,19 @@ export async function detectLocalTallyConnector(signal?: AbortSignal): Promise<s
 // there. PC-mode companies never set this context, so they keep the code path above.
 export type ServerCheckContext = { companyId: string; getToken: () => Promise<string | null> };
 let serverContext: ServerCheckContext | null = null;
-let modeReady: Promise<void> = Promise.resolve();
+let lookupMode: (() => Promise<void>) | null = null;
 let serverProgress: LocalProgress | null = null;
 
 /** Called by the page once it knows the company's mode (null = PC mode). */
 export function setServerCheckContext(context: ServerCheckContext | null) { serverContext = context; if (!context) serverProgress = null; }
 /** Lets runs wait for the page's mode lookup instead of racing it. */
-export function setServerModeLookup(lookup: Promise<void>) { modeReady = lookup; }
+export function setServerModeLookup(lookup: () => Promise<void>) { lookupMode = lookup; }
 
 async function runServerJob<T>(task: "cash_discount" | "turnover_discount", body: Record<string, unknown>, overallTimeoutMs: number, options: LocalRunOptions | undefined, timeoutMessage: string): Promise<T> {
   const context = serverContext!;
   const token = async () => { const value = await context.getToken(); if (!value) throw new LocalCalculationError("You are signed out. Sign in again, then calculate.", "tally_read"); return value; };
   const base = `/api/companies/${context.companyId}/check-jobs`;
-  const serverSave = options?.serverSave;
+  const serverSave = options?.serverSave ?? (task === "cash_discount" ? {} : undefined);
   const input = task === "cash_discount"
     ? { kind: "cd", body, ...(serverSave ? { save: true } : {}) }
     : { kind: "tod", periodStart: String(body.periodStart), periodEnd: String(body.periodEnd), body, ...(serverSave?.asOfDate ? { saveAsOfDate: serverSave.asOfDate } : {}) };
@@ -86,7 +86,7 @@ async function runServerJob<T>(task: "cash_discount" | "turnover_discount", body
   try {
     for (;;) {
       if (options?.signal?.aborted) { stop(); throw new LocalCalculationError("The check was cancelled.", "tally_read"); }
-      if (Date.now() - started > overallTimeoutMs) { stop(); throw new LocalCalculationError(timeoutMessage, "tally_read", null, true); }
+      if (Date.now() - started > overallTimeoutMs) { throw new LocalCalculationError(timeoutMessage, "tally_read", null, true); }
       await sleep(2_000);
       type ServerJob = { status: string; progress?: Partial<LocalProgress> | null; result?: T | null; failure_reason?: string | null; failing_step?: string | null; started_at?: string | null };
       let state: { job: ServerJob; queuePosition: number };
@@ -141,10 +141,10 @@ async function waitForServerSave(base: string, jobId: string, token: () => Promi
       const state = await apiRequest<{ job: { progress?: { save?: SaveState } | null } }>(await token(), `${base}/${jobId}?result=0`, { timeoutMs: 10_000 }).catch(() => null);
       const save = state?.job.progress?.save;
       if (save?.state === "saved" && save.evaluationRunId) return { evaluationRunId: save.evaluationRunId, totals: save.totals };
-      if (save?.state === "failed") return null;
+      if (save?.state === "failed") throw new Error("The server could not save this check after retrying. Contact the administrator before starting another check.");
       await sleep(2_000);
     }
-    return null;
+    throw new Error("The server is still saving this check. You can reopen the page later to see the result.");
   } finally { options?.onStatus?.(null); }
 }
 
@@ -160,7 +160,7 @@ const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve
  * page keeps trying to reach the connector and picks the job back up.
  */
 async function runLocalJob<T>(task: "cash_discount" | "turnover_discount", body: Record<string, unknown>, overallTimeoutMs: number, options: LocalRunOptions | undefined, legacy: () => Promise<T>, timeoutMessage: string): Promise<T> {
-  await modeReady;
+  await lookupMode?.();
   if (serverContext) return runServerJob<T>(task, body, overallTimeoutMs, options, timeoutMessage);
   const begin = async (): Promise<string | "legacy"> => {
     try {
@@ -358,12 +358,19 @@ async function runLocalTurnoverDiscountBatch(bootstrap: LocalTodBootstrap, batch
 
 export async function runLocalTurnoverDiscount(bootstrap: LocalTodBootstrap, signal?: AbortSignal, options?: LocalRunOptions): Promise<LocalTodResult> {
   if (!bootstrap.batches.length) throw new Error("No eligible Turnover Discount customers are available for the current rule.");
+  await lookupMode?.();
+  if (serverContext) {
+    const periodStart = bootstrap.batches.map((b) => b.periodStart).sort()[0];
+    const periodEnd = bootstrap.batches.map((b) => b.periodEnd).sort().at(-1)!;
+    return runServerJob<LocalTodResult>("turnover_discount", { ...bootstrap, periodStart, periodEnd }, 1_800_000,
+      { ...options, signal: options?.signal ?? signal, serverSave: options?.serverSave ?? { asOfDate: bootstrap.evaluatedOn } },
+      "The Tally server is still checking these periods. Reopen the page later to see the saved result.");
+  }
   // The local Tally connector has one active company context. Running two
   // periods at the same time can make their Tally responses cross over, so
   // calculate each locked-period batch in order.
   const results: LocalTodResult[] = [];
-  // Server mode can save a run made of one period by itself; several periods are merged and saved by the page.
-  const batchOptions = options?.serverSave && bootstrap.batches.length !== 1 ? { ...options, serverSave: undefined } : options;
+  const batchOptions = options;
   for (const batch of bootstrap.batches) results.push(await runLocalTurnoverDiscountBatch(bootstrap, batch, signal, batchOptions));
   const primary = results[0];
   return {
@@ -428,7 +435,7 @@ export type LocalNoteEInvoice = { irn: string; ackNo: string; ackDate: string | 
  * the note is not e-invoiced yet; throws when the connector or Tally is not ready.
  */
 export async function readLocalNoteEInvoice(input: { expectedCompany: { guid?: string | null; name?: string | null }; date: string; voucherNumber: string; kind: "credit" | "debit" }): Promise<LocalNoteEInvoice | null> {
-  await modeReady;
+  await lookupMode?.();
   if (serverContext) {
     // Server mode: ask the Tally server through the cloud queue (a small read, answered in seconds).
     const context = serverContext;

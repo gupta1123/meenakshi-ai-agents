@@ -131,17 +131,17 @@ export function claimNextCheckJob(config) {
   return request(config, `/api/bridge/check-jobs/next?connectorId=${encodeURIComponent(config.connectorId)}`);
 }
 
-export function reportCheckJobProgress(config, jobId, progress) {
+export function reportCheckJobProgress(config, jobId, progress, attempt) {
   return request(config, `/api/bridge/check-jobs/${encodeURIComponent(jobId)}/progress`, {
     method: "POST",
-    body: { connectorId: config.connectorId, progress },
+    body: { connectorId: config.connectorId, progress, attempt },
   });
 }
 
-export function finishCheckJob(config, jobId, { status, result, failingStep, failureReason }) {
+export function finishCheckJob(config, jobId, { status, result, failingStep, failureReason, attempt }) {
   return request(config, `/api/bridge/check-jobs/${encodeURIComponent(jobId)}/finish`, {
     method: "POST",
-    body: { connectorId: config.connectorId, status, result, failingStep, failureReason },
+    body: { connectorId: config.connectorId, status, result, failingStep, failureReason, attempt },
     timeoutMs: 120_000,
   });
 }

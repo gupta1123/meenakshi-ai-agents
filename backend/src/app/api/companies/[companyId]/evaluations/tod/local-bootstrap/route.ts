@@ -1,4 +1,5 @@
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
+import { requireCurrentCheckPage } from "@/lib/check-page";
 import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/authorization";
 import { loadLiveTodLocalBootstrap, type EvaluationRunRecord } from "@/lib/evaluation/evidence";
 import { isUuid } from "@/lib/security";
@@ -48,6 +49,7 @@ export async function GET(request: Request, context: RouteContext) {
     const { companyId } = await context.params;
     if (!isUuid(companyId)) return jsonWithCors(request, { error: "Invalid company id." }, { status: 400 });
     const { company } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
+    await requireCurrentCheckPage(request, company.id);
     const url = new URL(request.url);
     const today = new Date().toISOString().slice(0, 10);
     const requestedAsOfDate = url.searchParams.get("asOfDate");

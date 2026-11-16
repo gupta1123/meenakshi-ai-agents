@@ -1,6 +1,6 @@
 # Plan: connector on a Tally server, alongside the current PC connector
 
-**Status:** built locally on branch `feature/server-connector` (Phases 1-3 for Cash Discount and Turnover Discount), not deployed, migration not applied. Written 2026-11-05. Not built yet: e-invoice read in server mode, saving the result on the backend when no page is open, setting a connector to `server` from the UI (done by SQL for now: `insert into tally_connector_modes`).
+**Status (17 Nov 2026):** server mode and recovery work are on `feature/server-connector`, connector 0.5.1. CD, multi-period TOD, e-invoice lookup, durable result saving, the admin mode switch and packaged Windows startup are implemented. The original queue migration was applied earlier; the new `20261116182141_server_check_job_recovery.sql` migration is prepared and tested locally, not applied to production. Backend/frontend builds and focused integration checks pass. Installation/logon testing on the client's Windows server, financial reconciliation and a real-IRN pilot remain pending; the owner chose to schedule the pilot later. See `server-connector-acceptance.md` for release requirements.
 **Goal:** the client's Tally runs permanently on a Windows server. One connector installed there serves every user from the web app. Nobody keeps a PC on or connects their own Tally. The current PC setup keeps working, unchanged.
 
 ## 1. How it works today, and what breaks

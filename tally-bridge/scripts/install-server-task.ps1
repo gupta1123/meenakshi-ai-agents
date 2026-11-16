@@ -14,14 +14,16 @@
 #   3. starts it now.
 # To go back to a normal PC connector, run with -Remove.
 param(
-  [Parameter(Mandatory = $true)][string]$NodePath,
-  [Parameter(Mandatory = $true)][string]$BridgePath,
+  [string]$NodePath = (Join-Path $PSScriptRoot 'Meenakshi Tally Connector.exe'),
+  [string]$BridgePath = (Join-Path $PSScriptRoot 'resources\app\src\bridge.mjs'),
   [string]$UserName = "$env:USERDOMAIN\$env:USERNAME",
   [switch]$Remove
 )
 
 $ErrorActionPreference = "Stop"
 $taskName = "Meenakshi Tally Connector (server)"
+# The packaged Electron executable includes Node; standalone Node is optional.
+$env:ELECTRON_RUN_AS_NODE = '1'
 
 if ($Remove) {
   if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
@@ -35,10 +37,17 @@ if ($Remove) {
 
 if (-not (Test-Path $NodePath)) { throw "Node was not found at $NodePath" }
 if (-not (Test-Path $BridgePath)) { throw "The connector was not found at $BridgePath" }
+$activeBridge = Get-CimInstance Win32_Process | Where-Object {
+  $_.CommandLine -and $_.CommandLine.Contains($BridgePath) -and $_.CommandLine -match '\sstart(?:\s|$)'
+}
+if ($activeBridge) { throw 'Exit the running Meenakshi connector before enabling server startup, then run this script again.' }
 
 & $NodePath $BridgePath set-mode --mode server
+if ($LASTEXITCODE -ne 0) { throw 'Could not configure server mode. Pair the connector first.' }
 
-$action = New-ScheduledTaskAction -Execute $NodePath -Argument "`"$BridgePath`" start"
+$runner = Join-Path $PSScriptRoot 'start-server-connector.vbs'
+if (-not (Test-Path -LiteralPath $runner)) { throw "Missing packaged server runner: $runner" }
+$action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\wscript.exe" -Argument "`"$runner`" `"$NodePath`" `"$BridgePath`""
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $UserName
 # Same user as the pairing, so the connector finds its saved configuration.
 $principal = New-ScheduledTaskPrincipal -UserId $UserName -LogonType Interactive -RunLevel Limited

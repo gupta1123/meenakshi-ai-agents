@@ -4,6 +4,7 @@ import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 type RouteContext = { params: Promise<{ companyId: string; jobId: string }> };
+type JobStatusRow = { id: string; status: string; created_at: string; [key: string]: unknown };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
 
 export async function GET(request: Request, context: RouteContext) {
@@ -14,9 +15,10 @@ export async function GET(request: Request, context: RouteContext) {
     const db = createSupabaseAdminClient();
     // ?result=0 leaves out the (large) result, for pages that only follow the save.
     const withResult = new URL(request.url).searchParams.get("result") !== "0";
+    const columns = "id, kind, scope_key, status, requested_by, attempts, cancel_requested, progress, failing_step, failure_reason, evaluation_run_id, created_at, started_at, finished_at, updated_at";
     const { data: job, error } = await db.from("tally_check_jobs")
-      .select(`id, kind, scope_key, status, requested_by, attempts, cancel_requested, progress, ${withResult ? "result, " : ""}failing_step, failure_reason, evaluation_run_id, created_at, started_at, finished_at, updated_at`)
-      .eq("id", jobId).eq("company_id", access.company.id).maybeSingle();
+      .select(withResult ? `${columns}, result` : columns)
+      .eq("id", jobId).eq("company_id", access.company.id).returns<JobStatusRow[]>().maybeSingle();
     if (error) throw error;
     if (!job) return jsonWithCors(request, { error: "Check not found." }, { status: 404 });
     let queuePosition = 0;

@@ -4,7 +4,7 @@
 
 ## 1. The idea in one paragraph
 
-The invoice goes out at **full price**. A customer who pays within their Cash Discount window may pay the invoice **minus the discount** (₹ per MT). When that happens, staff issue a **Credit Note** for the discount from the Cash Discount page so the bill closes. A customer who pays in full has not claimed the discount, so nothing is issued. Payments of more than 90% that fit neither case are shown to staff, who decide.
+The invoice goes out at **full price**. A customer who pays within their Cash Discount window earns the discount (₹ per MT), whether they pay the full invoice or the invoice minus the discount. Staff may issue the earned **Credit Note** from the Cash Discount page; it is never automatic. Payments short by up to ₹10,000 that fit neither case are shown to staff, who decide.
 
 ## 2. Rule setup
 
@@ -57,7 +57,7 @@ The screen **shows** the categories in the client's order: Full payment, Short u
 
 | Category | Condition | Result |
 |---|---|---|
-| **Full payment** | received ≥ invoice − ₹1 | **No Credit Note.** Discount not claimed. Shown for information only. |
+| **Full payment** | received ≥ invoice − ₹1 | **Staff may create the earned Credit Note for the discount.** Confirmed by the owner on 16 Nov 2026; this preserves the existing app behaviour. |
 | **Discounted payment** | received is within ±₹1 of invoice − discount | **Credit Note for the discount, created by staff** from the Cash Discount page (never automatic). The bill closes at zero. |
 | **Short up to ₹10,000** | invoice − received ≤ ₹10,000 (a flat limit, whatever the bill size), and neither of the above | **Staff decide.** The entry is shown with an option to create a Credit Note for **only what is short**, **capped at the discount**: min(invoice − received, discount). Nothing happens automatically. |
 | **Not eligible** | short of the invoice by more than ₹10,000 at the deadline, or no payment by the deadline | No discount. Any shortfall stays in the customer's outstanding balance. |
