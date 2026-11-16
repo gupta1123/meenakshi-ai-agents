@@ -107,7 +107,9 @@ test("voucher sync asks Tally only for vouchers touching eligible customer ledge
     } } }, {
       config: { tallyUrl: "http://localhost:9000" }, activeCompany: { name: "Test Company", guid: "company-1" },
     });
-    assert.match(requestXml, /<FILTER>MeenakshiRequestedVoucher<\/FILTER>/);
+    assert.match(requestXml, /<FILTER>MeenakshiRequestedVoucher,MeenakshiDateRange<\/FILTER>/);
+    // Tally can ignore SVTODATE, so the date range is also filtered in the request itself.
+    assert.match(requestXml, /\(\$\$YearOfDate:\$Date \* 10000 \+ \$\$MonthOfDate:\$Date \* 100 \+ \$\$DayOfDate:\$Date\) &gt;= 20260801 AND .* &lt;= 20260831/);
     assert.match(requestXml, /Industrial Project Receivables/);
     assert.equal(result.queryMode, "targeted");
     assert.equal(result.queryBatches, 1);
