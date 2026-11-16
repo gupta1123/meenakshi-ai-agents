@@ -78,7 +78,25 @@ export function buildCompanyCollectionXml() {
   ].join("");
 }
 
-export function buildCollectionExportXml({ collectionName, tallyType, fetchFields, companyName, childOf, dateFrom, dateTo, formulae = [], filterNames = [] }) {
+// Tally silently drops some SVTODATE values (seen 16 Nov 2026: an end date of
+// 10 Jul was ignored while 31 Jul was kept), and then sends every voucher from
+// the start date up to today. Voucher reads therefore also filter the date
+// range themselves, as a yyyymmdd number, which Tally cannot ignore.
+const DATE_NUMBER = "($$YearOfDate:$Date * 10000 + $$MonthOfDate:$Date * 100 + $$DayOfDate:$Date)";
+const DATE_RANGE_FILTER = "MeenakshiDateRange";
+
+function dateNumber(value) {
+  const digits = String(value).replaceAll("-", "");
+  if (!/^\d{8}$/.test(digits)) throw new Error(`Invalid Tally date: ${value}`);
+  return digits;
+}
+
+export function buildCollectionExportXml({ collectionName, tallyType, fetchFields, companyName, childOf, dateFrom, dateTo, formulae: requestedFormulae = [], filterNames: requestedFilterNames = [] }) {
+  const rangeFilter = String(tallyType).toLowerCase() === "voucher" && dateFrom && dateTo
+    ? [{ name: DATE_RANGE_FILTER, formula: `${DATE_NUMBER} >= ${dateNumber(dateFrom)} AND ${DATE_NUMBER} <= ${dateNumber(dateTo)}` }]
+    : [];
+  const formulae = [...requestedFormulae, ...rangeFilter];
+  const filterNames = [...requestedFilterNames, ...rangeFilter.map((formula) => formula.name)];
   const staticVariables = [
     companyName ? `<SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>` : "",
     dateFrom ? `<SVFROMDATE TYPE=\"Date\">${escapeXml(String(dateFrom).replaceAll("-", ""))}</SVFROMDATE>` : "",

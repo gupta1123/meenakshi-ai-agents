@@ -43,11 +43,14 @@ jobs:
           cache-dependency-path: |
             backend/package-lock.json
             frontend/package-lock.json
+            tally-bridge/package-lock.json
       - run: npm install --global npm@11.6.2
       - run: npm ci --prefix backend
       - run: npm ci --prefix frontend
+      - run: npm ci --prefix tally-bridge
       - run: npm test --prefix backend
       - run: npm test --prefix frontend
+      - run: npm test --prefix tally-bridge
       - run: npm run build --prefix backend
       - run: npm run typecheck --prefix backend
       - run: npm run build --prefix frontend

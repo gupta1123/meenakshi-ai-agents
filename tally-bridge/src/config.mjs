@@ -56,6 +56,8 @@ export function loadConfig() {
     heartbeatIntervalMs: Math.max(5_000, Number(config.heartbeatIntervalMs || 15_000)),
     commandPollIntervalMs: Math.max(1_000, Number(config.commandPollIntervalMs || 2_000)),
     companyListIntervalMs: Math.max(30_000, Number(config.companyListIntervalMs || 60_000)),
+    // "server" = a permanent Tally server shared by many web users. Anything else is the usual PC connector.
+    mode: config.mode === "server" ? "server" : "pc",
   };
 }
 
@@ -71,6 +73,10 @@ export function configurePdfCapture(values = {}) {
   const updated = { ...config, pdfExportDirectory };
   writeFileSync(configPath, `${JSON.stringify(updated, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   return updated;
+}
+
+function existingMode() {
+  try { return JSON.parse(readFileSync(configPath, "utf8")).mode === "server" ? "server" : "pc"; } catch { return "pc"; }
 }
 
 export function saveConfig(values) {
@@ -96,11 +102,22 @@ export function saveConfig(values) {
     commandPollIntervalMs: Math.max(1_000, Number(values.commandPollIntervalMs || values["command-poll-interval-ms"] || 2_000)),
     companyListIntervalMs: Math.max(30_000, Number(values.companyListIntervalMs || values["company-list-interval-ms"] || 60_000)),
     pdfExportDirectory: String(values.pdfExportDirectory || values["pdf-export-directory"] || defaultPdfExportDirectory).trim(),
+    // Re-pairing never silently switches a server back to PC mode (or the reverse).
+    mode: values.mode === "server" || values.mode === "pc" ? values.mode : existingMode(),
   };
   ensureConfigDirectory();
   mkdirSync(config.pdfExportDirectory, { recursive: true });
   writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   return config;
+}
+
+/** Switches this installation between "pc" and "server" mode (server = permanent Tally server). */
+export function setMode(mode) {
+  if (mode !== "pc" && mode !== "server") throw new Error("Use --mode pc or --mode server.");
+  const config = JSON.parse(readFileSync(configPath, "utf8"));
+  writeFileSync(configPath, `${JSON.stringify({ ...config, mode }, null, 2)}
+`, { encoding: "utf8", mode: 0o600 });
+  return mode;
 }
 
 export function displayConfigPath() {

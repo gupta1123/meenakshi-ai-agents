@@ -2,6 +2,18 @@
 
 This is the Windows-only local agent that talks to the Tally Prime HTTP/XML endpoint. It is independent of the hosted `backend` service and must run on the computer where Tally is reachable.
 
+## Server pilot (0.5.1)
+
+The hosted backend must have the server-job recovery migration before this version is used in server mode. Existing PC connectors can continue using the PC workflow.
+
+1. Install and pair the connector on the Windows machine that keeps the approved Tally company open. Exit its status window before enabling background startup.
+2. From the installation directory, run `powershell -ExecutionPolicy Bypass -File .\install-server-task.ps1` as that same Windows user. The package includes its Node runtime and the hidden startup runner; no separate Node installation is needed.
+3. An administrator selects **Use the Tally server** in the website. Both the machine configuration and the website must be in server mode. Do this with an empty queue; keep the old PC connector stopped during the pilot.
+4. After a Windows reboot, log on as that user and open Tally with the matching company. Disconnecting Remote Desktop keeps the session running; signing out ends it.
+5. To remove background startup, run the setup script with `-Remove`, then switch the website back to PC mode after work has finished.
+
+Server calculations use leased job attempts and durable saving through the existing evaluation worker. CD and all TOD periods continue without a page open. A failed save is retried with the same permanent job key; it is not resubmitted by the browser.
+
 `../autodealer-workflow` is reference-only. Do not run its bridge for Meenakshi or copy its business commands into this package.
 
 ## Local setup

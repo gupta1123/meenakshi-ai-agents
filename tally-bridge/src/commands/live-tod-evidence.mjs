@@ -166,9 +166,12 @@ export async function fetchLiveTodEvidence(command, context) {
   // Other Credit Notes' "Agst Ref" allocations, which settle the bill they are set against.
   const creditNoteAllocations = [];
   while (cursor) {
+    await context.betweenWindows?.();
+    if (context.isCancelled?.()) throw new Error("This Turnover Discount check was stopped.");
     if (chunks >= MAX_CHUNKS) throw new Error("The requested Tally period is too large for one live calculation.");
     const result = await syncVouchers({ ...command, payload: { ...command.payload, syncRunId: command.payload.voucherSyncRunId, requestedScope: { ...scope, customerLedgerName: null, customers: null, dateTo: readTo, cursor } } }, context);
     chunks += 1;
+    context.onProgress?.({ done: chunks, nextDate: result.cursorTo, vouchersScanned: vouchersScanned + result.vouchers.length });
     vouchersScanned += result.vouchers.length;
     for (const voucher of result.vouchers) {
       if (paymentCheck && ["receipt", "payment"].includes(voucher.voucherKind) && voucher.status === "posted") {

@@ -14,6 +14,7 @@ import { readLocalConnectorVersion, runLocalCashDiscount, runLocalTurnoverDiscou
 
 import { AppShell, WorkspacePageHeader } from "./app-shell";
 import { useCompany } from "./company-context";
+import { useTallyMode } from "@/lib/tally-mode";
 import { RulebookWorkspace } from "./rulebook-workspace";
 import { TallyReadiness, syncIsCurrent, workspaceCanCalculateLive } from "./tally-readiness";
 import { useWorkspaceSession, type WorkspaceData } from "./workspace-session";
@@ -95,6 +96,8 @@ function Workspace({ page, email, signOut, tallyHealth }: { page: CollectionsPag
   const { company, companyKey, isAdministrator } = useCompany();
   const { data, loading, error, refresh, setError } = useWorkspaceSession();
   const [notice, setNotice] = useState<string | null>(null);
+  // Tells the shared check runner whether this company's Tally is a PC connector or a server.
+  useTallyMode(company.id, accessToken);
   const customerNames = useMemo(() => new Map(data.reference?.masters.customers.map((customer) => [customer.id, labelFor(customer)]) ?? []), [data.reference]);
   const pageProps = { data, refresh, setNotice, setError, customerNames, isAdministrator };
   // Cash Discount owns its data loading; the shared session intentionally
@@ -490,7 +493,7 @@ function CashDiscountRecoveryPage({ data, setNotice, setError, isAdministrator, 
       // the preloaded snapshot for a user-triggered check: it would omit that
       // newer voucher even though the check reports as completed.
       const bootstrap = await preloadLocalBootstrap(evaluatedOn);
-      result = await runLocalCashDiscount(bootstrap);
+      result = await runLocalCashDiscount(bootstrap, undefined, { onStatus: setNotice });
     } catch (cause) {
       setLocalChecking(false); setLocalPhase(null);
       // Older installed connectors do not expose the local API. Preserve the
@@ -787,7 +790,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       timings.serverPrepareMs = Math.round(performance.now() - prepareStarted);
       step = "tally_read";
       const readStarted = performance.now();
-      const result = await runLocalTurnoverDiscount(bootstrap, undefined, { onReconnecting: (state) => setNotice(state ? `Reconnecting to the Meenakshi connector… (try ${state.attempt}). The check keeps running on the PC; keep Tally and the connector open.` : null) });
+      const result = await runLocalTurnoverDiscount(bootstrap, undefined, { onStatus: setNotice, serverSave: { asOfDate }, onReconnecting: (state) => setNotice(state ? `Reconnecting to the Meenakshi connector… (try ${state.attempt}). The check keeps running on the PC; keep Tally and the connector open.` : null) });
       timings.tallyAndCalculationMs = Math.round(performance.now() - readStarted);
       step = "save";
       const saveStarted = performance.now();
@@ -799,12 +802,15 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       setNotice(`Calculated ${result.rows.length} customers from Tally. Saving each result — progress is shown below.`);
       const token = await accessToken();
       if (!token) return;
-      const response = await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/tod/local-result`, {
-        method: "POST",
-        headers: { "Idempotency-Key": idempotencyKey() },
-        body: jsonBody({ asOfDate, evaluatedOn: bootstrap.evaluatedOn, evidence: result.evidence }),
-        timeoutMs: 60_000,
-      });
+      // Server mode: the Tally server already saved it (PC mode never sets savedOnServer).
+      const response = result.savedOnServer
+        ? await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/runs/${result.savedOnServer.evaluationRunId}`, { cache: "no-store" })
+        : await apiRequest<{ evaluationRun: EvaluationRun }>(token, `/api/companies/${company.id}/evaluations/tod/local-result`, {
+          method: "POST",
+          headers: { "Idempotency-Key": idempotencyKey() },
+          body: jsonBody({ asOfDate, evaluatedOn: bootstrap.evaluatedOn, evidence: result.evidence }),
+          timeoutMs: 60_000,
+        });
       setLatestRun(response.evaluationRun);
       // Saving writes one result per customer; hundreds of customers can take
       // several minutes, so keep waiting (up to 20 minutes) instead of giving

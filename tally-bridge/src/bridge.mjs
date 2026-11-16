@@ -2,10 +2,12 @@
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { claimNextCommand, pairBridge, renewCommandLease, reportCommandResult, sendDisconnect, sendHeartbeat } from "./api-client.mjs";
-import { configurePdfCapture, displayConfigPath, getPdfExportDirectory, loadConfig, parseArguments, saveConfig, stableMachineFingerprint } from "./config.mjs";
+import { configurePdfCapture, displayConfigPath, setMode, getPdfExportDirectory, loadConfig, parseArguments, saveConfig, stableMachineFingerprint } from "./config.mjs";
 import { executeCommand } from "./commands/dispatch.mjs";
 import { probeActiveCompany, probeCurrentCompanyName, probeTallyCompanies, probeMasterChangeCounter } from "./tally/company-probe.mjs";
 import { startLocalApi } from "./local-api.mjs";
+import { processOneCheckJob } from "./server-jobs.mjs";
+import { acquireBridgeLock } from "./instance-lock.mjs";
 
 import { BRIDGE_VERSION } from "./version.mjs";
 import { clearRunning, logLine, markRunning, previousRunEndedBadly } from "./connector-log.mjs";
@@ -217,6 +219,7 @@ function sleep(milliseconds) {
 }
 
 async function startBridge(config) {
+  const instance = await acquireBridgeLock(config);
   // Leave a trace of why the connector stopped: a hard kill leaves none, which is itself informative.
   const mb = () => Math.round(process.memoryUsage().rss / 1048576);
   logLine("INFO", `connector started`, { version: BRIDGE_VERSION, pid: process.pid, node: process.version, rssMb: mb() });
@@ -230,7 +233,11 @@ async function startBridge(config) {
     logLine("WARN", "the connector did not shut down cleanly last time", { previousPid: previous.pid, startedAt: previous.startedAt, version: previous.version });
     void sendIncident(config, "crash", `previous run (started ${previous.startedAt}, version ${previous.version}) ended without a clean shutdown`);
   }
-  const localApi = startLocalApi(config);
+  // A Tally server serves many web users through the cloud queue; a browser on that
+  // machine must not start its own competing read, so the local API stays off.
+  const serverMode = config.mode === "server";
+  if (serverMode) logLine("INFO", "server mode: the local calculation API is off; checks come from the cloud queue");
+  const localApi = serverMode ? { close() {} } : startLocalApi(config);
   let consecutiveFailures = 0;
   let snapshot = null;
   let cachedCompanies = [];
@@ -246,7 +253,14 @@ async function startBridge(config) {
         nextHeartbeatAt = Date.now() + config.heartbeatIntervalMs;
         if (refreshCompanyList || snapshot.companySnapshotFresh) nextCompanyListAt = Date.now() + config.companyListIntervalMs;
       }
-      const processed = await processOneCommand(config, snapshot.activeCompany);
+      let processed = await processOneCommand(config, snapshot.activeCompany);
+      // Server mode: after queued Tally commands, run a queued check. Credit Notes that arrive
+      // meanwhile run between its read windows, so only one thing talks to Tally at a time.
+      if (serverMode && !processed) {
+        processed = await processOneCheckJob(config, snapshot.activeCompany, {
+          processCommand: () => processOneCommand(config, snapshot.activeCompany),
+        });
+      }
       consecutiveFailures = 0;
       if (processed) nextHeartbeatAt = 0;
       await sleep(processed ? 250 : config.commandPollIntervalMs);
@@ -258,7 +272,7 @@ async function startBridge(config) {
       snapshot = null;
       await sleep(retryDelay + Math.floor(Math.random() * 1_000));
     }
-  } } finally { localApi.close(); }
+  } } finally { localApi.close(); await instance.close(); }
 }
 
 async function run() {
@@ -276,6 +290,11 @@ async function run() {
   if (command === "configure-pdf-capture") {
     const config = configurePdfCapture(args);
     console.log(`Native Credit Note PDF capture is ready at ${getPdfExportDirectory(config)}.`);
+    return;
+  }
+  if (command === "set-mode") {
+    const mode = setMode(String(args.mode ?? ""));
+    console.log(`Meenakshi Tally bridge is now in ${mode} mode. Restart the connector for this to take effect.`);
     return;
   }
   if (command === "install-protocol") {
@@ -332,7 +351,7 @@ async function run() {
     await startBridge(config);
     return;
   }
-  throw new Error("Use one of: machine-id, configure, configure-pdf-capture, install-protocol, connect, connect-url, probe, pair, once, send-logs, disconnect, start.");
+  throw new Error("Use one of: machine-id, set-mode, configure, configure-pdf-capture, install-protocol, connect, connect-url, probe, pair, once, send-logs, disconnect, start.");
 }
 
 run().catch((error) => {

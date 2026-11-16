@@ -15,7 +15,7 @@ test("stock and customer parsers retain the references needed for later CD/TOD e
   assert.equal(stockItems[0].stockGroupGuid, "stock-1");
   assert.equal(stockItems[0].uomCode, "MT");
 
-  const customers = parseCustomers("<ENVELOPE><LEDGER NAME=\"ACME\"><GUID>cust-1</GUID><PARENTGUID>grp-retail</PARENTGUID><PARTYGSTIN>29ABCDE1234F1Z5</PARTYGSTIN><MOBILE>9999999999</MOBILE></LEDGER></ENVELOPE>");
+  const customers = parseCustomers("<ENVELOPE><LEDGER NAME=\"ACME\"><GUID>cust-1</GUID><PARENTGUID>grp-retail</PARENTGUID><PARTYGSTIN>29ABCDE1234F1Z5</PARTYGSTIN><LEDGERMOBILE>9999999999</LEDGERMOBILE></LEDGER></ENVELOPE>");
   assert.equal(customers[0].customerGroupGuid, "grp-retail");
   assert.equal(customers[0].sourcePayload.phone, "9999999999");
 });

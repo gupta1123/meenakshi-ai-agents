@@ -39,6 +39,8 @@ function validateSources() {
   ensureFile(path.join(sourceRoot, "commands", "live-tod-evidence.mjs"), "live Turnover Discount command");
   ensureFile(path.join(sourceRoot, "commands", "live-cd-evidence.mjs"), "live Cash Discount command");
   ensureFile(definitionPath, "Inno Setup definition");
+  ensureFile(path.join(currentDirectory, "install-server-task.ps1"), "server setup script");
+  ensureFile(path.join(currentDirectory, "start-server-connector.vbs"), "server startup runner");
   ensureContains(path.join(electronAppRoot, "main.mjs"), connector.protocol, "Electron protocol handler");
   ensureContains(path.join(electronAppRoot, "main.mjs"), "Meenakshi", "Electron product identity");
   ensureContains(path.join(sourceRoot, "commands", "fetch-evidence.mjs"), "fetchLiveTodEvidence", "live Turnover Discount routing");
@@ -100,6 +102,8 @@ function buildPayload(runtimeExecutable) {
   resetDirectory(payloadRoot);
   fs.mkdirSync(path.join(payloadRoot, "resources", "app"), { recursive: true });
   fs.copyFileSync(runtimeExecutable, path.join(payloadRoot, connector.executableName));
+  for (const name of ["install-server-task.ps1", "start-server-connector.vbs"])
+    fs.copyFileSync(path.join(currentDirectory, name), path.join(payloadRoot, name));
   copyOptionalRuntimeFiles(path.dirname(runtimeExecutable));
   fs.cpSync(sourceRoot, path.join(payloadRoot, "resources", "app", "src"), { recursive: true, force: true });
   fs.mkdirSync(path.join(payloadRoot, "resources", "app", "node_modules"), { recursive: true });
