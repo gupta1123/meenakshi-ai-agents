@@ -49,6 +49,7 @@ MT uses the rule's unit conversions, the same as TOD. Round as set on the rule.
 - **Receipts** with an *Agst Ref* allocation to the invoice, matched by invoice GUID, voucher number, or bill name. This is the same matching as TOD's 25-day check.
 - **Journal** vouchers with an *Agst Ref* allocation to the invoice also count. This covers TDS booked separately against the bill. TDS booked inside the receipt is already included.
 - Only amounts **received on or before the deadline** count for the categories below. All amounts are **GST-inclusive** (bill amounts).
+- **On-account credit** (connector 0.4.3, client case Venkateswara Hardwares MUI/25-26/0041): money the customer has with us that is not set against any bill also counts, but only for an invoice that misses out on receipts alone after its window has closed. Sources: the *On Account* part of the customer's vouchers, and the ledger's opening on-account balance (ledger opening less its opening bills; read only when the check starts on 1 April and only for customers with a short invoice). Credit is used oldest invoice first, only up to what the invoice needs (to reach the discounted amount, or else to come within ₹10,000), only if it existed by the deadline and was not taken back later, and each rupee once. The invoice panel lists it as an *On-account credit* line; `onAccountCreditUsed` is saved on the row. An older connector sends no credit, and the result is as before.
 
 ## 6. Categories
 

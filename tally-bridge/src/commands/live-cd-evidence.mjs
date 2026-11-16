@@ -2,12 +2,52 @@ import { createHash } from "node:crypto";
 import Decimal from "decimal.js";
 
 import { syncVouchers } from "./sync-vouchers.mjs";
+import { buildCollectionExportXml, extractBlocks, getAttribute, getTagText, postTallyXml } from "../tally/xml.mjs";
 import { sourceSalesLedgerName } from "./voucher-ledgers.mjs";
 
 const MAX_CHUNKS = 400;
 const MAX_INVOICES = 25_000;
 
 function normalized(value) { return String(value ?? "").trim().toLowerCase(); }
+function tallyString(value) { return `"${String(value ?? "").replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`; }
+// Vouchers whose "On Account" part belongs to the customer's own ledger.
+const ON_ACCOUNT_KINDS = new Set(["receipt", "payment", "sales", "sales_return", "credit_note", "debit_note"]);
+const OPENING_LEDGER_BATCH = 25;
+
+/**
+ * Each customer's opening "On Account" balance (ledger opening less its
+ * opening bills): + is credit the customer holds with us, − is a debit.
+ * Tally XML gives credit as a positive amount and debit as a negative one.
+ * One small Ledger request per batch of customers.
+ */
+async function openingOnAccount(customers, context) {
+  const balances = new Map();
+  for (let index = 0; index < customers.length; index += OPENING_LEDGER_BATCH) {
+    if (context.isCancelled?.()) throw new Error("This Cash Discount check was stopped.");
+    const batch = customers.slice(index, index + OPENING_LEDGER_BATCH);
+    const xml = buildCollectionExportXml({
+      collectionName: "Meenakshi Opening Bills",
+      tallyType: "Ledger",
+      fetchFields: "Name,OpeningBalance,BillAllocations.Name,BillAllocations.OpeningBalance",
+      companyName: context.activeCompany?.name,
+      formulae: [{ name: "MeenakshiOpeningLedger", formula: batch.map((customer) => `($$IsEqual:$Name:${tallyString(customer.ledgerName)})`).join(" OR ") }],
+      filterNames: ["MeenakshiOpeningLedger"],
+    });
+    const response = await postTallyXml(context.config.tallyUrl, xml, { timeoutMs: 45_000, operation: "Read customer opening balances" });
+    for (const ledgerXml of extractBlocks(response, "LEDGER")) {
+      const name = getAttribute(ledgerXml.slice(0, ledgerXml.indexOf(">") + 1), "NAME") || getTagText(extractBlocks(ledgerXml, "NAME.LIST")[0] ?? "", "NAME");
+      const amountOf = (xml) => new Decimal(String(getTagText(xml, "OPENINGBALANCE") ?? "").replace(/[^0-9.-]/g, "") || 0);
+      const bills = extractBlocks(ledgerXml, "BILLALLOCATIONS.LIST");
+      let withoutBills = ledgerXml;
+      for (const bill of bills) withoutBills = withoutBills.replace(bill, "");
+      const opening = amountOf(withoutBills);
+      const billTotal = bills.reduce((total, bill) => total.plus(amountOf(bill)), new Decimal(0));
+      balances.set(normalized(name), opening.minus(billTotal));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  return balances;
+}
 export function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value && typeof value === "object") return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, nested]) => `${JSON.stringify(key)}:${canonicalJson(nested)}`).join(",")}}`;
@@ -61,6 +101,8 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
   const eligibleNames = new Set((scope.eligibleStockItemNames ?? []).map(normalized).filter(Boolean));
   const conversions = new Map((scope.unitConversions ?? []).map((item) => [normalized(item?.uomCode), new Decimal(String(item?.tonnesPerUnit ?? "0"))]));
   const creditNotes = [];
+  // On-account credit (+) and debit (−) per customer: money not set against any bill.
+  const onAccount = [];
   const settlesBills = (voucher) => ["receipt", "payment"].includes(voucher.voucherKind)
     || (perMt && voucher.voucherKind === "other" && /journal|payment/i.test(String(voucher.voucherTypeName ?? "")));
   let cursor = scope.dateFrom;
@@ -71,14 +113,14 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
   const saved = checkpoint?.load() ?? null;
   const crashes = new Map(Object.entries(saved?.crashes ?? {}));
   if (saved) {
-    invoices.push(...saved.invoices); allocations.push(...saved.allocations); debitNotes.push(...saved.debitNotes); creditNotes.push(...saved.creditNotes);
+    invoices.push(...saved.invoices); allocations.push(...saved.allocations); debitNotes.push(...saved.debitNotes); creditNotes.push(...saved.creditNotes); onAccount.push(...(saved.onAccount ?? []));
     cursor = saved.cursor; chunks = saved.chunks; vouchersScanned = saved.vouchersScanned;
     // A window that was being read when the connector last stopped is retried in smaller pieces.
     if (saved.inFlight) crashes.set(saved.inFlight, (crashes.get(saved.inFlight) ?? 0) + 1);
     context.onResume?.({ cursor, chunks, invoices: invoices.length, retriedWindow: saved.inFlight ?? null });
   }
   const windowDays = (at) => { const n = crashes.get(at) ?? 0; return n === 0 ? 10 : n === 1 ? 3 : n === 2 ? 1 : 0; };
-  const persist = (inFlight) => checkpoint?.save({ cursor, chunks, vouchersScanned, invoices, allocations, debitNotes, creditNotes, crashes: Object.fromEntries(crashes), inFlight });
+  const persist = (inFlight) => checkpoint?.save({ cursor, chunks, vouchersScanned, invoices, allocations, debitNotes, creditNotes, onAccount, crashes: Object.fromEntries(crashes), inFlight });
   // Batches are 10 days (see sync-vouchers.mjs); report progress per batch.
   const totalChunks = Math.max(1, Math.ceil(((Date.parse(`${scope.dateTo}T00:00:00Z`) - Date.parse(`${scope.dateFrom}T00:00:00Z`)) / 86_400_000 + 1) / 10));
   context.onProgress?.({ done: 0, total: totalChunks, from: scope.dateFrom, to: scope.dateTo });
@@ -132,6 +174,14 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
       if (perMt && customer && voucher.voucherKind === "credit_note" && voucher.status === "posted") {
         creditNotes.push({ tallyGuid: voucher.guid, voucherNumber: voucher.voucherNumber || null, voucherDate: voucher.voucherDate, customerLedgerName: customer.ledgerName, amount: new Decimal(voucher.grossAmount || 0).abs().toFixed(), narration: voucher.narration || "" });
       }
+      if (perMt && customer && voucher.status === "posted" && ON_ACCOUNT_KINDS.has(voucher.voucherKind)) {
+        for (const allocation of voucher.billAllocations) {
+          if (allocation.allocationType !== "on_account") continue;
+          const amount = new Decimal(allocation.allocatedAmount || 0).abs();
+          const debit = String(allocation.sourcePayload?.rawAmount ?? "").trim().startsWith("-");
+          onAccount.push({ customerId: customer.customerId, date: voucher.voucherDate, amount: (debit ? amount.neg() : amount).toFixed(), source: `${voucher.voucherTypeName || voucher.voucherKind} ${voucher.voucherNumber || ""}`.trim() });
+        }
+      }
       if (settlesBills(voucher) && voucher.status === "posted") {
         for (const allocation of voucher.billAllocations) allocations.push({ receiptGuid: voucher.guid, receiptNumber: voucher.voucherNumber || null, receiptType: voucher.voucherTypeName || null, receiptDate: voucher.voucherDate, billReference: allocation.billReference || null, targetVoucherGuid: allocation.targetVoucherGuid || null, allocationType: allocation.allocationType, allocatedAmount: allocation.allocatedAmount });
       }
@@ -184,6 +234,22 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
       && /cash discount/i.test(note.narration)
       && Boolean(invoice.voucherNumber && note.narration.includes(`Inv No. ${invoice.voucherNumber} `))) } : {}),
   }));
-  const sourceFingerprint = createHash("sha256").update(canonicalJson(invoiceResults)).digest("hex");
-  return { mode: "live_cd_batch", evaluationRunId: command.payload.evaluationRunId ?? null, ruleVersionId: scope.ruleVersionId ?? null, dateFrom: scope.dateFrom, dateTo: scope.dateTo, chunks, vouchersScanned, invoices: invoiceResults, sourceFingerprint };
+  // The ledger opening is the balance on the first day of the books (1 April),
+  // so it only applies when the check starts then. Read it only for customers
+  // with an invoice that payments alone did not clear.
+  const customerCredits = [...onAccount];
+  if (perMt && /-04-01$/.test(scope.dateFrom)) {
+    const short = new Set(invoiceResults.filter((invoice) => invoice.payments
+      .filter((payment) => payment.allocationType === "agst_ref")
+      .reduce((total, payment) => total.plus(new Decimal(payment.allocatedAmount || 0).abs()), new Decimal(0))
+      .lt(new Decimal(invoice.grossAmount).minus(1))).map((invoice) => invoice.customerId));
+    const needed = eligibleCustomers.filter((customer) => short.has(customer.customerId));
+    const openings = needed.length ? await openingOnAccount(needed, context) : new Map();
+    for (const customer of needed) {
+      const balance = openings.get(normalized(customer.ledgerName));
+      if (balance && !balance.isZero()) customerCredits.push({ customerId: customer.customerId, date: scope.dateFrom, amount: balance.toFixed(), source: "Opening on-account balance" });
+    }
+  }
+  const sourceFingerprint = createHash("sha256").update(canonicalJson(customerCredits.length ? { invoices: invoiceResults, customerCredits } : invoiceResults)).digest("hex");
+  return { mode: "live_cd_batch", evaluationRunId: command.payload.evaluationRunId ?? null, ruleVersionId: scope.ruleVersionId ?? null, dateFrom: scope.dateFrom, dateTo: scope.dateTo, chunks, vouchersScanned, invoices: invoiceResults, customerCredits, sourceFingerprint };
 }

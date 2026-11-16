@@ -121,7 +121,7 @@ export function startLocalApi(config) {
     const calcStarted = performance.now();
     const calculation = isCashDiscount
       ? body.rule?.cdDiscountBasis === "amount_per_tonne"
-        ? evaluateCashDiscountSettlements(body.rule, body.evaluatedOn, evidence.invoices)
+        ? evaluateCashDiscountSettlements(body.rule, body.evaluatedOn, evidence.invoices, evidence.customerCredits ?? [])
         : evaluateLocalCashDiscount(body.rule, body.evaluatedOn, evidence.invoices)
       : evaluateLocalTurnoverDiscount(body.rule, body.evaluatedOn, body.periodStart, body.periodEnd, evidence.customerAggregates);
     const calculationMs = Math.round(performance.now() - calcStarted);

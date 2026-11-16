@@ -59,6 +59,8 @@ export type LiveCdBatch = {
   chunks: number;
   vouchersScanned: number;
   invoices: LiveCdInvoice[];
+  // On-account credit (+) / debit (−) per customer, from connector 0.4.3 on.
+  customerCredits?: Array<{ customerId: string; date: string; amount: string; source?: string }>;
   sourceFingerprint: string;
 };
 
@@ -352,7 +354,7 @@ export async function completeCdSettlementRun(run: EvaluationRunRecord, batch: L
   const supabase = createSupabaseAdminClient();
   const bootstrap = await loadLiveCdLocalBootstrap(run, batch.ruleVersionId);
   const rule = bootstrap.rule as FrozenCdRule & { customerSegments?: Record<string, number> };
-  const result = evaluateCashDiscountSettlements(rule, bootstrap.evaluatedOn, batch.invoices) as {
+  const result = evaluateCashDiscountSettlements(rule, bootstrap.evaluatedOn, batch.invoices, Array.isArray(batch.customerCredits) ? batch.customerCredits : []) as {
     results: Array<Record<string, unknown>>;
     candidates: Array<Record<string, unknown> & { customerId: string; invoiceGuid: string; category: string }>;
     totals: Record<string, unknown>;
