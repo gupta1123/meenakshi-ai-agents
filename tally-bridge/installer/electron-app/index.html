@@ -156,7 +156,7 @@
 
         <section class="runtime-panel" id="runtime-panel" aria-label="Server operation" hidden>
           <dl><dt>Background process</dt><dd id="runtime-state">Checking</dd><dt>Windows startup task</dt><dd id="runtime-task">Checking</dd><dt>Start at Windows login</dt><dd id="runtime-startup">Checking</dd><dt>Activity</dt><dd id="runtime-activity">Checking</dd></dl>
-          <p class="runtime-note">Serves staff browsers through Meenakshi. Closing this window keeps the background server running.</p>
+          <p class="runtime-note" id="runtime-note">Serves staff browsers through Meenakshi. Closing this window keeps the background server running.</p>
         </section>
 
         <details id="companies-detail"><summary id="companies-summary">Companies available in Tally</summary><ul class="company-list" id="company-list"></ul></details>
@@ -166,8 +166,8 @@
     <script>
       const labels = {
         meenakshi: { on: "Connected", warning: "Checking", off: "Not connected" },
-        tally: { on: "Available", warning: "Checking", off: "Not available" },
-        company: { on: "Confirmed", warning: "Checking", off: "Not confirmed" },
+        tally: { on: "Available", warning: "Checking", off: "Not available", unknown: "Unknown" },
+        company: { on: "Confirmed", warning: "Checking", off: "Not confirmed", unknown: "Unknown" },
       };
 
       function checkState(name, state) {
@@ -240,6 +240,7 @@
           login.textContent = known ? startup.enabled && startup.atLogon ? "Enabled" : "Disabled" : "Unknown";
           login.dataset.state = known ? startup.enabled && startup.atLogon ? "on" : "off" : "unknown";
           document.getElementById("runtime-activity").textContent = background.running === false ? "Stopped" : background.activity ?? "Waiting for status";
+          document.getElementById("runtime-note").textContent = background.running === false ? "Start the Windows task to serve staff browsers through Meenakshi." : "Serves staff browsers through Meenakshi. Closing this window keeps the background server running.";
         }
         const state = status.state || "disconnected";
         document.getElementById("connection").dataset.state = state;

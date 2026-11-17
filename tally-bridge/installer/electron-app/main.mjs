@@ -226,7 +226,7 @@ async function startOrMonitorBridge() {
         if (quitting) return;
         sendStatus({ mode: "server", background: { running: Boolean(runtime?.pid), startup, startedAt: runtime?.startedAt ?? null, version: runtime?.version ?? null, activity: runtime?.activity ?? null } });
         if (!runtime?.pid) {
-          sendStatus({ title: "Server connector is not running", detail: "Start the Meenakshi server task in Windows Task Scheduler.", state: "error", checks: { meenakshi: "off", tally: "off", company: "off" }, availableCompanies: [] });
+          sendStatus({ title: "Server connector is not running", detail: "Start the Meenakshi server task in Windows Task Scheduler.", state: "error", checks: { meenakshi: "off", tally: "unknown", company: "unknown" }, activeCompany: null, expectedCompany: null, availableCompanies: [] });
         } else if (!runtime.connection || !runtime.connection.cloudConnected || Date.now() - Date.parse(runtime.connection.checkedAt) > 90_000) {
           sendStatus({ title: "Server is checking the connection", detail: "The background process is running. Waiting for a fresh connection check.", state: "warning", checks: { meenakshi: "warning", tally: "warning", company: "warning" }, availableCompanies: [] });
         } else updateConnectionStatus(runtime.connection);
