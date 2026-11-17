@@ -45,3 +45,31 @@ test("all TOD periods are submitted together before the page starts following pr
   await api.runLocalTurnoverDiscount({batches,evaluatedOn:"2026-11-16"});
   assert.equal(body.body.batches.length,2);assert.equal(body.saveAsOfDate,"2026-11-16");
 });
+
+test("separately prepared due periods produce one saved server job, including every period",async()=>{
+  const requests=[];
+  const {api}=runner(async(_token,url,init)=>{
+    requests.push({url,method:init?.method??"GET",body:init?.body&&JSON.parse(init.body)});
+    if(init?.method==="POST")return{job:{id:"durable-batch"}};
+    if(url.includes("result=0"))return{job:{progress:{save:{state:"saved",evaluationRunId:"one-run"}}}};
+    return{job:{status:"succeeded",result:{rows:[],evidence:{}}}};
+  });
+  api.setServerCheckContext({companyId:"company",getToken:async()=>"token"});
+  const periods=[["2025-04-01","2025-06-30"],["2025-07-01","2025-09-30"],["2026-04-01","2026-06-30"]];
+  const prepared=periods.map(([periodStart,periodEnd])=>({expectedCompany:{guid:"tally-company"},activeSchemeVersionId:"rule",evaluatedOn:"2026-11-17",periods:[],batches:[{periodStart,periodEnd,rule:{id:"rule"}}]}));
+  const result=await api.runLocalTurnoverDiscount(api.combineTodBootstraps(prepared),undefined,{serverSave:{asOfDate:"2026-06-30"}});
+  const submitted=requests.filter(r=>r.method==="POST");
+  assert.equal(submitted.length,1,"later periods must not depend on another browser-side submission");
+  assert.deepEqual(JSON.parse(JSON.stringify(submitted[0].body.body.batches.map(b=>[b.periodStart,b.periodEnd]))),periods);
+  assert.equal(submitted[0].body.saveAsOfDate,"2026-06-30");
+  assert.equal(result.savedOnServer.evaluationRunId,"one-run");
+});
+
+test("preparation refuses a company/rule change and Stop before submission queues nothing",async()=>{
+  const {api}=runner(()=>assert.fail("a stopped check must not be submitted"));
+  const bootstrap={expectedCompany:{guid:"one"},activeSchemeVersionId:"rule",evaluatedOn:"2026-11-17",batches:[{}]};
+  assert.throws(()=>api.combineTodBootstraps([bootstrap,{...bootstrap,expectedCompany:{guid:"two"}}]),/changed/);
+  api.setServerCheckContext({companyId:"company",getToken:async()=>"token"});
+  const controller=new AbortController();controller.abort();
+  await assert.rejects(api.runLocalCashDiscount({},undefined,{signal:controller.signal}),/cancelled/);
+});

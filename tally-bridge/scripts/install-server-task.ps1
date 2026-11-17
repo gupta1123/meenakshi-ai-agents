@@ -1,6 +1,6 @@
 # Sets up the Meenakshi Tally connector to run as a permanent SERVER connector.
 #
-# Run once in an elevated PowerShell on the Tally server, after the connector
+# Run once as the paired Windows user on the Tally server, after the connector
 # has been paired (Meenakshi connection link) and Tally is open with the company:
 #
 #   powershell -ExecutionPolicy Bypass -File install-server-task.ps1 -NodePath "C:\Program Files\nodejs\node.exe" -BridgePath "C:\path\to\tally-bridge\src\bridge.mjs"
@@ -25,12 +25,17 @@ $taskName = "Meenakshi Tally Connector (server)"
 # The packaged Electron executable includes Node; standalone Node is optional.
 $env:ELECTRON_RUN_AS_NODE = '1'
 
+function Set-ConnectorMode([string]$Mode) {
+  $modeProcess = Start-Process -FilePath $NodePath -ArgumentList @("`"$BridgePath`"", 'set-mode', '--mode', $Mode) -WindowStyle Hidden -Wait -PassThru
+  if ($modeProcess.ExitCode -ne 0) { throw "Could not configure $Mode mode. Pair the connector first." }
+}
+
 if ($Remove) {
   if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
     Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
   }
-  & $NodePath $BridgePath set-mode --mode pc
+  Set-ConnectorMode 'pc'
   Write-Host "Server task removed and connector set back to PC mode."
   exit 0
 }
@@ -42,8 +47,7 @@ $activeBridge = Get-CimInstance Win32_Process | Where-Object {
 }
 if ($activeBridge) { throw 'Exit the running Meenakshi connector before enabling server startup, then run this script again.' }
 
-& $NodePath $BridgePath set-mode --mode server
-if ($LASTEXITCODE -ne 0) { throw 'Could not configure server mode. Pair the connector first.' }
+Set-ConnectorMode 'server'
 
 $runner = Join-Path $PSScriptRoot 'start-server-connector.vbs'
 if (-not (Test-Path -LiteralPath $runner)) { throw "Missing packaged server runner: $runner" }

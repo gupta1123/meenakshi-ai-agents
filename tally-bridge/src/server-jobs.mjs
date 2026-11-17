@@ -16,6 +16,7 @@ import { readNoteEInvoice } from "./tally/einvoice.mjs";
 import { claimNextCheckJob, finishCheckJob, reportCheckJobProgress, sendHeartbeat } from "./api-client.mjs";
 import { BRIDGE_VERSION } from "./version.mjs";
 import { logLine } from "./connector-log.mjs";
+import { recordRuntimeActivity, recordRuntimeHeartbeat } from "./runtime-status.mjs";
 import Decimal from "decimal.js";
 
 const PROGRESS_INTERVAL_MS = 20_000;
@@ -147,6 +148,8 @@ export async function processOneCheckJob(config, activeCompany, { processCommand
   const { job } = await deps.claimNextCheckJob(config);
   if (!job) return false;
   logLine("INFO", `server check started`, { job: job.id, kind: job.kind, attempt: job.attempt, requestedBy: job.requestedBy });
+  const activity = job.kind === "cd" ? "Checking Cash Discount" : job.kind === "tod" ? "Checking Turnover Discount" : "Reading an e-Invoice";
+  recordRuntimeActivity(activity);
   let cancelRequested = false;
   let leaseLost = false;
   let progress = { stage: "reading", done: 0, total: null };
@@ -160,10 +163,14 @@ export async function processOneCheckJob(config, activeCompany, { processCommand
       if (answer?.ok === false) leaseLost = true;
       else lastRenewedAt = Date.now();
       if (answer?.cancelRequested) cancelRequested = true;
-      if (!leaseLost) await deps.sendHeartbeat(config, BRIDGE_VERSION, {
+      if (!leaseLost) {
+        const snapshot = {
         tallyReachable: true, companyLoaded: true, activeCompany,
         availableCompanies: [{ ...activeCompany, isActive: true }], companySnapshotFresh: false,
-      });
+        };
+        const cloud = await deps.sendHeartbeat(config, BRIDGE_VERSION, snapshot);
+        recordRuntimeHeartbeat(snapshot, cloud);
+      }
     } catch (error) {
       // A network blip is fine: the lease lasts 3 minutes. Only a refusal means the job is no longer ours.
       if ([401, 404, 409, 426].includes(error?.status)) leaseLost = true;
@@ -186,7 +193,7 @@ export async function processOneCheckJob(config, activeCompany, { processCommand
           // the check carries on and the note is picked up next time.
           try { await processCommand(); } catch (error) {
             logLine("WARN", `could not run a waiting Tally command between windows: ${error instanceof Error ? error.message : error}`, { job: job.id });
-          }
+          } finally { recordRuntimeActivity(activity); }
         }
         : undefined,
     }, deps);
@@ -208,6 +215,6 @@ export async function processOneCheckJob(config, activeCompany, { processCommand
     await deps.finishCheckJob(config, job.id, { status: cancelled ? "cancelled" : "failed", attempt: job.attempt, failingStep: error?.failingStep ?? "tally_read", failureReason: reason })
       .catch((finishError) => logLine("ERROR", `could not report the check ending: ${finishError instanceof Error ? finishError.message : finishError}`, { job: job.id }));
     logLine(cancelled ? "INFO" : "ERROR", `server check ${cancelled ? "stopped" : "failed"}: ${reason}`, { job: job.id });
-  }
+  } finally { recordRuntimeActivity("Waiting for work"); }
   return true;
 }

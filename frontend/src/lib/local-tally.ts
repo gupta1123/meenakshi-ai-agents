@@ -65,6 +65,7 @@ export function setServerCheckContext(context: ServerCheckContext | null) { serv
 export function setServerModeLookup(lookup: () => Promise<void>) { lookupMode = lookup; }
 
 async function runServerJob<T>(task: "cash_discount" | "turnover_discount", body: Record<string, unknown>, overallTimeoutMs: number, options: LocalRunOptions | undefined, timeoutMessage: string): Promise<T> {
+  if (options?.signal?.aborted) throw new LocalCalculationError("The check was cancelled.", "tally_read");
   const context = serverContext!;
   const token = async () => { const value = await context.getToken(); if (!value) throw new LocalCalculationError("You are signed out. Sign in again, then calculate.", "tally_read"); return value; };
   const base = `/api/companies/${context.companyId}/check-jobs`;
@@ -161,6 +162,7 @@ const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve
  */
 async function runLocalJob<T>(task: "cash_discount" | "turnover_discount", body: Record<string, unknown>, overallTimeoutMs: number, options: LocalRunOptions | undefined, legacy: () => Promise<T>, timeoutMessage: string): Promise<T> {
   await lookupMode?.();
+  if (options?.signal?.aborted) throw new LocalCalculationError("The check was cancelled.", "tally_read");
   if (serverContext) return runServerJob<T>(task, body, overallTimeoutMs, options, timeoutMessage);
   const begin = async (): Promise<string | "legacy"> => {
     try {
@@ -313,7 +315,22 @@ export type LocalTodPeriod = {
   start: string;
   end: string;
   state: "completed" | "current" | "upcoming";
+  calculated?: boolean;
 };
+
+/** Prepare every selected period before submitting one durable server job. */
+export function combineTodBootstraps(bootstraps: LocalTodBootstrap[]): LocalTodBootstrap {
+  const first = bootstraps[0];
+  if (!first) throw new Error("Choose at least one Turnover Discount period.");
+  for (const bootstrap of bootstraps) {
+    if (bootstrap.expectedCompany.guid !== first.expectedCompany.guid || bootstrap.activeSchemeVersionId !== first.activeSchemeVersionId || bootstrap.evaluatedOn !== first.evaluatedOn) {
+      throw new Error("The company or active rule changed while preparing the periods. Reopen Calculate period and try again.");
+    }
+  }
+  const batches = bootstraps.flatMap((bootstrap) => bootstrap.batches);
+  if (!batches.length || batches.length > 24) throw new Error("Choose up to 24 Turnover Discount calculation periods at a time.");
+  return { ...first, batches };
+}
 
 export type LocalTodBatchBootstrap = {
   periodStart: string;
@@ -362,7 +379,7 @@ export async function runLocalTurnoverDiscount(bootstrap: LocalTodBootstrap, sig
   if (serverContext) {
     const periodStart = bootstrap.batches.map((b) => b.periodStart).sort()[0];
     const periodEnd = bootstrap.batches.map((b) => b.periodEnd).sort().at(-1)!;
-    return runServerJob<LocalTodResult>("turnover_discount", { ...bootstrap, periodStart, periodEnd }, 1_800_000,
+    return runServerJob<LocalTodResult>("turnover_discount", { ...bootstrap, periodStart, periodEnd }, Math.max(1_800_000, bootstrap.batches.length * 900_000),
       { ...options, signal: options?.signal ?? signal, serverSave: options?.serverSave ?? { asOfDate: bootstrap.evaluatedOn } },
       "The Tally server is still checking these periods. Reopen the page later to see the saved result.");
   }

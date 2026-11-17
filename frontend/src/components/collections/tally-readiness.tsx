@@ -672,7 +672,7 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
           </div>
         </details>}
 
-        <p className={s.footnote}><ShieldCheck size={14} />Meenakshi checks Tally from this computer. Your connection details stay private.</p>
+        <p className={s.footnote}><ShieldCheck size={14} />Meenakshi uses the Tally connector paired with this company. Your connection details stay private.</p>
       </div>
     </div>
   );

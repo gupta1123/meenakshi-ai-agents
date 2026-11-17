@@ -13,6 +13,8 @@ import { apiRequest, jsonBody } from "@/lib/api";
 import { describeCalculationFailure, finishCalculationEvent, startCalculationEvent, type CalculationStep } from "@/lib/calculation-events";
 import { readLocalConnectorVersion, readLocalProgress, runLocalCashDiscount, type LocalCdBootstrap, type LocalProgress, type ReconnectState } from "@/lib/local-tally";
 import { userFacingError } from "@/lib/user-copy";
+import { useServerCheck } from "@/lib/use-server-check";
+import type { TallyMode } from "@/lib/tally-mode";
 
 import { WorkspacePageHeader } from "./app-shell";
 import { useCompany } from "./company-context";
@@ -63,9 +65,10 @@ const TABS: Array<{ key: Tab; label: string; hint: string }> = [
   { key: "other", label: "Waiting / review", hint: "Payment window still open, or the invoice needs review." },
 ];
 
-export function CashDiscountSettlementsPage({ isAdministrator, setNotice }: {
+export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyMode }: {
   isAdministrator: boolean;
   setNotice: (value: string | null) => void; setError?: (value: string | null) => void;
+  tallyMode: TallyMode;
 }) {
   const { company, companyKey } = useCompany();
   // Errors stay on this page: the shared workspace error would replace the
@@ -87,7 +90,7 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice }: {
   const [data, setData] = useState<SettlementData | null>(null);
   const [liveRows, setLiveRows] = useState<CdSettlementRow[] | null>(null);
   const [loading, setLoading] = useState(true);
-  const [phase, setPhase] = useState<"reading" | "saving" | null>(null);
+  const [localPhase, setPhase] = useState<"reading" | "saving" | null>(null);
   const [reconnect, setReconnect] = useState<ReconnectState>(null);
   const cancelRun = useRef<AbortController | null>(null);
   const [tab, setTab] = useState<Tab>("all");
@@ -152,6 +155,13 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice }: {
     finally { if (requestId === latestLoad.current) setLoading(false); }
   }, [company.id, setError]);
   useEffect(() => { setLoading(true); setData(null); setLiveRows(null); void load(); }, [companyKey, load]);
+  const serverCheck = useServerCheck(company.id, "cd", tallyMode.mode === "server", accessToken, async (next) => {
+    if (next.job.status === "succeeded" && next.run?.status === "completed") {
+      await load();
+      setLiveRows(null);
+    } else setError(next.message ?? "The server check did not finish. Review the result before starting another check.");
+  });
+  const phase = serverCheck.state?.phase ?? localPhase ?? (serverCheck.looking ? "reading" : null);
   // Follow Credit Notes that are being created in Tally.
   const creating = Object.values(data?.creditNotes ?? {}).some((note) => ["queued", "sending"].includes(note.status));
   useEffect(() => {
@@ -167,7 +177,14 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice }: {
   }, [creating, load]);
 
   // While the connector reads Tally, poll its progress once a second.
-  const [progress, setProgress] = useState<LocalProgress | null>(null);
+  const [localProgress, setProgress] = useState<LocalProgress | null>(null);
+  const observedProgress = serverCheck.state?.job.progress;
+  const progress: LocalProgress | null = observedProgress ? {
+    task: "cash_discount", stage: observedProgress.stage ?? "reading", done: observedProgress.done ?? 0,
+    total: observedProgress.total ?? null, from: observedProgress.from ?? null, to: observedProgress.to ?? null,
+    nextDate: observedProgress.nextDate, vouchersScanned: observedProgress.vouchersScanned,
+    startedAt: serverCheck.state!.job.created_at,
+  } : localProgress;
   useEffect(() => {
     if (phase !== "reading") { setProgress(null); return; }
     let cancelled = false;
@@ -180,6 +197,7 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice }: {
   const shortDay = (value: string | null | undefined) => value ? new Date(`${value.slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short" }) : "";
 
   const calculate = async () => {
+    cancelRun.current = new AbortController();
     setPhase("reading"); setError(null); setFlash(null);
     let eventId: string | null = null;
     let eventToken: string | null = null;
@@ -197,7 +215,6 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice }: {
       timings.serverPrepareMs = Math.round(performance.now() - prepareStarted);
       step = "tally_read";
       const readStarted = performance.now();
-      cancelRun.current = new AbortController();
       const result = await runLocalCashDiscount(bootstrap, undefined, { signal: cancelRun.current.signal, onReconnecting: setReconnect, onStatus: setNotice, serverSave: {} }) as unknown as { results: CdSettlementRow[]; evidence: Record<string, unknown>; timings?: { tallyReadMs?: number; calculationMs?: number }; savedOnServer?: { totals?: { autoQueued?: number } } | null };
       timings.tallyReadMs = result.timings?.tallyReadMs ?? Math.round(performance.now() - readStarted);
       if (result.timings?.calculationMs !== undefined) timings.calculationMs = result.timings.calculationMs;
@@ -312,6 +329,8 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice }: {
 
   return <>
     {error && <InlineMessage tone="error">{error}</InlineMessage>}
+    {serverCheck.error && <InlineMessage tone="error">{serverCheck.error}</InlineMessage>}
+    {serverCheck.state?.message && <InlineMessage tone="info">{serverCheck.state.message}</InlineMessage>}
     <WorkspacePageHeader title="Cash Discount" />
     <section className="tod-overview cd-overview" aria-label="Latest Cash Discount check">
       <div className="tod-overview-meta">
@@ -325,7 +344,6 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice }: {
           <strong>Reconnecting to the Meenakshi connector… (try {reconnect.attempt})</strong>
           <span>{reconnect.offlineMs > 0 ? `No answer for ${Math.round(reconnect.offlineMs / 1000)} s. ` : ""}The check keeps running on the PC. Make sure Tally and the connector are open; this page will pick it up automatically.</span>
         </div>
-        <Button type="button" onClick={() => cancelRun.current?.abort()}>Stop checking</Button>
       </div>}
       {phase && <div className="cd-check-progress" role="status" aria-live="polite">
         <div className="cd-check-progress-copy">
@@ -333,6 +351,7 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice }: {
           <span>{phase === "saving" ? "Almost done." : progress?.total && progress.stage !== "calculating" ? `${shortDay(progress.from)} – ${shortDay(progress.to)} in 10-day batches${progress.nextDate ? ` · next from ${shortDay(progress.nextDate)}` : ""}${progress.vouchersScanned ? ` · ${progress.vouchersScanned.toLocaleString("en-IN")} vouchers read` : ""}` : "Keep Tally open. You can keep working in Tally meanwhile."}</span>
         </div>
         <div className="cd-check-progress-track" aria-hidden="true"><span style={{ width: `${phase === "saving" || progress?.stage === "calculating" ? 100 : Math.max(4, progressPercent)}%` }} /></div>
+        {phase === "reading" && (serverCheck.state || cancelRun.current) && <Button type="button" disabled={serverCheck.stopping || serverCheck.state?.job.cancel_requested} onClick={() => { if (serverCheck.state) void serverCheck.stop(); else cancelRun.current?.abort(); }}>{serverCheck.stopping || serverCheck.state?.job.cancel_requested ? "Stopping…" : "Stop checking"}</Button>}
       </div>}
       {!data?.run && !phase && <div className="cd-overview-body"><h2>Run a Tally check</h2><p>Press Calculate to sort invoices into Full payment, Short up to ₹10,000 and Discounted payment.</p></div>}
     </section>

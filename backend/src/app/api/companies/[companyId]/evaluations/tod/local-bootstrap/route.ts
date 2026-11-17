@@ -3,6 +3,7 @@ import { requireCurrentCheckPage } from "@/lib/check-page";
 import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/authorization";
 import { loadLiveTodLocalBootstrap, type EvaluationRunRecord } from "@/lib/evaluation/evidence";
 import { isUuid } from "@/lib/security";
+import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -74,16 +75,28 @@ export async function GET(request: Request, context: RouteContext) {
     const bootstrap = await entry.pending;
     const activeRule = [...bootstrap.batches].sort((left, right) => right.rule.versionNumber - left.rule.versionNumber)[0]?.rule ?? null;
     const activeSchemeVersionId = activeRule?.id ?? null;
+    // A capped list of recent customers cannot tell whether an older period
+    // has saved results. Check each period's durable records directly.
+    const db = createSupabaseAdminClient();
+    const periods = await Promise.all((activeRule ? rulePeriods(activeRule, today) : []).map(async (period) => {
+      if (period.state === "upcoming") return { ...period, calculated: false };
+      const { data, error } = await db.from("discount_proposals").select("id")
+        .eq("company_id", company.id).eq("scheme_version_id", activeSchemeVersionId!)
+        .eq("period_start", period.start).eq("period_end", period.end)
+        .neq("status", "not_in_scheme").not("latest_evaluated_at", "is", null).limit(1);
+      if (error) throw error;
+      return { ...period, calculated: Boolean(data?.length) };
+    }));
     return jsonWithCors(request, {
       evaluatedOn: bootstrap.evaluatedOn,
       expectedCompany: { name: company.tally_company_name, guid: company.tally_company_guid },
       activeSchemeVersionId,
-      periods: activeRule ? rulePeriods(activeRule, today) : [],
+      periods,
       batches: bootstrap.batches.map((batch) => ({
         ...batch,
         voucherScope: { ...batch.voucherScope, evaluationRunId: null },
       })),
-    }, { headers: { "Cache-Control": "private, max-age=30, stale-while-revalidate=120" } });
+    }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     if (error instanceof MeenakshiAccessError) return jsonWithCors(request, { error: error.message }, { status: error.status });
     if (error instanceof Error && /^(No active Turnover Discount rule|More than one active Turnover Discount rule|The active Turnover Discount rule)/.test(error.message)) {
