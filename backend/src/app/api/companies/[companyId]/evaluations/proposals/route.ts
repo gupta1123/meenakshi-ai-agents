@@ -89,7 +89,7 @@ export async function GET(request: Request, context: RouteContext) {
     // The select string is built from the request (embedded joins), which the generated types can't follow.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let query: any = (createSupabaseAdminClient().from("discount_proposals") as any)
-      .select(`id, customer_id, customers(ledger_name, is_available), ${withPosting ? "credit_note_postings!inner(id), " : ""}${activeOnly && (schemeType === "cd" || schemeType === "tod") ? "scheme_versions!inner(id), " : ""}scheme_version_id, scheme_type, source_sales_voucher_id, period_start, period_end, entitlement_key, status, source_fingerprint, last_live_refresh_at, eligibility_deadline, eligible_product_taxable_value, eligible_tonnes, achieved_tier_id, next_tier_tonnes, additional_tonnes_required, invoice_amount_due, amount_paid_by_deadline, discounted_settlement_target, shortfall_amount, discount_percentage, calculated_discount_amount, posted_discount_amount, reason_codes, latest_evaluated_at, updated_at`)
+      .select(`id, customer_id, customers(ledger_name, is_available, current_customer_group_id), ${withPosting ? "credit_note_postings!inner(id), " : ""}${activeOnly && (schemeType === "cd" || schemeType === "tod") ? "scheme_versions!inner(id), " : ""}scheme_version_id, scheme_type, source_sales_voucher_id, period_start, period_end, entitlement_key, status, source_fingerprint, last_live_refresh_at, eligibility_deadline, eligible_product_taxable_value, eligible_tonnes, achieved_tier_id, next_tier_tonnes, additional_tonnes_required, invoice_amount_due, amount_paid_by_deadline, discounted_settlement_target, shortfall_amount, discount_percentage, calculated_discount_amount, posted_discount_amount, reason_codes, latest_evaluated_at, updated_at`)
       .eq("company_id", company.id);
     // A period request pages by id so the id cursor is exact; the default list stays newest-updated first.
     query = byPeriod ? query.order("id", { ascending: false }) : query.order("updated_at", { ascending: false }).order("id", { ascending: false });
@@ -107,7 +107,7 @@ export async function GET(request: Request, context: RouteContext) {
     if (cursor && isUuid(cursor)) query = query.lt("id", cursor);
     const { data: rawData, error } = await query;
     if (error) throw error;
-    const rows = (rawData ?? []) as unknown as Array<Record<string, unknown> & { id: string; customer_id: string; scheme_type: string; customers?: { ledger_name?: string; is_available?: boolean } | null; scheme_versions?: unknown; credit_note_postings?: unknown }>;
+    const rows = (rawData ?? []) as unknown as Array<Record<string, unknown> & { id: string; customer_id: string; scheme_type: string; customers?: { ledger_name?: string; is_available?: boolean; current_customer_group_id?: string | null } | null; scheme_versions?: unknown; credit_note_postings?: unknown }>;
     const hasMore = rows.length > limit;
     const proposals = hasMore ? rows.slice(0, limit) : rows;
     const nextCursor = hasMore ? proposals[proposals.length - 1]?.id ?? null : null;
@@ -165,6 +165,7 @@ export async function GET(request: Request, context: RouteContext) {
         return {
           ...proposalFields,
           customer_name: customerName ?? null,
+          customer_group_id: customerRow?.current_customer_group_id ?? null,
           latestEvaluation: evaluation ? { id: evaluation.id, evaluated_at: evaluation.evaluated_at, freshForApproval } : null,
           creditNotePosting: postingByProposal.get(proposal.id) ?? null,
           ...(proposal.scheme_type === "tod" ? { paymentSummary: evaluation ? summaryByEvaluation.get(evaluation.id) ?? null : null } : {}),

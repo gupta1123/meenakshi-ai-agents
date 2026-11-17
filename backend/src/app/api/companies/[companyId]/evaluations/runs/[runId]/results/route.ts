@@ -23,11 +23,12 @@ export async function GET(request: Request, context: RouteContext) {
     // A TOD run covers hundreds of customers; one .in() with every ID makes the
     // request URL exceed the header limit, so look names up in chunks.
     const names = new Map<string, string>();
+    const groups = new Map<string, string | null>();
     for (let index = 0; index < customerIds.length; index += 100) {
       const { data: customers, error: customerError } = await supabase.from("customers")
-        .select("id, ledger_name").eq("company_id", company.id).in("id", customerIds.slice(index, index + 100));
+        .select("id, ledger_name, current_customer_group_id").eq("company_id", company.id).in("id", customerIds.slice(index, index + 100));
       if (customerError) throw customerError;
-      for (const customer of customers ?? []) names.set(customer.id, customer.ledger_name);
+      for (const customer of customers ?? []) { names.set(customer.id, customer.ledger_name); groups.set(customer.id, customer.current_customer_group_id); }
     }
     const results = runs.flatMap((run) => {
       const contextValue = run.request_context as Record<string, unknown> | null;
@@ -38,6 +39,7 @@ export async function GET(request: Request, context: RouteContext) {
         id: run.id,
         customerId,
         customerName: names.get(customerId) ?? "Customer record",
+        customerGroupId: groups.get(customerId) ?? null,
         schemeVersionId: run.scheme_version_id,
         periodStart: run.period_start,
         periodEnd: run.period_end,
