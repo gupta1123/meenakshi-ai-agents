@@ -69,6 +69,7 @@ export type Proposal = {
   id: string;
   customer_id: string;
   customer_name?: string | null;
+  customer_group_id?: string | null;
   scheme_type: "cd" | "tod";
   status: string;
   period_start: string | null;

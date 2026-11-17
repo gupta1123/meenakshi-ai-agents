@@ -663,9 +663,10 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       try {
         const token = await accessToken();
         if (!token) return;
-        const response = await apiRequest<{ results: Array<{ id: string; customerId: string; customerName: string; schemeVersionId: string | null; periodStart: string | null; periodEnd: string | null; outcome: string; eligibleTonnes: string; calculatedDiscountAmount: string; completedAt: string | null; createdAt: string }> }>(token, `/api/companies/${company.id}/evaluations/runs/${run.id}/results`, { cache: "no-store" });
+        const response = await apiRequest<{ results: Array<{ id: string; customerId: string; customerName: string; customerGroupId?: string | null; schemeVersionId: string | null; periodStart: string | null; periodEnd: string | null; outcome: string; eligibleTonnes: string; calculatedDiscountAmount: string; completedAt: string | null; createdAt: string }> }>(token, `/api/companies/${company.id}/evaluations/runs/${run.id}/results`, { cache: "no-store" });
         setHistoryTodRows(response.results.map((result) => ({
           id: `history:${result.id}`, customer_id: result.customerId, customer_name: result.customerName, scheme_type: "tod", status: result.outcome,
+          customer_group_id: result.customerGroupId,
           period_start: result.periodStart ?? run.period_start ?? null, period_end: result.periodEnd ?? run.period_end ?? null, eligibility_deadline: result.periodEnd ?? run.period_end ?? null,
           calculated_discount_amount: result.calculatedDiscountAmount, scheme_version_id: result.schemeVersionId ?? run.scheme_version_id ?? undefined,
           source_sales_voucher_id: null, entitlement_key: `history:${run.id}:${result.customerId}`, eligible_product_taxable_value: null,
@@ -1153,7 +1154,9 @@ function TodResults({ scaleByRule, reference, rows: filteredRows, allRows, query
   }, [company.id]);
   const groupsById = new Map((reference?.masters.customerGroups ?? []).map((group) => [group.id, group]));
   const customerGroupId = new Map((reference?.masters.customers ?? []).map((customer) => [customer.id, customer.current_customer_group_id ?? null]));
-  const groupOf = (proposal: Proposal) => customerGroupId.get(proposal.customer_id) ?? "none";
+  // The Rulebook reference list is intentionally bounded. A result's own
+  // customer context remains authoritative even beyond that first page.
+  const groupOf = (proposal: Proposal) => proposal.customer_group_id !== undefined ? proposal.customer_group_id ?? "none" : customerGroupId.get(proposal.customer_id) ?? "none";
   // A rule covers a group when it selects that group or one of its parents.
   const rulesFor = (groupId: string) => {
     const lineage = new Set<string>();
