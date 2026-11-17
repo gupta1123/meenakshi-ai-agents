@@ -2,11 +2,11 @@
 
 This is the Windows-only local agent that talks to the Tally Prime HTTP/XML endpoint. It is independent of the hosted `backend` service and must run on the computer where Tally is reachable.
 
-## Server pilot (0.5.2)
+## Server pilot (0.5.3)
 
 The hosted backend must have the server-job recovery migration before this version is used in server mode. Existing PC connectors can continue using the PC workflow.
 
-Version 0.5.2 fixes Windows startup setup falsely reporting a failed mode change when using the bundled Electron runtime.
+Version 0.5.3 adds a server status window with live background-process activity, Windows task state and startup-at-login status. Opening or closing this window does not start, stop or disconnect the background server. Status comes from the existing worker through a local named pipe; no browser API is enabled. Version 0.5.2 fixed Windows startup setup falsely reporting a failed mode change when using the bundled Electron runtime.
 
 1. Install and pair the connector on the Windows machine that keeps the approved Tally company open. Exit its status window before enabling background startup.
 2. From the installation directory, run `powershell -ExecutionPolicy Bypass -File .\install-server-task.ps1` as that same Windows user. The package includes its Node runtime and the hidden startup runner; no separate Node installation is needed.

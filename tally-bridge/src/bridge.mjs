@@ -8,6 +8,7 @@ import { probeActiveCompany, probeCurrentCompanyName, probeTallyCompanies, probe
 import { startLocalApi } from "./local-api.mjs";
 import { processOneCheckJob } from "./server-jobs.mjs";
 import { acquireBridgeLock } from "./instance-lock.mjs";
+import { beginRuntimeStatus, readRuntimeStatus, recordRuntimeActivity, recordRuntimeFailure, recordRuntimeHeartbeat } from "./runtime-status.mjs";
 
 import { BRIDGE_VERSION } from "./version.mjs";
 import { clearRunning, logLine, markRunning, previousRunEndedBadly } from "./connector-log.mjs";
@@ -114,11 +115,13 @@ async function heartbeat(config, cachedCompanies = null) {
     snapshot.masterChangeCounter = changeCounter.company === company ? changeCounter.value : null;
   }
   const cloud = await sendHeartbeat(config, BRIDGE_VERSION, snapshot);
+  recordRuntimeHeartbeat(snapshot, cloud);
   console.log(`MEENAKSHI_STATUS ${JSON.stringify({ ...snapshot, cloudConnected: true, bindings: cloud.bindings ?? [] })}`);
   return snapshot;
 }
 
 function commandActivity(command, state, error = null) {
+  recordRuntimeActivity(state === "running" ? "Working with Tally" : state === "failed" ? "Last action needs attention" : "Waiting for work");
   const payload = command.payload && typeof command.payload === "object" ? command.payload : {};
   const voucherScope = payload.voucherScope && typeof payload.voucherScope === "object" ? payload.voucherScope : {};
   const customers = Array.isArray(payload.customers) ? payload.customers : voucherScope.customers;
@@ -219,7 +222,8 @@ function sleep(milliseconds) {
 }
 
 async function startBridge(config) {
-  const instance = await acquireBridgeLock(config);
+  const instance = await acquireBridgeLock(config, readRuntimeStatus);
+  beginRuntimeStatus(config);
   // Leave a trace of why the connector stopped: a hard kill leaves none, which is itself informative.
   const mb = () => Math.round(process.memoryUsage().rss / 1048576);
   logLine("INFO", `connector started`, { version: BRIDGE_VERSION, pid: process.pid, node: process.version, rssMb: mb() });
@@ -265,6 +269,7 @@ async function startBridge(config) {
       if (processed) nextHeartbeatAt = 0;
       await sleep(processed ? 250 : config.commandPollIntervalMs);
     } catch (error) {
+      recordRuntimeFailure();
       if (isTerminalConnectorError(error)) throw error;
       consecutiveFailures += 1;
       const retryDelay = Math.min(config.heartbeatIntervalMs * 2 ** Math.min(consecutiveFailures - 1, 4), MAX_RETRY_DELAY_MS);

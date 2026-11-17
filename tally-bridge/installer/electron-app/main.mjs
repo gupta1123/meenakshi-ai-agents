@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const PRODUCT_NAME = "Meenakshi Tally Connector";
 const PROTOCOL_NAME = "meenakshi-tally";
@@ -31,6 +31,9 @@ let quitting = false;
 let disconnectFinished = false;
 let pendingProtocolUrl = null;
 let activityResetTimer = null;
+let monitorOnly = false;
+let monitorTimer = null;
+let ownsBridgeConnection = false;
 let currentActivity = { label: "Ready", state: "idle", detail: "Waiting for work from Meenakshi." };
 let lastStatus = {
   title: "Not connected to Meenakshi",
@@ -196,12 +199,48 @@ function updateConnectionStatus(snapshot) {
     activeCompany,
     expectedCompany,
     availableCompanies,
-    lastSuccessfulCheck: new Date().toISOString(),
+    lastSuccessfulCheck: snapshot.checkedAt ?? new Date().toISOString(),
     action: { type: "open", label: "Open Meenakshi" },
   });
 }
 
+async function startOrMonitorBridge() {
+  try {
+    const monitor = await import(pathToFileURL(path.join(path.dirname(bridgePath), "desktop-monitor.mjs")).href);
+    const initial = await monitor.readDesktopRuntime();
+    if (quitting) return;
+    if (initial.mode !== "server") { sendStatus({ mode: "pc" }); startBridge(); return; }
+    // A server window is a viewer, not the owner of the scheduled worker.
+    // Opening and closing it must never compete with or disconnect that worker.
+    monitorOnly = true;
+    mainWindow?.setMinimumSize(470, 680);
+    mainWindow?.setSize(470, 680);
+    mainWindow?.setTitle(`${PRODUCT_NAME} - Server status`);
+    let busy = false, startup = { state: "checking" }, startupReadAt = 0;
+    const poll = async () => {
+      if (busy || quitting) return;
+      busy = true;
+      try {
+        const { runtime } = await monitor.readDesktopRuntime();
+        if (Date.now() - startupReadAt > 15_000) { startup = await monitor.readWindowsStartup(); startupReadAt = Date.now(); }
+        if (quitting) return;
+        sendStatus({ mode: "server", background: { running: Boolean(runtime?.pid), startup, startedAt: runtime?.startedAt ?? null, version: runtime?.version ?? null, activity: runtime?.activity ?? null } });
+        if (!runtime?.pid) {
+          sendStatus({ title: "Server connector is not running", detail: "Start the Meenakshi server task in Windows Task Scheduler.", state: "error", checks: { meenakshi: "off", tally: "off", company: "off" }, availableCompanies: [] });
+        } else if (!runtime.connection || !runtime.connection.cloudConnected || Date.now() - Date.parse(runtime.connection.checkedAt) > 90_000) {
+          sendStatus({ title: "Server is checking the connection", detail: "The background process is running. Waiting for a fresh connection check.", state: "warning", checks: { meenakshi: "warning", tally: "warning", company: "warning" }, availableCompanies: [] });
+        } else updateConnectionStatus(runtime.connection);
+      } catch {
+        if (!quitting) sendStatus({ mode: "server", title: "Could not read server status", detail: "Close and reopen this status window.", state: "warning", background: { running: null, startup: { state: "unknown" } }, checks: { meenakshi: "warning", tally: "warning", company: "warning" } });
+      } finally { busy = false; }
+    };
+    await poll();
+    monitorTimer = setInterval(() => { void poll(); }, 3_000);
+  } catch { startBridge(); }
+}
+
 function startBridge() {
+  if (quitting) return;
   stopBridge();
   const generation = bridgeGeneration;
   const child = spawn(process.execPath, [bridgePath, "start"], {
@@ -209,6 +248,7 @@ function startBridge() {
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
+  ownsBridgeConnection = true;
   let lastBridgeError = "";
   bridgeProcess = child;
   child.stdout.on("data", (chunk) => {
@@ -295,6 +335,7 @@ function runBridgeCommand(command, args = []) {
 
 async function handleConnectUrl(value) {
   try {
+    if (monitorOnly) throw new Error("This is a server status window. Stop the background server task before changing its pairing.");
     const args = parseProtocolUrl(value);
     showWindow();
     sendStatus({ title: "Checking Tally Prime", detail: "Connecting this computer to Meenakshi.", state: "running" });
@@ -362,6 +403,12 @@ app.setName(PRODUCT_NAME);
 app.setAppUserModelId(APP_USER_MODEL_ID);
 app.on("before-quit", (event) => {
   if (disconnectFinished) return;
+  if (monitorOnly || !ownsBridgeConnection) {
+    quitting = true;
+    if (monitorTimer) clearInterval(monitorTimer);
+    disconnectFinished = true;
+    return;
+  }
   event.preventDefault();
   if (quitting) return;
   quitting = true;
@@ -397,6 +444,6 @@ if (!gotLock) {
     createWindow();
     const protocolArg = process.argv.find((entry) => entry.startsWith(`${PROTOCOL_NAME}://`)) || pendingProtocolUrl;
     if (protocolArg) handleProtocolUrl(protocolArg);
-    else startBridge();
+    else void startOrMonitorBridge();
   });
 }

@@ -112,6 +112,14 @@
       summary:focus-visible { outline: 3px solid #ffc7c9; outline-offset: 2px; }
       .connector-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 18px; color: var(--muted); font-size: 10px; }
       .connector-footer span:first-child::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: var(--green); vertical-align: 1px; }
+      .runtime-panel { margin-top: 18px; padding: 13px 15px; border: 1px solid var(--line); border-radius: 12px; background: var(--canvas); }
+      .runtime-panel[hidden] { display: none; }
+      .runtime-panel dl { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; margin: 0; font-size: 12px; }
+      .runtime-panel dt { color: var(--muted); }
+      .runtime-panel dd { margin: 0; font-weight: 650; text-align: right; }
+      .runtime-panel dd[data-state="on"] { color: var(--green); }
+      .runtime-panel dd[data-state="off"] { color: var(--red); }
+      .runtime-note { margin: 11px 0 0; color: var(--muted); font-size: 11px; line-height: 1.4; }
       @keyframes pulse { 50% { opacity: .58; } }
       @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
     </style>
@@ -134,7 +142,7 @@
         <div class="logs-result" id="logs-result" role="status" aria-live="polite"></div>
       </section>
       <section class="content connection" id="connection" data-state="disconnected">
-        <p class="eyebrow">Tally connection</p>
+        <p class="eyebrow" id="connector-role">Tally connector</p>
         <div class="headline"><span class="signal" aria-hidden="true"></span><h1 id="status-title">Not connected to Meenakshi</h1></div>
         <p class="status-copy" id="status-detail">Open Meenakshi and connect this computer.</p>
 
@@ -146,8 +154,13 @@
 
         <div class="company-compare" id="company-compare"><span>Open in Tally</span><strong id="active-company">—</strong><span>Expected by Meenakshi</span><strong id="expected-company">—</strong></div>
 
+        <section class="runtime-panel" id="runtime-panel" aria-label="Server operation" hidden>
+          <dl><dt>Background process</dt><dd id="runtime-state">Checking</dd><dt>Windows startup task</dt><dd id="runtime-task">Checking</dd><dt>Start at Windows login</dt><dd id="runtime-startup">Checking</dd><dt>Activity</dt><dd id="runtime-activity">Checking</dd></dl>
+          <p class="runtime-note">Serves staff browsers through Meenakshi. Closing this window keeps the background server running.</p>
+        </section>
+
         <details id="companies-detail"><summary id="companies-summary">Companies available in Tally</summary><ul class="company-list" id="company-list"></ul></details>
-        <footer class="connector-footer"><span>Reconnects automatically</span><span id="last-check"></span></footer>
+        <footer class="connector-footer"><span id="footer-mode">Reconnects automatically</span><span id="last-check"></span></footer>
       </section>
     </main>
     <script>
@@ -212,6 +225,22 @@
       });
 
       window.meenakshiBridge?.onStatus((status) => {
+        const server = status.mode === "server";
+        document.getElementById("connector-role").textContent = server ? "Server connector" : status.mode === "pc" ? "PC connector" : "Connector status";
+        document.getElementById("footer-mode").textContent = server ? "Status updates automatically" : "Reconnects automatically";
+        document.getElementById("runtime-panel").hidden = !server;
+        if (server) {
+          const background = status.background ?? {}, startup = background.startup ?? {};
+          const running = document.getElementById("runtime-state");
+          running.textContent = background.running === true ? "Running" : background.running === false ? "Stopped" : "Unknown";
+          running.dataset.state = background.running === true ? "on" : background.running === false ? "off" : "unknown";
+          document.getElementById("runtime-task").textContent = ({ missing: "Not installed", checking: "Checking", unknown: "Unknown", unsupported: "Unavailable" })[startup.state] ?? startup.state ?? "Unknown";
+          const login = document.getElementById("runtime-startup");
+          const known = typeof startup.enabled === "boolean" && typeof startup.atLogon === "boolean";
+          login.textContent = known ? startup.enabled && startup.atLogon ? "Enabled" : "Disabled" : "Unknown";
+          login.dataset.state = known ? startup.enabled && startup.atLogon ? "on" : "off" : "unknown";
+          document.getElementById("runtime-activity").textContent = background.running === false ? "Stopped" : background.activity ?? "Waiting for status";
+        }
         const state = status.state || "disconnected";
         document.getElementById("connection").dataset.state = state;
         document.getElementById("status-title").textContent = status.title || "Meenakshi Tally Connector";
