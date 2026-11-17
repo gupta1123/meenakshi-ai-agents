@@ -20,6 +20,19 @@ test("an unresolved mode blocks both calculations and e-invoice reads without co
   await assert.rejects(api.readLocalNoteEInvoice({}),/mode lookup unavailable/);
   assert.equal(requests.length,0);
 });
+
+test("version telemetry never probes a staff PC in server or unresolved mode, while PC mode retains its identity read", async()=>{
+  const {api,requests}=runner(()=>assert.fail("version telemetry must not submit work"));
+  api.setServerModeLookup(async()=>api.setServerCheckContext({companyId:"company",getToken:async()=>"token"}));
+  assert.equal(await api.readLocalConnectorVersion(),null);
+  assert.equal(requests.length,0);
+  api.setServerModeLookup(async()=>{throw new Error("mode unavailable");});
+  assert.equal(await api.readLocalConnectorVersion(),null);
+  assert.equal(requests.length,0);
+  api.setServerModeLookup(async()=>api.setServerCheckContext(null));
+  assert.equal(await api.readLocalConnectorVersion(),null);
+  assert.deepEqual(requests,["http://127.0.0.1:3219/v1/identity"]);
+});
 test("a previously opened PC page rechecks routing before a new calculation",async()=>{
   const posted=[];
   const {api,requests}=runner(async(_token,url,init)=>{
