@@ -249,6 +249,10 @@ async function runLocalJob<T>(task: "cash_discount" | "turnover_discount", body:
 /** Version of the connector running on this PC; null if it is not reachable or is an older build. */
 export async function readLocalConnectorVersion(): Promise<string | null> {
   try {
+    await lookupMode?.();
+    // A staff PC's installation is not the worker serving a server company.
+    // Do not report its version (or probe its loopback port) as server evidence.
+    if (serverContext) return null;
     const response = await fetch(`${LOCAL_TALLY_BASE}/v1/identity`, { cache: "no-store", signal: AbortSignal.timeout(2_000) });
     if (!response.ok) return null;
     const payload = await response.json() as { version?: unknown };
