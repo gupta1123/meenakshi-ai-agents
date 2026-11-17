@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
 import { spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -66,4 +66,47 @@ test("hidden Windows runner uses bundled Node and returns the connector's exit c
   const [code]=await once(child,"exit");
   assert.equal(code,7);
   const {readFileSync}=await import("node:fs");assert.equal(readFileSync(output,"utf8"),"1");
+});
+
+test("PowerShell setup waits for the packaged GUI runtime and rejects failed mode changes",{skip:process.platform!=="win32",timeout:30000},async()=>{
+  const scratch=mkdtempSync(path.join(tmpdir(),"meenakshi server setup "));
+  const configPath=path.join(scratch,"config.json"),registered=path.join(scratch,"registered");
+  const harness=path.join(scratch,"setup harness.ps1");
+  const quote=value=>`'${value.replaceAll("'","''")}'`;
+  // Replace only Task Scheduler operations. The helper and packaged set-mode
+  // process are real; the live connector's task and configuration are untouched.
+  writeFileSync(harness,`
+param([switch]$Remove)
+$ErrorActionPreference = 'Stop'
+function Get-CimInstance { return @() }
+function Get-ScheduledTask { return $null }
+function New-ScheduledTaskAction { return 'action' }
+function New-ScheduledTaskTrigger { return 'trigger' }
+function New-ScheduledTaskPrincipal { return 'principal' }
+function New-ScheduledTaskSettingsSet { return 'settings' }
+function Register-ScheduledTask { [IO.File]::WriteAllText(${quote(registered)}, 'registered') }
+function Start-ScheduledTask {}
+& ${quote(path.join(root,"scripts/install-server-task.ps1"))} -NodePath ${quote(runtime)} -BridgePath ${quote(bridge)} -Remove:$Remove
+`);
+  const run=async(remove=false)=>{
+    const child=spawn("powershell.exe",["-NoProfile","-ExecutionPolicy","Bypass","-File",harness,...(remove?["-Remove"]:[])],{
+      windowsHide:true,env:{...process.env,MEENAKSHI_TALLY_BRIDGE_CONFIG_DIR:scratch},stdio:"pipe",
+    });
+    let output="";
+    child.stdout.on("data",chunk=>{output+=String(chunk);});
+    child.stderr.on("data",chunk=>{output+=String(chunk);});
+    const [code]=await once(child,"exit");
+    return {code,output};
+  };
+  const unpaired=await run();
+  assert.notEqual(unpaired.code,0,"a missing configuration must fail setup");
+  assert.equal(existsSync(registered),false,"failed mode changes must not register startup");
+  writeFileSync(configPath,JSON.stringify({mode:"pc",controlToken:"isolated-test-credential"}));
+  const paired=await run();
+  assert.equal(paired.code,0,paired.output);
+  assert.equal(JSON.parse(readFileSync(configPath,"utf8")).mode,"server");
+  assert.equal(existsSync(registered),true,"startup must be registered after a successful mode change");
+  const removed=await run(true);
+  assert.equal(removed.code,0,removed.output);
+  assert.deepEqual(JSON.parse(readFileSync(configPath,"utf8")),{mode:"pc",controlToken:"isolated-test-credential"});
 });

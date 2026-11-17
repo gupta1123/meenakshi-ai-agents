@@ -10,11 +10,12 @@ import { staffStatusLabel } from "@/lib/staff-status";
 import { userFacingDetail, userFacingError, userLabel } from "@/lib/user-copy";
 import { supabase } from "@/lib/supabase";
 import { describeCalculationFailure, finishCalculationEvent, startCalculationEvent, type CalculationStep } from "@/lib/calculation-events";
-import { readLocalConnectorVersion, runLocalCashDiscount, runLocalTurnoverDiscount, type LocalCdBootstrap, type LocalCdInvoiceCheck, type LocalCdRow, type LocalTodBootstrap } from "@/lib/local-tally";
+import { combineTodBootstraps, readLocalConnectorVersion, runLocalCashDiscount, runLocalTurnoverDiscount, type LocalCdBootstrap, type LocalCdInvoiceCheck, type LocalCdRow, type LocalTodBootstrap } from "@/lib/local-tally";
+import { useServerCheck } from "@/lib/use-server-check";
 
 import { AppShell, WorkspacePageHeader } from "./app-shell";
 import { useCompany } from "./company-context";
-import { useTallyMode } from "@/lib/tally-mode";
+import { useTallyMode, type TallyMode } from "@/lib/tally-mode";
 import { RulebookWorkspace } from "./rulebook-workspace";
 import { TallyReadiness, syncIsCurrent, workspaceCanCalculateLive } from "./tally-readiness";
 import { useWorkspaceSession, type WorkspaceData } from "./workspace-session";
@@ -97,9 +98,9 @@ function Workspace({ page, email, signOut, tallyHealth }: { page: CollectionsPag
   const { data, loading, error, refresh, setError } = useWorkspaceSession();
   const [notice, setNotice] = useState<string | null>(null);
   // Tells the shared check runner whether this company's Tally is a PC connector or a server.
-  useTallyMode(company.id, accessToken);
+  const tallyMode = useTallyMode(company.id, accessToken);
   const customerNames = useMemo(() => new Map(data.reference?.masters.customers.map((customer) => [customer.id, labelFor(customer)]) ?? []), [data.reference]);
-  const pageProps = { data, refresh, setNotice, setError, customerNames, isAdministrator };
+  const pageProps = { data, refresh, setNotice, setError, customerNames, isAdministrator, tallyMode };
   // Cash Discount owns its data loading; the shared session intentionally
   // returns empty data for it. A page-level error must not unmount it.
   const hasLoadedWorkspace = page === "cash-discount" || Boolean(data.overview || data.operations || data.launchControl || data.reference || data.proposals.length || data.creditNotes.length || data.debitNotes.length || data.messages.length);
@@ -182,7 +183,7 @@ function OpenIssueSummary({ issue }: { issue: ProposalDetail["openIssues"][numbe
   return <div className="safe-issue"><StatusBadge status={issue.status} /><div><strong>{copy.title}</strong><small>{copy.detail}</small></div></div>;
 }
 
-export type PageProps = { data: WorkspaceData; refresh: () => Promise<void>; setNotice: (value: string | null) => void; setError: (value: string |null) => void; customerNames: Map<string, string>; isAdministrator: boolean };
+export type PageProps = { data: WorkspaceData; refresh: () => Promise<void>; setNotice: (value: string | null) => void; setError: (value: string |null) => void; customerNames: Map<string, string>; isAdministrator: boolean; tallyMode: TallyMode };
 
 function OverviewPage({ data, isAdministrator, refresh }: PageProps) {
   const overview = data.overview;
@@ -236,7 +237,7 @@ function CashDiscountPage(props: PageProps & { scheme: "cd" | "tod" }) {
     {error ? <><WorkspacePageHeader title="Cash Discount" /><EmptyState title="Cash Discount rules unavailable" detail={error} action={<Button onClick={() => setRetry((value) => value + 1)}>Try again</Button>} /></> : <DiscountLoading />}
   </>;
   return state.rules.some((rule) => rule.cdDiscountBasis === "amount_per_tonne")
-    ? <CashDiscountSettlementsPage isAdministrator={props.isAdministrator} setNotice={props.setNotice} />
+    ? <CashDiscountSettlementsPage isAdministrator={props.isAdministrator} setNotice={props.setNotice} tallyMode={props.tallyMode} />
     : <CashDiscountRecoveryPage {...props} cdRules={state.rules} />;
 }
 
@@ -630,7 +631,7 @@ function CashDiscountRecoveryPage({ data, setNotice, setError, isAdministrator, 
   </>;
 }
 
-function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customerNames }: PageProps & { scheme: "cd" | "tod" }) {
+function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customerNames, tallyMode }: PageProps & { scheme: "cd" | "tod" }) {
   const { company, isAdministrator } = useCompany();
   const [evaluationOpen, setEvaluationOpen] = useState(false);
   const [showEvaluationQueue, setShowEvaluationQueue] = useState(false);
@@ -647,6 +648,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
   const [localTodBootstrap, setLocalTodBootstrap] = useState<LocalTodBootstrap | null>(null);
   const [localTodRows, setLocalTodRows] = useState<Proposal[]>([]);
   const [savingTod, setSavingTod] = useState(false);
+  const todCancelRun = useRef<AbortController | null>(null);
   const [calculationStartedAt, setCalculationStartedAt] = useState<string | null>(null);
   const [selectedTodPeriodKey, setSelectedTodPeriodKey] = useState<string | null>(null);
   const [selectedHistoryRun, setSelectedHistoryRun] = useState<EvaluationRun | null>(null);
@@ -748,6 +750,17 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     // not the rule's current period, which may not have been calculated yet.
     return bootstrap;
   }, [company.id]);
+  const serverCheck = useServerCheck(company.id, "tod", scheme === "tod" && tallyMode.mode === "server", accessToken, async (next) => {
+    if (next.run) setLatestRun(next.run as EvaluationRun);
+    if (next.job.status === "succeeded" && next.run?.status === "completed") {
+      const last = next.run.periods?.at(-1);
+      const start = last?.start ?? next.run.period_start, end = last?.end ?? next.run.period_end;
+      if (start && end) setSelectedTodPeriodKey(`${start}:${end}`);
+      await refresh();
+      await preloadLocalTodBootstrap(undefined, true);
+    } else setError(next.message ?? "The server check did not finish. Review Calculation history before trying again.");
+  });
+  const checkingTod = savingTod || Boolean(serverCheck.state) || serverCheck.looking;
   // On opening the page, show the period of the most recently saved
   // calculation so the user lands on their last result.
   const lastSavedPeriodApplied = useRef<string | null>(null);
@@ -767,11 +780,14 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     void preloadLocalTodBootstrap().catch(() => {});
   }, [company.id, preloadLocalTodBootstrap, scheme]);
 
-  const runLocalTodCalculation = async (asOfDate: string) => {
+  const runLocalTodCalculation = async (selectedDates: string | string[]) => {
+    const asOfDates = Array.isArray(selectedDates) ? [...new Set(selectedDates)].sort() : [selectedDates];
+    const asOfDate = asOfDates.at(-1)!;
     setError(null);
     setSelectedHistoryRun(null);
     setHistoryTodRows(null);
     setSavingTod(true);
+    todCancelRun.current = new AbortController();
     setCalculationStartedAt(new Date().toISOString());
     let eventId: string | null = null;
     let eventToken: string | null = null;
@@ -786,11 +802,16 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       // locks its period. Always refresh the lightweight bootstrap before
       // reading Tally so each group is calculated against the right period.
       const prepareStarted = performance.now();
-      const bootstrap = await preloadLocalTodBootstrap(asOfDate, true);
+      const prepared: LocalTodBootstrap[] = [];
+      for (const date of asOfDates) {
+        if (todCancelRun.current.signal.aborted) throw new Error("The check was cancelled.");
+        prepared.push(await preloadLocalTodBootstrap(date, true));
+      }
+      const bootstrap = combineTodBootstraps(prepared);
       timings.serverPrepareMs = Math.round(performance.now() - prepareStarted);
       step = "tally_read";
       const readStarted = performance.now();
-      const result = await runLocalTurnoverDiscount(bootstrap, undefined, { onStatus: setNotice, serverSave: { asOfDate }, onReconnecting: (state) => setNotice(state ? `Reconnecting to the Meenakshi connector… (try ${state.attempt}). The check keeps running on the PC; keep Tally and the connector open.` : null) });
+      const result = await runLocalTurnoverDiscount(bootstrap, undefined, { signal: todCancelRun.current.signal, onStatus: setNotice, serverSave: { asOfDate }, onReconnecting: (state) => setNotice(state ? `Reconnecting to Meenakshi… (try ${state.attempt}). The check keeps running on the Tally server.` : null) });
       timings.tallyAndCalculationMs = Math.round(performance.now() - readStarted);
       step = "save";
       const saveStarted = performance.now();
@@ -830,6 +851,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
           await finishCalculationEvent(token, company.id, eventId, { outcome: "succeeded", timings, connectorVersion: version });
           eventId = null;
           await refresh();
+          await preloadLocalTodBootstrap(undefined, true);
           setLocalTodRows([]);
           setShowEvaluationQueue(false);
           setNotice("Turnover Discount results are saved. Open any customer to view the calculation.");
@@ -858,10 +880,11 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       setShowEvaluationQueue(true);
       setEvaluationOpen(false);
       setNotice("The installed connector needs the latest update. The compatible calculation has started in the background.");
-    } finally { setSavingTod(false); }
+    } finally { setSavingTod(false); todCancelRun.current = null; }
   };
   const runAllDueTodCalculations = async (asOfDates: string[]) => {
-    for (const asOfDate of asOfDates) await runLocalTodCalculation(asOfDate);
+    if (tallyMode.mode === "server") await runLocalTodCalculation(asOfDates);
+    else for (const date of asOfDates) await runLocalTodCalculation(date);
   };
   const statuses = Array.from(new Set(allRows.map((proposal) => proposal.status)));
   const tonnes = (proposal: Proposal) => Number(proposal.eligible_tonnes ?? "0") || 0;
@@ -874,7 +897,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
   const lastChecked = allRows.map((proposal) => proposal.latest_evaluated_at).filter(Boolean).sort().at(-1) ?? null;
   const turnoverPeriods = (localTodBootstrap?.periods ?? []).map((period) => ({
     ...period,
-    calculated: allSavedRows.some((proposal) => proposal.scheme_version_id === localTodBootstrap?.activeSchemeVersionId && proposal.period_start === period.start && proposal.period_end === period.end),
+    calculated: period.calculated ?? false,
   }));
   const todTierById = new Map<string, { minimumTonnes: number; amountPerTonne: number | null; percentage: number | null; index: number; count: number }>();
   const todScaleByRule = new Map<string, TodSlabScale>();
@@ -953,7 +976,9 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     return "View details";
   };
   return <><WorkspacePageHeader eyebrow="" title={title} detail="" />
-    {scheme === "tod" ? <div className="tod-overview" aria-label="Turnover Discount summary"><div className="tod-overview-meta"><div className="tod-period-context"><StatusBadge status={savingTod ? "saving" : selectedHistoryRun ? "historical" : "ready"} /><strong>{periodLabel}</strong><span className={periodEnded ? "is-ready" : ""}><CircleAlert size={13} />{savingTod ? "Checking fresh Tally data…" : selectedHistoryRun ? "Historical calculation snapshot" : periodKeys.size > 1 ? "Includes completed and active periods" : periodEnded ? "Period ended" : periodRow?.period_end ? `Projected until ${formatBusinessDate(periodRow.period_end)}` : "No period calculated yet"}</span></div><div className="tod-overview-actions"><span>{savingTod && calculationStartedAt ? `Started ${formatDate(calculationStartedAt)}` : lastChecked ? `Calculated ${formatDate(lastChecked)}` : "Not calculated yet"}</span><Button className="button-secondary" disabled={savingTod} onClick={() => { setSelectedHistoryRun(null); setHistoryTodRows(null); setNotice(null); setEvaluationOpen(true); }}><RefreshCw size={15} />{savingTod ? "Checking Tally…" : "Calculate period"}</Button><div className="segmented tod-inline-tabs" aria-label={`${title} views`}><button className={!showEvaluationQueue ? "selected" : ""} onClick={() => { setSelectedHistoryRun(null); setHistoryTodRows(null); setNotice(null); setShowEvaluationQueue(false); }}>Customers</button><button className={showEvaluationQueue ? "selected" : ""} onClick={() => setShowEvaluationQueue(true)}>Run history</button></div></div></div>{!showEvaluationQueue && allRows.length > 0 && <div className="cd-action-cards tod-action-cards" role="tablist" aria-label="Turnover Discount customers">{todBuckets.map((bucket) => {
+    {serverCheck.error && <InlineMessage tone="error">{serverCheck.error}</InlineMessage>}
+    {serverCheck.state?.message && <InlineMessage tone="info">{serverCheck.state.message}</InlineMessage>}
+    {scheme === "tod" ? <div className="tod-overview" aria-label="Turnover Discount summary"><div className="tod-overview-meta"><div className="tod-period-context"><StatusBadge status={checkingTod ? "saving" : selectedHistoryRun ? "historical" : "ready"} /><strong>{periodLabel}</strong><span className={periodEnded ? "is-ready" : ""}><CircleAlert size={13} />{checkingTod ? "Checking fresh Tally data…" : selectedHistoryRun ? "Historical calculation snapshot" : periodKeys.size > 1 ? "Includes completed and active periods" : periodEnded ? "Period ended" : periodRow?.period_end ? `Projected until ${formatBusinessDate(periodRow.period_end)}` : "No period calculated yet"}</span></div><div className="tod-overview-actions"><span>{checkingTod && calculationStartedAt ? `Started ${formatDate(calculationStartedAt)}` : lastChecked ? `Calculated ${formatDate(lastChecked)}` : "Not calculated yet"}</span><Button className="button-secondary" disabled={checkingTod} onClick={() => { setSelectedHistoryRun(null); setHistoryTodRows(null); setNotice(null); setEvaluationOpen(true); }}><RefreshCw size={15} />{checkingTod ? "Checking Tally…" : "Calculate period"}</Button>{(serverCheck.state ? serverCheck.state.phase === "reading" : savingTod) && <Button type="button" className="button-secondary" disabled={serverCheck.stopping || serverCheck.state?.job.cancel_requested} onClick={() => { if (serverCheck.state) void serverCheck.stop(); else todCancelRun.current?.abort(); }}>{serverCheck.stopping || serverCheck.state?.job.cancel_requested ? "Stopping…" : "Stop checking"}</Button>}<div className="segmented tod-inline-tabs" aria-label={`${title} views`}><button className={!showEvaluationQueue ? "selected" : ""} onClick={() => { setSelectedHistoryRun(null); setHistoryTodRows(null); setNotice(null); setShowEvaluationQueue(false); }}>Customers</button><button className={showEvaluationQueue ? "selected" : ""} onClick={() => setShowEvaluationQueue(true)}>Run history</button></div></div></div>{!showEvaluationQueue && allRows.length > 0 && <div className="cd-action-cards tod-action-cards" role="tablist" aria-label="Turnover Discount customers">{todBuckets.map((bucket) => {
       const count = todCount(bucket);
       const card = {
         ready: { label: "Ready to create", value: formatMoney(todAmount("ready")), detail: `${count} customer${count === 1 ? "" : "s"}` },
