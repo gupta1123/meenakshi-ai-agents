@@ -1,5 +1,5 @@
 #define AppName "Meenakshi Tally Connector"
-#define AppVersion "0.6.1"
+#define AppVersion "0.6.2"
 #define AppPublisher "Meenakshi"
 #define AppInstallDir "C:\Meenakshi\tally-bridge"
 #define AppExeName "Meenakshi Tally Connector.exe"
@@ -62,7 +62,13 @@ Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Tasks: not se
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
+  Stopped: Boolean;
 begin
+  Stopped := Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -NonInteractive -Command "$ErrorActionPreference=''Stop''; $task=Get-ScheduledTask -TaskName ''Meenakshi Tally Connector (server)'' -ErrorAction SilentlyContinue; if($task){Stop-ScheduledTask -InputObject $task; $deadline=(Get-Date).AddSeconds(15); while((Get-ScheduledTask -TaskName $task.TaskName).State -eq ''Running''){if((Get-Date) -gt $deadline){exit 1}; Start-Sleep -Milliseconds 100}}"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  if (not Stopped) or (ResultCode <> 0) then begin
+    Result := 'The background connector could not be stopped. Close its Windows server task, then retry setup.';
+    Exit;
+  end;
   Exec(ExpandConstant('{cmd}'), '/C taskkill /F /IM "Meenakshi Tally Connector.exe" >nul 2>&1', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Result := '';
 end;

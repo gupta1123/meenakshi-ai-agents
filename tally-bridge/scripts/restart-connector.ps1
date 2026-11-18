@@ -1,5 +1,11 @@
 param([int]$UiPid=0,[int]$WorkerPid=0,[switch]$CloseUi,[string]$InstallerPath="",[string]$InstallerSha256="")
 $ErrorActionPreference="Stop"
+$restartLogDirectory=Join-Path $env:LOCALAPPDATA 'Meenakshi\logs'
+New-Item -ItemType Directory -Path $restartLogDirectory -Force | Out-Null
+$restartLog=Join-Path $restartLogDirectory ('connector-'+(Get-Date -Format 'yyyy-MM-dd')+'.log')
+function Write-RestartLog([string]$Message) { Add-Content -LiteralPath $restartLog -Value ((Get-Date).ToUniversalTime().ToString('o')+' INFO connector restart '+$Message) }
+trap { Write-RestartLog ('failed: '+$_.Exception.Message); exit 1 }
+Write-RestartLog ('started ui='+$UiPid+' worker='+$WorkerPid)
 $installRoot=[IO.Path]::GetFullPath($PSScriptRoot)
 $exe=Join-Path $installRoot 'Meenakshi Tally Connector.exe'
 $reopenUi=$UiPid -gt 0 -and -not $CloseUi
@@ -10,7 +16,14 @@ if ($UiPid -gt 0) {
 }
 $taskName='Meenakshi Tally Connector (server)'
 $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-if ($task) { Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue }
+if ($task) {
+ Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+ $stoppingDeadline=(Get-Date).AddSeconds(15)
+ while ((Get-ScheduledTask -TaskName $taskName).State -eq 'Running') {
+  if ((Get-Date) -gt $stoppingDeadline) { throw 'The previous server task did not stop.' }
+  Start-Sleep -Milliseconds 100
+ }
+}
 if ($WorkerPid -gt 0) {
  $worker=Get-CimInstance Win32_Process -Filter "ProcessId=$WorkerPid" -ErrorAction SilentlyContinue
  if ($worker -and $worker.ExecutablePath -eq $exe) { Stop-Process -Id $WorkerPid -Force -ErrorAction SilentlyContinue }
@@ -25,3 +38,4 @@ if ($InstallerPath.Trim()) {
 }
 if ($task) { Start-ScheduledTask -TaskName $taskName }
 if ($reopenUi) { Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue; Start-Process -FilePath $exe }
+Write-RestartLog ('completed task='+[bool]$task+' ui='+$reopenUi)

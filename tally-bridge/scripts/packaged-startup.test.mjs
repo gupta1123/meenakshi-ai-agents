@@ -60,14 +60,20 @@ test("packaged server starts headlessly, polls jobs and restarts after a hard st
   }
 });
 
-test("hidden Windows runner uses bundled Node and returns the connector's exit code",{skip:process.platform!=="win32",timeout:10000},async()=>{
+test("hidden Windows runner uses bundled Node and restarts a failed child with backoff",{skip:process.platform!=="win32",timeout:15000},async()=>{
   const scratch=mkdtempSync(path.join(tmpdir(),"meenakshi-runner-"));
   const output=path.join(scratch,"env.txt"),script=path.join(scratch,"probe.mjs");
-  writeFileSync(script,`import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(output)},process.env.ELECTRON_RUN_AS_NODE??'missing');process.exit(7);`);
-  const child=spawn("cscript.exe",["//Nologo",path.join(root,"scripts/start-server-connector.vbs"),runtime,script],{windowsHide:true,stdio:"pipe"});
+  writeFileSync(script,`import fs from 'node:fs';const file=${JSON.stringify(output)};const previous=fs.existsSync(file)?fs.readFileSync(file,'utf8'):'';fs.appendFileSync(file,process.env.ELECTRON_RUN_AS_NODE??'missing');process.exit(previous?0:7);`);
+  const started=Date.now();
+  const args=["//Nologo",path.join(root,"scripts/start-server-connector.vbs"),runtime,script];
+  const child=spawn("cscript.exe",args,{windowsHide:true,stdio:"pipe",signal:AbortSignal.timeout(14000)});
   const [code]=await once(child,"exit");
-  assert.equal(code,7);
-  const {readFileSync}=await import("node:fs");assert.equal(readFileSync(output,"utf8"),"1");
+  assert.equal(code,0);
+  const {readFileSync}=await import("node:fs");assert.equal(readFileSync(output,"utf8"),"11","the supervisor must restart the failed bundled-Node child");
+  assert.ok(Date.now()-started>=4500,"crash retries must back off rather than spin");
+  writeFileSync(script,'process.exit(2);');
+  const fatal=spawn("cscript.exe",args,{windowsHide:true,stdio:"pipe",signal:AbortSignal.timeout(2500)});
+  const [fatalCode]=await once(fatal,"exit");assert.equal(fatalCode,2,"configuration errors must stop the supervisor");
 });
 
 test("PowerShell setup waits for the packaged GUI runtime and rejects failed mode changes",{skip:process.platform!=="win32",timeout:30000},async()=>{

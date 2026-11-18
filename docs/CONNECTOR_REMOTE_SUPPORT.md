@@ -1,12 +1,12 @@
-# Connector remote support (0.6.0)
+# Connector remote support (0.6.2)
 
 ## Deployment and first installation
 
-Apply `supabase/migrations/20261118115948_connector_remote_support.sql` in the live SQL Editor before merging the application release. It adds private support jobs, runtime observations and the scoped CD snapshot RPC. Deploy the backend and website, then share `MeenakshiTallyConnectorSetup-0.6.0.exe` manually this time.
+Apply `supabase/migrations/20261118115948_connector_remote_support.sql` in the live SQL Editor before merging the application release. It adds private support jobs, runtime observations and the scoped CD snapshot RPC. Deploy the backend and website, then share `MeenakshiTallyConnectorSetup-0.6.2.exe` manually this time. No additional migration is required for 0.6.1 or 0.6.2.
 
 Leave **Set up as the shared Tally server** selected in the installer. Pair the company if the computer is not already paired. Setup configures local server mode and the Windows login task; the authenticated background worker completes the website routing handover. Check the connector window and the website for server mode, enabled startup and the expected Tally company. Pairing/settings live outside the installation directory and survive replacement.
 
-The scheduled worker runs as the Windows user who paired the connector. It starts at that user's Windows login, and Tally must be open with the correct company. Closing the website or connector status window does not stop the server worker. A server reboot still needs that Windows session and Tally company available.
+The scheduled worker runs as the Windows user who paired the connector. It starts at that user's Windows login, and Tally must be open with the correct company. A hidden parent restarts failed workers with backoff from five seconds to one minute; a successful or configuration-error exit stops it. Windows task failure recovery remains enabled as a second layer. Setup and update stop the parent task before replacing or restarting the worker. Closing the website or connector status window does not stop the server worker. A server reboot still needs that Windows session and Tally company available.
 
 ## Support operations
 
@@ -32,7 +32,7 @@ Routine updates reuse the installed Electron runtime and unchanged application f
 
 The release scripts inspect the actual bundled Electron binary and sign its runtime major/version (currently 31.7.7), rather than inferring it from the development dependency. Installer packaging rejects a runtime/manifest mismatch. A future runtime change needs a separately published full installer URL, size and SHA-256 in the signed manifest. That fallback downloads in the same window and runs silently during restart. Application rollback preserves a previous application release; it does not restore an older Electron runtime after a full runtime installer replacement. Test and separately plan recovery for runtime upgrades.
 
-Updates may terminate current work, as agreed. Check/support jobs are marked stopped/interrupted. In-flight ordinary commands are retired and dependent sync/evaluation runs are stopped. Uncertain financial postings require checking Tally before a retry; the updater never blindly replays them. Remote updates also restart an open connector status window.
+Updates may terminate current work, as agreed. Check/support jobs are marked stopped/interrupted. In-flight ordinary commands are retired and dependent sync/evaluation runs are stopped. Uncertain financial postings require checking Tally before a retry; the updater never blindly replays them. Remote updates also restart an open connector status window. Restart helper start/completion/errors are recorded in the private daily connector log. The UI acknowledges helper launch before exiting, and the verified-download state reveals the Restart button even when it includes byte totals.
 
 ## Publishing a routine application update
 
@@ -48,4 +48,4 @@ The backend recomputes support results from captured evidence and captured rules
 
 ## Client acceptance after manual installation
 
-Confirm the expected device/company, actual server mode, enabled startup and 0.6.0 heartbeat. Close the browser and status window and verify the scheduled worker remains connected. Start a small opening-ledger diagnostic, then a seven-day voucher read; inspect the JSON evidence and cancellation/history. Run a diagnostic CD/TOD calculation before saving. For BKC, read the opening bill breakdown, replay the full customer credit history and investigate invoice 12115 and Credit Note 237 separately. Their business explanations remain unconfirmed until that source evidence is checked; matching an amount alone never establishes a manual TOD note's purpose/period.
+Confirm the expected device/company, actual server mode, enabled startup and 0.6.2 heartbeat. Close the browser and status window and verify the scheduled worker remains connected. Start a small opening-ledger diagnostic, then a seven-day voucher read; inspect the JSON evidence and cancellation/history. Run a diagnostic CD/TOD calculation before saving. For BKC, read the opening bill breakdown, replay the full customer credit history and investigate invoice 12115 and Credit Note 237 separately. Their business explanations remain unconfirmed until that source evidence is checked; matching an amount alone never establishes a manual TOD note's purpose/period.
