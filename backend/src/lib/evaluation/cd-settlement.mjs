@@ -129,9 +129,11 @@ export function evaluateCashDiscountSettlements(rule, evaluatedOn, invoices, cus
 
     // Missed on payments alone and the window has closed: use free on-account credit.
     let creditUsed = decimal(0);
+    let creditAvailable = decimal(0);
     const pool = pools.get(invoice.customerId);
     if (category === "not_eligible" && pool) {
       const free = freeCredit(pool, deadline);
+      creditAvailable = free;
       const neededForDiscount = discountedTarget.minus(paidByPayments);
       if (free.gt(0) && neededForDiscount.gt(0) && free.gte(neededForDiscount.minus(TOLERANCE))) {
         creditUsed = Decimal.min(free, neededForDiscount);
@@ -187,6 +189,7 @@ export function evaluateCashDiscountSettlements(rule, evaluatedOn, invoices, cus
       discountedTarget: money(discountedTarget),
       paidByDeadline: money(paidByDeadline),
       onAccountCreditUsed: money(creditUsed),
+      onAccountCreditAvailable: money(creditAvailable),
       paidToDate: money(paidToDate),
       alreadyCredited: money(alreadyCredited),
       creditAmount: money(creditAmount),

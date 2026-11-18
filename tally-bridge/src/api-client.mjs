@@ -1,3 +1,4 @@
+import {readRuntimeStatus} from "./runtime-status.mjs";
 const DEFAULT_API_TIMEOUT_MS = 20_000;
 
 export class BridgeApiError extends Error {
@@ -54,6 +55,7 @@ export function sendHeartbeat(config, bridgeVersion, tallySnapshot) {
   return request(config, "/api/bridge/heartbeat", {
     method: "POST",
     body: {
+      runtime: readRuntimeStatus(),
       connectorId: config.connectorId,
       machineFingerprint: config.machineFingerprint,
       bridgeVersion,

@@ -10,6 +10,7 @@ import { userFacingDetail, userFacingError } from "@/lib/user-copy";
 
 import { useCompany } from "./company-context";
 import { useTallyCompanySelection } from "./tally-company-selection";
+import {ConnectorSupportPanel} from "./connector-support";
 import { TallyModeSetting } from "./tally-mode-setting";
 import { WorkspacePageHeader } from "./app-shell";
 import type { TallyHealth } from "./types";
@@ -662,6 +663,7 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
             </div>}
 
             {health?.connector?.id && <TallyModeSetting companyId={company.id} getToken={token} />}
+            {isAdministrator && health?.connector?.id && <ConnectorSupportPanel companyId={company.id} getToken={token}/>}
 
             <div className={s.advancedActions}>
               <Button type="button" className="button-secondary" disabled={addingComputer} onClick={() => void addComputer()}><ServerCog size={15} />{addingComputer ? "Opening connector…" : "Add another computer"}</Button>

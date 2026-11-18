@@ -109,7 +109,7 @@ export async function GET(request: Request, context: RouteContext) {
         const summary = run.summary && typeof run.summary === "object" ? run.summary as Record<string, unknown> : {};
         const liveSummary = compact
           ? Object.fromEntries(["liveOnly", "invoicesChecked", "actionRequired", "reviewRequired", "recoveryAmount", "alreadyRecovered"].filter((key) => key in summary).map((key) => [key, summary[key]]))
-          : summary;
+          : Object.fromEntries(Object.entries(summary).filter(([key])=>key!=="excludedInvoices"));
         return {
           ...run,
           summary: {

@@ -11,6 +11,7 @@ import { loadLiveCdBatchRule, loadLiveCdLocalBootstrap, type EvaluationRunRecord
 import type { FrozenCdRule } from "./contracts";
 import { evaluateCashDiscountSettlements } from "./cd-settlement.mjs";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { mergeCdSnapshotRows } from "@/lib/connector-support-evidence";
 import { CD_CREDIT_NOTE_MATCHING_VERSION, CD_RECHECK_MESSAGE, keepCdSettlementRow } from "./cd-credit-note-safety";
 
 type LiveCdPayment = {
@@ -61,6 +62,8 @@ export type LiveCdBatch = {
   vouchersScanned: number;
   invoices: LiveCdInvoice[];
   // On-account credit (+) / debit (−) per customer, from connector 0.4.3 on.
+  customerScope?: string[] | null;
+  connectorVersion?: string;
   customerCredits?: Array<{ customerId: string; date: string; amount: string; source?: string }>;
   sourceFingerprint: string;
   creditNoteMatchingVersion?: number;
@@ -362,10 +365,22 @@ export async function completeCdSettlementRun(run: EvaluationRunRecord, batch: L
     candidates: Array<Record<string, unknown> & { customerId: string; invoiceGuid: string; category: string }>;
     totals: Record<string, unknown>;
   };
-  // Not-eligible invoices (paid late or under 90%) need no action and were
-  // ~96% of a large period (14 MB per check). Keep full rows only for the
-  // rest and store the not-eligible ones as a count.
-  const actionable = result.results.filter(keepCdSettlementRow);
+  // Excluded invoices retain compact explanations; actionable rows keep full detail.
+  const currentRows=result.results.map(row=>({...row,checkedAt:new Date().toISOString(),sourceRunId:run.id,sourceFingerprint:batch.sourceFingerprint,calculationVersion:2}));
+  let allRows:Array<Record<string,unknown>>=currentRows;
+  const customerScope=batch.customerScope?.length?batch.customerScope:null;
+  if(customerScope){
+    const {data:previous,error}=await supabase.from("evaluation_runs").select("summary").eq("company_id",run.company_id)
+      .eq("status","completed").eq("scheme_version_id",rule.id).eq("summary->>evidenceSchemaVersion","2")
+      .order("completed_at",{ascending:false}).limit(1);
+    if(error)throw error;
+    if(!previous?.length)throw new Error("A full connector 0.6.0 CD check is required before saving a partial refresh.");
+    const prior=previous[0].summary as Record<string,unknown>;
+    const approved=new Set((bootstrap.voucherScope as {customers:Array<{customerId:string}>}).customers.map(c=>c.customerId));
+    if(customerScope.some(id=>!approved.has(id)))throw new Error("Partial CD scope contains a customer outside this rule.");
+    allRows=mergeCdSnapshotRows(prior,currentRows,customerScope);
+  }
+  const actionable = allRows.filter(keepCdSettlementRow);
   // Tag each row with the customer's Tally group (the salesperson), which the
   // Cash Discount page filters by.
   const customerIds = [...new Set(actionable.map((row) => String(row.customerId ?? "")).filter(Boolean))];
@@ -384,13 +399,24 @@ export async function completeCdSettlementRun(run: EvaluationRunRecord, batch: L
   for (const row of actionable) row.customerGroup = groupByCustomer.get(String(row.customerId ?? "")) ?? null;
   const summary = {
     schemeType: "cd", cdDiscountBasis: "amount_per_tonne", outcome: "completed", liveOnly: true, ...result.totals,
+    ...(customerScope ? {
+      fullPayment:allRows.filter(r=>r.category==="full_payment").length,
+      discountedPayment:allRows.filter(r=>r.category==="discounted_payment").length,
+      overNinetyPercent:allRows.filter(r=>r.category==="over_ninety_percent").length,
+      awaitingPayment:allRows.filter(r=>r.category==="awaiting_payment").length,
+      notEligible:allRows.filter(r=>r.category==="not_eligible").length,
+      needsReview:allRows.filter(r=>r.category==="needs_review").length,
+      credited:allRows.filter(r=>r.status==="credited").length,
+      readyCreditAmount:money(allRows.filter(r=>r.status==="ready"&&!r.gstDeadlinePassed).reduce((n,r)=>n.plus(decimal(r.creditAmount as string)),decimal(0))),
+      reviewCreditAmount:money(allRows.filter(r=>r.status==="review"&&!r.gstDeadlinePassed).reduce((n,r)=>n.plus(decimal(r.creditAmount as string)),decimal(0))),
+    }:{}),
+    evidenceSchemaVersion:2,calculationVersion:2,connectorVersion:batch.connectorVersion??null,
     creditNoteMatchingVersion: batch.creditNoteMatchingVersion,
-    invoicesChecked: result.results.length,
-    notEligibleCount: result.results.length - actionable.length,
-    // Not-eligible invoices are not stored one by one (size); the dashboard
-    // needs them per quarter and group, so keep a compact tally:
+    invoicesChecked: allRows.length,
+    notEligibleCount: allRows.length - actionable.length,
+    // The dashboard also uses a compact tally per quarter and group:
     // "YYYY-MM|customer ledger GUID" -> [invoices, MT].
-    notEligibleByMonth: result.results.filter((row) => !keepCdSettlementRow(row)).reduce<Record<string, [number, number]>>((tally, row) => {
+    notEligibleByMonth: allRows.filter((row) => !keepCdSettlementRow(row)).reduce<Record<string, [number, number]>>((tally, row) => {
       const key = `${String(row.invoiceDate ?? "").slice(0, 7)}|${String(row.customerId ?? "")}`;
       const entry: [number, number] = tally[key] ?? [0, 0];
       entry[0] += 1;
@@ -400,8 +426,11 @@ export async function completeCdSettlementRun(run: EvaluationRunRecord, batch: L
     }, {}),
     invoicePeriod: { from: batch.dateFrom, to: (bootstrap.voucherScope as { invoiceDateTo?: string }).invoiceDateTo ?? batch.dateTo },
     settlementResults: actionable,
+    excludedInvoices:allRows.filter(row=>!keepCdSettlementRow(row)).map(row=>Object.fromEntries(
+      ["customerId","customerName","invoiceGuid","invoiceNumber","invoiceDate","invoiceAmount","invoiceAmountDue","adjustmentByDeadline","eligibleTonnes","discountedTarget","discountAmount","paidByDeadline","onAccountCreditUsed","onAccountCreditAvailable","windowDeadline","status","category","reviewMessage","alreadyCredited","creditNoteReferences","payments","checkedAt","sourceRunId","sourceFingerprint","calculationVersion"].map(key=>[key,row[key]]))),
   };
-  const { error: snapshotError } = await supabase.rpc("replace_meenakshi_cd_settlement_snapshot", {
+  const { error: snapshotError } = await supabase.rpc(customerScope?"replace_meenakshi_cd_settlement_snapshot_scoped":"replace_meenakshi_cd_settlement_snapshot", {
+    ...(customerScope?{p_customer_tally_guids:customerScope}:{}),
     p_company_id: run.company_id,
     p_evaluation_run_id: run.id,
     p_rule_version_id: rule.id,

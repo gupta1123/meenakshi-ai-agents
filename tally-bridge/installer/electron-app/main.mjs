@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, execFile } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const PRODUCT_NAME = "Meenakshi Tally Connector";
@@ -16,7 +16,13 @@ const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const installedBridgePath = path.join(currentDirectory, "src", "bridge.mjs");
 const sourceBridgePath = path.resolve(currentDirectory, "..", "..", "src", "bridge.mjs");
 const bridgePath = fs.existsSync(installedBridgePath) ? installedBridgePath : sourceBridgePath;
-const installDirectory = path.resolve(currentDirectory, "..", "..");
+const installDirectory = process.env.MEENAKSHI_CONNECTOR_HOME || path.resolve(currentDirectory, "..", "..");
+const bootstrapDirectory=process.env.MEENAKSHI_BOOTSTRAP_DIRECTORY||currentDirectory;
+const commandBridgePath=fs.existsSync(path.join(bootstrapDirectory,"worker.mjs"))?path.join(bootstrapDirectory,"worker.mjs"):bridgePath;
+const {BRIDGE_VERSION:applicationVersion}=await import(pathToFileURL(path.join(path.dirname(bridgePath),"version.mjs")).href);
+let pendingServerSetup=process.argv.includes("--setup-server")||fs.existsSync(path.join(installDirectory,"server-setup-requested"));
+if(pendingServerSetup)try{fs.writeFileSync(path.join(installDirectory,"server-setup-requested"),"server");}catch{}
+let applicationUpdater=null,updateStatus={state:"idle"};
 const connectorLogDirectory = path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local"), "Meenakshi", "logs");
 const logPath = path.join(installDirectory, "bridge.log");
 const errorLogPath = path.join(installDirectory, "bridge.err.log");
@@ -206,6 +212,10 @@ function updateConnectionStatus(snapshot) {
 
 async function startOrMonitorBridge() {
   try {
+    if(pendingServerSetup){
+      try{await connectorConfig();}catch{sendStatus({title:"Connect this Tally server",detail:"Pair this computer from Meenakshi. Background server setup will finish automatically.",state:"disconnected"});return;}
+      await setupServer();return;
+    }
     const monitor = await import(pathToFileURL(path.join(path.dirname(bridgePath), "desktop-monitor.mjs")).href);
     const initial = await monitor.readDesktopRuntime();
     if (quitting) return;
@@ -243,7 +253,7 @@ function startBridge() {
   if (quitting) return;
   stopBridge();
   const generation = bridgeGeneration;
-  const child = spawn(process.execPath, [bridgePath, "start"], {
+  const child = spawn(process.execPath, [commandBridgePath, "start"], {
     env: bridgeEnvironment(),
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
@@ -316,7 +326,7 @@ function startBridge() {
 
 function runBridgeCommand(command, args = []) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [bridgePath, command, ...args.flatMap(([key, value]) => [`--${key}`, value])], {
+    const child = spawn(process.execPath, [commandBridgePath, command, ...args.flatMap(([key, value]) => [`--${key}`, value])], {
       env: bridgeEnvironment(),
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
@@ -341,7 +351,7 @@ async function handleConnectUrl(value) {
     sendStatus({ title: "Checking Tally Prime", detail: "Connecting this computer to Meenakshi.", state: "running" });
     stopBridge();
     await runBridgeCommand("connect", Object.entries(args));
-    startBridge();
+    await startOrMonitorBridge();
   } catch (error) {
     const message = formatError(error);
     appendLog(errorLogPath, message);
@@ -375,9 +385,50 @@ ipcMain.handle("logs:send", async (_event, days) => {
   }
 });
 ipcMain.handle("logs:open", () => { fs.mkdirSync(connectorLogDirectory, { recursive: true }); return shell.openPath(connectorLogDirectory); });
-ipcMain.handle("app:version", () => app.getVersion());
+ipcMain.handle("app:version", () => applicationVersion);
+function checkSender(event){if(event.sender!==mainWindow?.webContents)throw new Error("Invalid connector window.");}
+async function updater(){
+ if(applicationUpdater)return applicationUpdater;
+ const {ApplicationUpdater}=await import(pathToFileURL(path.join(path.dirname(bridgePath),"support","updater.mjs")).href);
+ applicationUpdater=new ApplicationUpdater({baseDirectory:bootstrapDirectory,version:applicationVersion,
+  publicKey:fs.readFileSync(path.join(bootstrapDirectory,"release-public-key.pem"),"utf8"),
+  onProgress:state=>{updateStatus=state;mainWindow?.webContents.send("update-status",state);}});
+ return applicationUpdater;
+}
+async function connectorConfig(){const module=await import(pathToFileURL(path.join(path.dirname(bridgePath),"config.mjs")).href);try{return module.loadConfig();}catch{throw new Error("Connect this computer from Meenakshi before using updates or server setup.");}}
+async function setupServer(){
+ await connectorConfig();
+ pendingServerSetup=true;sendStatus({title:"Setting up the Tally server",detail:"Configuring background startup and the shared connection.",state:"running"});
+ const child=bridgeProcess;stopBridge();
+ if(child?.exitCode===null)await Promise.race([new Promise(r=>child.once("exit",r)),new Promise(r=>setTimeout(r,4000))]);
+ if(monitorTimer)clearInterval(monitorTimer);monitorTimer=null;monitorOnly=false;ownsBridgeConnection=false;
+ await new Promise((resolve,reject)=>execFile("powershell.exe",["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",path.join(installDirectory,"install-server-task.ps1")],
+  {windowsHide:true,timeout:45000},(error,stdout,stderr)=>error?reject(new Error(stderr||error.message)):resolve(stdout)));
+ pendingServerSetup=false;try{fs.rmSync(path.join(installDirectory,"server-setup-requested"),{force:true});}catch{}
+ await startOrMonitorBridge();
+ return {ok:true};
+}
+ipcMain.handle("server:setup",async event=>{checkSender(event);try{return await setupServer();}catch(error){sendStatus({title:"Server setup needs attention",detail:formatError(error),state:"error"});return{ok:false,message:formatError(error)};}});
+ipcMain.handle("update:check",async event=>{checkSender(event);if(applicationUpdater?.busy||applicationUpdater?.ready)return updateStatus;try{return await(await updater()).check(await connectorConfig());}catch(error){updateStatus={state:"error",message:formatError(error)};mainWindow.webContents.send("update-status",updateStatus);return updateStatus;}});
+ipcMain.handle("update:download",async event=>{checkSender(event);try{return await(await updater()).stage(await connectorConfig());}catch(error){return{state:"error",message:formatError(error)};}});
+ipcMain.handle("update:restart",async event=>{
+ checkSender(event);
+ if(!applicationUpdater?.ready)return{ok:false,message:"Download the update first."};
+ const config=await connectorConfig();
+ const {supportRequest}=await import(pathToFileURL(path.join(path.dirname(bridgePath),"support","client.mjs")).href);
+ await supportRequest(config,"/control",{action:"interrupt"});
+ const monitor=await import(pathToFileURL(path.join(path.dirname(bridgePath),"desktop-monitor.mjs")).href);
+ const runtime=await monitor.readDesktopRuntime();
+ const ready=await applicationUpdater.activate();
+ const args=["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",path.join(installDirectory,"restart-connector.ps1"),"-UiPid",String(process.pid),"-WorkerPid",String(runtime.runtime?.pid||bridgeProcess?.pid||0)];
+ if(ready.installer)args.push("-InstallerPath",ready.installer,"-InstallerSha256",ready.installerSha256);
+ const helper=spawn("powershell.exe",args,{detached:true,windowsHide:true,stdio:"ignore"});helper.unref();
+ quitting=true;disconnectFinished=true;stopBridge();app.exit(0);return{ok:true};
+});
 
 function createWindow() {
+  const runtimeDirectory=process.env.MEENAKSHI_TALLY_BRIDGE_CONFIG_DIR||path.join(process.env.APPDATA||os.homedir(),"Meenakshi","TallyBridge");
+  fs.mkdirSync(runtimeDirectory,{recursive:true});fs.writeFileSync(path.join(runtimeDirectory,"gui-runtime.json"),JSON.stringify({pid:process.pid,version:applicationVersion}));
   mainWindow = new BrowserWindow({
     title: PRODUCT_NAME,
     width: 470,
@@ -396,7 +447,14 @@ function createWindow() {
   });
   mainWindow.removeMenu();
   mainWindow.loadFile(path.join(currentDirectory, "index.html"));
-  mainWindow.webContents.once("did-finish-load", () => sendStatus());
+  mainWindow.webContents.setWindowOpenHandler(()=>({action:"deny"}));
+  mainWindow.webContents.on("will-navigate",event=>event.preventDefault());
+  mainWindow.webContents.once("did-finish-load", async () => {
+    sendStatus();
+    if(process.env.MEENAKSHI_BOOTSTRAP_DIRECTORY){
+      const loader=await import(pathToFileURL(path.join(bootstrapDirectory,"release-loader.mjs")).href);loader.markReleaseReady("ui");
+    }
+  });
 }
 
 app.setName(PRODUCT_NAME);
@@ -432,6 +490,7 @@ if (!gotLock) {
   app.on("second-instance", (_event, argv) => {
     const protocolArg = argv.find((entry) => entry.startsWith(`${PROTOCOL_NAME}://`));
     if (protocolArg) handleProtocolUrl(protocolArg);
+    else if(argv.includes("--setup-server")){pendingServerSetup=true;void startOrMonitorBridge();}
     showWindow();
   });
   app.on("open-url", (event, url) => {

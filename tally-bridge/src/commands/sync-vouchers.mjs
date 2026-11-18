@@ -1,4 +1,5 @@
 import { buildCollectionExportXml, postTallyXml } from "../tally/xml.mjs";
+import {recordRuntimeRead} from "../runtime-status.mjs";
 import { parseVouchers } from "../tally/vouchers.mjs";
 
 const VOUCHER_FETCH_FIELDS = [
@@ -138,16 +139,19 @@ export async function syncVouchers(command, { config, activeCompany, isCancelled
   if (cashDiscountFastPath && typeof scope.cursor === "string" && scope.cursor !== scope.dateFrom) {
     await new Promise((resolve) => setTimeout(resolve, CASH_DISCOUNT_PAUSE_MS));
   }
-  const ledgerBatches = cashDiscountFastPath
+  if(scope.diagnosticTargeted && (!customerLedgerNames.length || customerLedgerNames.length>TARGETED_CUSTOMER_LIMIT))throw new Error("Choose a smaller customer group (at most 250 ledgers) for a targeted calculation.");
+  const ledgerBatches = cashDiscountFastPath && !scope.diagnosticTargeted
     ? [[]]
     : customerLedgerNames.length && customerLedgerNames.length <= TARGETED_CUSTOMER_LIMIT
     ? chunkValues(customerLedgerNames, CUSTOMER_BATCH_SIZE)
     : [[]];
   const voucherByGuid = new Map();
   for (const [batchIndex, ledgerNames] of ledgerBatches.entries()) {
+    if(batchIndex>0 && scope.diagnosticTargeted)await new Promise(resolve=>setTimeout(resolve,Math.max(1000,Math.min(10000,Number(scope.pauseMs)||2000))));
     if (isCancelled?.()) throw new Error("This Tally read was stopped.");
     const resultXml = await exportVoucherBatch({ config, activeCompany, chunk, ledgerNames, batchIndex, cashDiscountFastPath, cashDiscountPerMt });
     if (isCancelled?.()) throw new Error("This Tally read was stopped.");
+    recordRuntimeRead();
     for (const voucher of parseVouchers(resultXml)) {
       if (matchesScope(voucher, chunk.scope)) voucherByGuid.set(voucher.guid, voucher);
     }

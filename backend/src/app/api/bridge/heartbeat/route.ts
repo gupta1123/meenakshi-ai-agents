@@ -72,6 +72,24 @@ export async function POST(request: Request) {
     const heartbeatError = readText(body.error, 2_000);
     const supabase = createSupabaseAdminClient();
     const now = new Date().toISOString();
+    if(body.runtime && typeof body.runtime==="object"){
+      const value=body.runtime as Record<string,unknown>;
+      if(value.protocol===1 && (value.mode==="server"||value.mode==="pc")){
+        const runtime={protocol:1,mode:value.mode,version:bridgeVersion,pid:Number(value.pid)||null,
+          bootId:typeof value.bootId==="string"?value.bootId.slice(0,80):null,
+          lastTallyReadAt:typeof value.lastTallyReadAt==="string"?value.lastTallyReadAt:null,
+          startedAt:typeof value.startedAt==="string"?value.startedAt:null,
+          activity:typeof value.activity==="string"?value.activity.slice(0,160):null,
+          windowsUser:typeof value.windowsUser==="string"?value.windowsUser.slice(0,100):null,
+          osRelease:typeof value.osRelease==="string"?value.osRelease.slice(0,100):null,
+          freeMemoryMb:Number(value.freeMemoryMb)||null,
+          capabilities:Array.isArray(value.capabilities)?value.capabilities.filter(v=>typeof v==="string").slice(0,30):[],
+          startup:value.startup&&typeof value.startup==="object"?value.startup:null,reportedAt:now};
+        const stored=await supabase.from("tally_connectors").update({runtime}).eq("id",connector.id);
+        if(stored.error && !["42703","PGRST204"].includes(stored.error.code))throw stored.error;
+      }
+    }
+
     const previousRuntime = await supabase.from("tally_connectors")
       .select("last_tally_reachable, last_company_loaded, last_company_name, last_error, last_tested_at")
       .eq("id", connector.id)

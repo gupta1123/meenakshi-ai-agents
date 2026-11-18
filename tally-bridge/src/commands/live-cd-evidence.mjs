@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import Decimal from "decimal.js";
+import {BRIDGE_VERSION} from "../version.mjs";
 
 import { syncVouchers } from "./sync-vouchers.mjs";
 import { buildCollectionExportXml, extractBlocks, getAttribute, getTagText, postTallyXml } from "../tally/xml.mjs";
@@ -121,10 +122,11 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
     if (saved.inFlight) crashes.set(saved.inFlight, (crashes.get(saved.inFlight) ?? 0) + 1);
     context.onResume?.({ cursor, chunks, invoices: invoices.length, retriedWindow: saved.inFlight ?? null });
   }
-  const windowDays = (at) => { const n = crashes.get(at) ?? 0; return n === 0 ? 10 : n === 1 ? 3 : n === 2 ? 1 : 0; };
+  const requestedDays = Math.max(1,Math.min(10,Number(scope.chunkDays)||10));
+  const windowDays = (at) => { const n = crashes.get(at) ?? 0; return n === 0 ? requestedDays : n === 1 ? Math.min(requestedDays,3) : n === 2 ? 1 : 0; };
   const persist = (inFlight) => checkpoint?.save({ cursor, chunks, vouchersScanned, invoices, allocations, debitNotes, creditNotes, onAccount, crashes: Object.fromEntries(crashes), inFlight });
   // Batches are 10 days (see sync-vouchers.mjs); report progress per batch.
-  const totalChunks = Math.max(1, Math.ceil(((Date.parse(`${scope.dateTo}T00:00:00Z`) - Date.parse(`${scope.dateFrom}T00:00:00Z`)) / 86_400_000 + 1) / 10));
+  const totalChunks = Math.max(1, Math.ceil(((Date.parse(`${scope.dateTo}T00:00:00Z`) - Date.parse(`${scope.dateFrom}T00:00:00Z`)) / 86_400_000 + 1) / requestedDays));
   context.onProgress?.({ done: 0, total: totalChunks, from: scope.dateFrom, to: scope.dateTo });
   while (cursor) {
     if (context.isCancelled?.()) throw new Error("This Cash Discount check was stopped.");
@@ -250,6 +252,7 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
       .reduce((total, payment) => total.plus(new Decimal(payment.allocatedAmount || 0).abs()), new Decimal(0))
       .lt(new Decimal(invoice.grossAmount).minus(1))).map((invoice) => invoice.customerId));
     const needed = eligibleCustomers.filter((customer) => short.has(customer.customerId));
+    if(needed.length)await context.betweenWindows?.();
     const openings = needed.length ? await openingOnAccount(needed, context) : new Map();
     for (const customer of needed) {
       const balance = openings.get(normalized(customer.ledgerName));
@@ -257,5 +260,5 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
     }
   }
   const sourceFingerprint = createHash("sha256").update(canonicalJson(customerCredits.length ? { invoices: invoiceResults, customerCredits } : invoiceResults)).digest("hex");
-  return { mode: "live_cd_batch", creditNoteMatchingVersion: CREDIT_NOTE_MATCHING_VERSION, evaluationRunId: command.payload.evaluationRunId ?? null, ruleVersionId: scope.ruleVersionId ?? null, dateFrom: scope.dateFrom, dateTo: scope.dateTo, chunks, vouchersScanned, invoices: invoiceResults, customerCredits, sourceFingerprint };
+  return { mode: "live_cd_batch", connectorVersion:BRIDGE_VERSION, customerScope:scope.customerScope??null, creditNoteMatchingVersion: CREDIT_NOTE_MATCHING_VERSION, evaluationRunId: command.payload.evaluationRunId ?? null, ruleVersionId: scope.ruleVersionId ?? null, dateFrom: scope.dateFrom, dateTo: scope.dateTo, chunks, vouchersScanned, invoices: invoiceResults, customerCredits, sourceFingerprint };
 }

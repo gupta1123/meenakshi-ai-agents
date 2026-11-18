@@ -1,4 +1,9 @@
 #!/usr/bin/env node
+import {pathToFileURL} from "node:url";
+import path from "node:path";
+import {processSupportJob,supportRequest} from "./support/client.mjs";
+import {readWindowsStartup} from "./desktop-monitor.mjs";
+import {acknowledgeServerSetup} from "./config.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { claimNextCommand, pairBridge, renewCommandLease, reportCommandResult, sendDisconnect, sendHeartbeat } from "./api-client.mjs";
@@ -8,7 +13,7 @@ import { probeActiveCompany, probeCurrentCompanyName, probeTallyCompanies, probe
 import { startLocalApi } from "./local-api.mjs";
 import { processOneCheckJob } from "./server-jobs.mjs";
 import { acquireBridgeLock } from "./instance-lock.mjs";
-import { beginRuntimeStatus, readRuntimeStatus, recordRuntimeActivity, recordRuntimeFailure, recordRuntimeHeartbeat } from "./runtime-status.mjs";
+import { beginRuntimeStatus, readRuntimeStatus, recordRuntimeActivity, recordRuntimeFailure, recordRuntimeHeartbeat, recordRuntimeStartup } from "./runtime-status.mjs";
 
 import { BRIDGE_VERSION } from "./version.mjs";
 import { clearRunning, logLine, markRunning, previousRunEndedBadly } from "./connector-log.mjs";
@@ -103,8 +108,10 @@ async function readTallySnapshot(config, cachedCompanies = null) {
 // sent with the heartbeat so the cloud can start a master sync when Tally changed.
 const CHANGE_COUNTER_INTERVAL_MS = 3 * 60 * 1000;
 let changeCounter = { value: null, readAt: 0, company: null };
+let startupReadAt=0;
 
 async function heartbeat(config, cachedCompanies = null) {
+  if(Date.now()-startupReadAt>300000){recordRuntimeStartup(await readWindowsStartup());startupReadAt=Date.now();}
   const snapshot = await readTallySnapshot(config, cachedCompanies);
   if (snapshot.companyLoaded && snapshot.activeCompany?.name) {
     const company = snapshot.activeCompany.name;
@@ -114,8 +121,19 @@ async function heartbeat(config, cachedCompanies = null) {
     }
     snapshot.masterChangeCounter = changeCounter.company === company ? changeCounter.value : null;
   }
+  if(config.setupCloudPending && config.mode==="server"){
+    const startup=await readWindowsStartup();
+    if(startup.enabled){
+      try{await supportRequest(config,"/setup",{version:BRIDGE_VERSION,mode:"server",startupEnabled:true});acknowledgeServerSetup();config.setupCloudPending=false;}
+      catch(error){logLine("WARN","Server registration is pending",{error:error.message});}
+    }
+  }
   const cloud = await sendHeartbeat(config, BRIDGE_VERSION, snapshot);
   recordRuntimeHeartbeat(snapshot, cloud);
+  if(process.env.MEENAKSHI_BOOTSTRAP_DIRECTORY){
+    const loader=await import(pathToFileURL(path.join(process.env.MEENAKSHI_BOOTSTRAP_DIRECTORY,"release-loader.mjs")).href);
+    loader.markReleaseReady("worker");
+  }
   console.log(`MEENAKSHI_STATUS ${JSON.stringify({ ...snapshot, cloudConnected: true, bindings: cloud.bindings ?? [] })}`);
   return snapshot;
 }
@@ -224,6 +242,7 @@ function sleep(milliseconds) {
 async function startBridge(config) {
   const instance = await acquireBridgeLock(config, readRuntimeStatus);
   beginRuntimeStatus(config);
+
   // Leave a trace of why the connector stopped: a hard kill leaves none, which is itself informative.
   const mb = () => Math.round(process.memoryUsage().rss / 1048576);
   logLine("INFO", `connector started`, { version: BRIDGE_VERSION, pid: process.pid, node: process.version, rssMb: mb() });
@@ -257,7 +276,11 @@ async function startBridge(config) {
         nextHeartbeatAt = Date.now() + config.heartbeatIntervalMs;
         if (refreshCompanyList || snapshot.companySnapshotFresh) nextCompanyListAt = Date.now() + config.companyListIntervalMs;
       }
-      let processed = await processOneCommand(config, snapshot.activeCompany);
+      let processed = await processSupportJob(config,snapshot.activeCompany,{snapshot,update:async()=>{
+        const {stageRemoteUpdate}=await import("./support/remote-update.mjs");
+        return stageRemoteUpdate(config);
+      }}).catch(error=>{if(error.status!==503)logLine("WARN","Support operation unavailable",{error:error.message});return false;});
+      if(!processed)processed = await processOneCommand(config, snapshot.activeCompany);
       // Server mode: after queued Tally commands, run a queued check. Credit Notes that arrive
       // meanwhile run between its read windows, so only one thing talks to Tally at a time.
       if (serverMode && !processed) {

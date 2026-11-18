@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 
 const root=fileURLToPath(new URL("../",import.meta.url));
 const runtime=path.join(root,"installer/payload-clean/Meenakshi Tally Connector.exe");
-const bridge=path.join(root,"installer/payload-clean/resources/app/src/bridge.mjs");
+const bridge=path.join(root,"installer/payload-clean/resources/app/worker.mjs");
 
 test("packaged server starts headlessly, polls jobs and restarts after a hard stop",{skip:process.platform!=="win32",timeout:30000},async()=>{
   const scratch=mkdtempSync(path.join(tmpdir(),"meenakshi-packaged-"));
@@ -108,5 +108,5 @@ function Start-ScheduledTask {}
   assert.equal(existsSync(registered),true,"startup must be registered after a successful mode change");
   const removed=await run(true);
   assert.equal(removed.code,0,removed.output);
-  assert.deepEqual(JSON.parse(readFileSync(configPath,"utf8")),{mode:"pc",controlToken:"isolated-test-credential"});
+  assert.deepEqual(JSON.parse(readFileSync(configPath,"utf8")),{mode:"pc",controlToken:"isolated-test-credential",setupCloudPending:false});
 });

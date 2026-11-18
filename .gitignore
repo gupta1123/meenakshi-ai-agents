@@ -20,6 +20,8 @@
 # Desktop installer output
 **/release/
 **/releases/
+!backend/src/app/api/bridge/releases/
+!backend/src/app/api/bridge/releases/**
 **/installer/payload-clean/
 **/*.exe
 **/*.msi

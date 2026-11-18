@@ -40,7 +40,8 @@ export async function GET(request: Request, context: RouteContext) {
     // One invoice (the Credit Note page opens its check in place): only that
     // invoice's row and Credit Note, not the whole period.
     if (invoiceGuid) {
-      const allRows = ((run?.summary as { settlementResults?: unknown } | null)?.settlementResults ?? []) as Array<Record<string, unknown>>;
+      const source=(run?.summary??{}) as {settlementResults?:Array<Record<string,unknown>>;excludedInvoices?:Array<Record<string,unknown>>};
+      const allRows=[...(source.settlementResults??[]),...(source.excludedInvoices??[])];
       const row = allRows.find((item) => item.invoiceGuid === invoiceGuid) ?? null;
       if (row && row.customerGroup === undefined && row.customerId) {
         const { data: customer } = await supabase.from("customers").select("customer_groups(name)")
@@ -68,7 +69,8 @@ export async function GET(request: Request, context: RouteContext) {
     if (candidates.error) throw candidates.error;
     if (notes.error) throw notes.error;
     const summary = (run?.summary ?? {}) as Record<string, unknown>;
-    const { settlementResults, ...totals } = summary;
+    const { settlementResults, excludedInvoices: _excludedInvoices, ...totals } = summary;
+    void _excludedInvoices;
     const allResults = (Array.isArray(settlementResults) ? settlementResults : []) as Array<Record<string, unknown>>;
     // Checks saved before these fields existed: drop not-eligible rows (kept as
     // a count), and derive the invoice period and customer groups here.

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import Decimal from "decimal.js";
+import {BRIDGE_VERSION} from "../version.mjs";
 
 import { syncVouchers } from "./sync-vouchers.mjs";
 import { sourceSalesLedgerName } from "./voucher-ledgers.mjs";
@@ -167,7 +168,7 @@ export async function fetchLiveTodEvidence(command, context) {
     await context.betweenWindows?.();
     if (context.isCancelled?.()) throw new Error("This Turnover Discount check was stopped.");
     if (chunks >= MAX_CHUNKS) throw new Error("The requested Tally period is too large for one live calculation.");
-    const result = await syncVouchers({ ...command, payload: { ...command.payload, syncRunId: command.payload.voucherSyncRunId, requestedScope: { ...scope, customerLedgerName: null, customers: null, dateTo: readTo, cursor } } }, context);
+    const result = await syncVouchers({ ...command, payload: { ...command.payload, syncRunId: command.payload.voucherSyncRunId, requestedScope: { ...scope, customerLedgerName: null, customers: scope.diagnosticTargeted ? requestedCustomers : null, dateTo: readTo, cursor } } }, context);
     chunks += 1;
     context.onProgress?.({ done: chunks, nextDate: result.cursorTo, vouchersScanned: vouchersScanned + result.vouchers.length });
     vouchersScanned += result.vouchers.length;
@@ -236,5 +237,5 @@ export async function fetchLiveTodEvidence(command, context) {
     return { mode: "live_tod_aggregate", evaluationRunId: command.payload.evaluationRunId ?? null, periodStart: scope.dateFrom, periodEnd: scope.dateTo, chunks, vouchersScanned, ...customerAggregates[0] };
   }
   const sourceFingerprint = createHash("sha256").update(canonicalJson(customerAggregates.map(({ customerId, sourceFingerprint: fingerprint }) => ({ customerId, fingerprint })))).digest("hex");
-  return { mode: "live_tod_batch_aggregate", evaluationRunId: command.payload.evaluationRunId ?? null, periodStart: scope.dateFrom, periodEnd: scope.dateTo, chunks, vouchersScanned, matchingVouchers: totalMatchingVouchers, customerAggregates, sourceFingerprint };
+  return { mode: "live_tod_batch_aggregate", connectorVersion:BRIDGE_VERSION, evaluationRunId: command.payload.evaluationRunId ?? null, periodStart: scope.dateFrom, periodEnd: scope.dateTo, chunks, vouchersScanned, matchingVouchers: totalMatchingVouchers, customerAggregates, sourceFingerprint };
 }

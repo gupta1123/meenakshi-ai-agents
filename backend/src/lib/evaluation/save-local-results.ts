@@ -45,6 +45,7 @@ export async function saveLocalCdResult(scope: SaveScope, input: { evaluatedOn?:
   });
   if (error) throw error;
   const run = data as EvaluationRunRecord & { status: string; created_at: string };
+  if (run.status === "completed") return { evaluationRun: run as unknown as Record<string, unknown> & { id: string }, totals: {} };
   const evidence: LiveCdBatch = { ...input.evidence, evaluationRunId: run.id };
   const { rule } = await loadLiveCdBatchRule(run, evidence.ruleVersionId);
   const { error: savingError } = await supabase.from("evaluation_runs").update({

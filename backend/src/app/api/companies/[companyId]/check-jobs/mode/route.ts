@@ -18,26 +18,22 @@ export async function GET(request: Request, context: RouteContext) {
     const { companyId } = await context.params;
     if (!isUuid(companyId)) return jsonWithCors(request, { error: "Invalid company id." }, { status: 400 });
     const access = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
-    const pc = { mode: "pc" as const, connectorOnline: null as boolean | null, lastSeenAt: null as string | null, readiness: null as string | null, message: null as string | null };
-    {
-      const db = createSupabaseAdminClient();
-      const { data: binding, error: bindingError } = await db.from("tally_connector_company_bindings").select("connector_id")
-        .eq("company_id", access.company.id).eq("is_active", true).maybeSingle();
-      if (bindingError) throw bindingError;
-      if (!binding?.connector_id) return jsonWithCors(request, pc);
-      const { data: modeRow, error } = await db.from("tally_connector_modes").select("mode").eq("connector_id", binding.connector_id).maybeSingle();
-      if (error) throw error;
-      if (modeRow?.mode !== "server") return jsonWithCors(request, pc);
-      const { data: connector, error: connectorError } = await db.from("tally_connectors")
-        .select("last_heartbeat_at, last_tally_reachable, last_company_loaded, last_company_name").eq("id", binding.connector_id).maybeSingle();
-      if (connectorError) throw connectorError;
-      const lastSeenAt = connector?.last_heartbeat_at ?? null;
-      const readiness = describeServerReadiness({
-        lastSeenAt, tallyReachable: connector?.last_tally_reachable ?? null, companyLoaded: connector?.last_company_loaded ?? null,
-        activeCompanyName: connector?.last_company_name ?? null, expectedCompanyName: access.company.tally_company_name ?? null,
-      });
-      return jsonWithCors(request, { mode: "server", connectorOnline: readiness.state !== "connector_offline", lastSeenAt, readiness: readiness.state, message: readiness.message });
-    }
+
+    const db=createSupabaseAdminClient();
+    const {data:binding,error:be}=await db.from("tally_connector_company_bindings").select("connector_id").eq("company_id",access.company.id).eq("is_active",true).maybeSingle();
+    if(be)throw be;
+    if(!binding)return jsonWithCors(request,{mode:"pc",observedMode:null,modeMismatch:false,connectorOnline:false,lastSeenAt:null,readiness:"connector_offline",message:"No connector is linked."});
+    const {data:modeRow,error:me}=await db.from("tally_connector_modes").select("mode").eq("connector_id",binding.connector_id).maybeSingle();if(me)throw me;
+    const {data:connector,error:ce}=await db.from("tally_connectors").select("last_heartbeat_at,last_tally_reachable,last_company_loaded,last_company_name").eq("id",binding.connector_id).single();if(ce)throw ce;
+    const {data:runtimeRow}=await db.from("tally_connectors").select("runtime").eq("id",binding.connector_id).maybeSingle();
+    const runtime=runtimeRow?.runtime??{};
+    const mode=modeRow?.mode==="server"?"server":"pc",observedMode=runtime.mode??null;
+    const readiness=describeServerReadiness({lastSeenAt:connector.last_heartbeat_at,tallyReachable:connector.last_tally_reachable,
+      companyLoaded:connector.last_company_loaded,activeCompanyName:connector.last_company_name,expectedCompanyName:access.company.tally_company_name??null});
+    return jsonWithCors(request,{mode,observedMode,modeMismatch:observedMode!==null&&mode!==observedMode,
+      runtime,connectorOnline:readiness.state!=="connector_offline",lastSeenAt:connector.last_heartbeat_at,readiness:readiness.state,
+      message:observedMode!==null&&mode!==observedMode?"Website and connector modes differ. Finish server setup from the connector's menu.":readiness.message});
+
   } catch (error) {
     if (error instanceof MeenakshiAccessError) return jsonWithCors(request, { error: error.message }, { status: error.status });
     console.error("Could not read Tally mode:", error);

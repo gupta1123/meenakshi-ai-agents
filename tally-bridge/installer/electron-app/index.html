@@ -129,11 +129,19 @@
       <header class="brandbar"><img src="brand.png" alt="Meenakshi TMT">
         <button class="menu-button" id="menu-button" type="button" aria-label="More options" aria-haspopup="true" aria-expanded="false">&#8942;</button>
         <div class="menu" id="menu" hidden>
+          <button type="button" id="menu-update">Update connector</button>
+          <button type="button" id="menu-server">Set up as Tally server</button>
           <button type="button" id="menu-send">Send logs&hellip;</button>
           <button type="button" id="menu-open">Open logs folder</button>
           <div class="version" id="menu-version"></div>
         </div>
       </header>
+      <section class="logs-panel" id="update-panel" hidden aria-label="Connector update">
+        <h2 id="update-title">Update connector</h2>
+        <p id="update-detail" role="status" aria-live="polite">Checking for updates...</p>
+        <progress id="update-progress" max="100" value="0" style="width:100%;margin:12px 0" hidden></progress>
+        <div class="logs-actions"><button class="primary" id="update-action" type="button" hidden>Download update</button><button id="update-close" type="button">Close</button></div>
+      </section>
       <section class="logs-panel" id="logs-panel" hidden>
         <h2>Send logs to Meenakshi</h2>
         <p>Pick the days to send. The logs only contain technical details (times, steps, errors), not customer names or amounts.</p>
@@ -183,6 +191,31 @@
         return `Checked ${date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}`;
       }
 
+      const updatePanel=document.getElementById("update-panel"),updateAction=document.getElementById("update-action");
+      let updatePhase="idle";
+      function renderUpdate(state){
+        updatePhase=state.state||(!state.available?"current":"available");state.state=updatePhase;const busy=["checking","downloading"].includes(state.state);
+        document.getElementById("update-close").disabled=busy;
+        const progress=document.getElementById("update-progress");progress.hidden=state.state!=="downloading";
+        if(state.total)progress.value=Math.round(100*state.received/state.total);
+        document.getElementById("update-title").textContent=state.state==="ready"?"Ready to restart":state.state==="current"?"Up to date":"Update connector";
+        document.getElementById("update-detail").textContent=state.message||
+          (state.state==="available"?"Version "+state.version+" is available. Only changed application files are downloaded when the runtime is unchanged.":
+           state.state==="downloading"?"Updating... "+Math.round((state.received||0)/1024)+" KB of "+Math.round((state.total||0)/1024)+" KB":
+           state.state==="ready"?"Version "+state.version+" is downloaded and verified. Restart to use it. Running checks will be interrupted.":"Checking for updates...");
+        updateAction.hidden=!["available","ready","error"].includes(state.state);
+        updateAction.textContent=state.state==="ready"?"Restart and update":state.state==="error"?"Try again":"Download update";
+        updateAction.disabled=busy;
+      }
+      window.meenakshiBridge?.update.onStatus(renderUpdate);
+      document.getElementById("menu-update").addEventListener("click",async()=>{updatePanel.hidden=false;renderUpdate({state:"checking"});renderUpdate(await window.meenakshiBridge.update.check());});
+      document.getElementById("update-close").addEventListener("click",()=>{updatePanel.hidden=true;});
+      updateAction.addEventListener("click",async()=>{
+        if(updatePhase==="ready"){updateAction.disabled=true;try{const result=await window.meenakshiBridge.update.restart();if(!result.ok)throw new Error(result.message);}catch(error){renderUpdate({state:"error",message:error.message});}}
+        else if(updatePhase==="error"){renderUpdate({state:"checking"});renderUpdate(await window.meenakshiBridge.update.check());}
+        else{renderUpdate({state:"downloading"});renderUpdate(await window.meenakshiBridge.update.download());}
+      });
+      document.getElementById("menu-server").addEventListener("click",async()=>{const r=await window.meenakshiBridge.setupServer();if(!r.ok){updatePanel.hidden=false;renderUpdate({state:"setup_error",message:r.message});}});
       const menu = document.getElementById("menu");
       const menuButton = document.getElementById("menu-button");
       const logsPanel = document.getElementById("logs-panel");

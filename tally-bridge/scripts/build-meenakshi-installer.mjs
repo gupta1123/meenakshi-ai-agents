@@ -2,6 +2,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import {createHash} from "node:crypto";
+import {applicationFileBytes} from "./application-file-bytes.mjs";
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const bridgeRoot = path.resolve(currentDirectory, "..");
@@ -102,14 +104,23 @@ function buildPayload(runtimeExecutable) {
   resetDirectory(payloadRoot);
   fs.mkdirSync(path.join(payloadRoot, "resources", "app"), { recursive: true });
   fs.copyFileSync(runtimeExecutable, path.join(payloadRoot, connector.executableName));
-  for (const name of ["install-server-task.ps1", "start-server-connector.vbs"])
+  for (const name of ["install-server-task.ps1", "start-server-connector.vbs", "restart-connector.ps1"])
     fs.copyFileSync(path.join(currentDirectory, name), path.join(payloadRoot, name));
   copyOptionalRuntimeFiles(path.dirname(runtimeExecutable));
   fs.cpSync(sourceRoot, path.join(payloadRoot, "resources", "app", "src"), { recursive: true, force: true });
   fs.mkdirSync(path.join(payloadRoot, "resources", "app", "node_modules"), { recursive: true });
   fs.cpSync(path.join(bridgeRoot, "node_modules", "decimal.js"), path.join(payloadRoot, "resources", "app", "node_modules", "decimal.js"), { recursive: true, force: true });
-  for (const name of ["main.mjs", "preload.cjs", "index.html", "package.json", "brand.png", "app.ico"]) {
+  for (const name of ["main.mjs", "preload.cjs", "index.html", "package.json", "brand.png", "app.ico", "release-loader.mjs", "worker.mjs", "release-public-key.pem"]) {
     fs.copyFileSync(path.join(electronAppRoot, name), path.join(payloadRoot, "resources", "app", name));
+  }
+  fs.renameSync(path.join(payloadRoot,"resources","app","main.mjs"),path.join(payloadRoot,"resources","app","main-core.mjs"));
+  fs.copyFileSync(path.join(electronAppRoot,"bootstrap.mjs"),path.join(payloadRoot,"resources","app","main.mjs"));
+  const envelope=JSON.parse(fs.readFileSync(path.join(bridgeRoot,"..","backend","connector-release.json"),"utf8"));
+  const manifest=JSON.parse(Buffer.from(envelope.payload,"base64"));
+  for(const file of manifest.files){
+    const filename=path.join(payloadRoot,"resources","app",file.path),bytes=applicationFileBytes(filename);
+    if(createHash("sha256").update(bytes).digest("hex")!==file.sha256)throw new Error("Rebuild the signed application release before packaging: "+file.path);
+    fs.writeFileSync(filename,bytes);
   }
 }
 

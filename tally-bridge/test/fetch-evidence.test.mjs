@@ -73,6 +73,22 @@ test("Turnover Discount local fast path needs no cloud voucher-sync record", asy
   }
 });
 
+test("remote TOD retains the customer filter and seven-day windows including payment look-ahead",async()=>{
+ const previous=globalThis.fetch,requests=[];
+ globalThis.fetch=async(_url,options)=>{requests.push(options.body);return new Response("<ENVELOPE/>",{status:200});};
+ try{
+  const result=await fetchLiveTodEvidence({payload:{voucherScope:{purpose:"live_tod_evaluation",diagnosticTargeted:true,chunkDays:7,
+   dateFrom:"2026-08-01",dateTo:"2026-08-07",paymentCheck:{readTo:"2026-08-14",dueDays:25},
+   customers:[{customerId:"one",ledgerName:"Only Selected Customer"}],eligibleStockItemNames:["Steel"],unitConversions:[{uomCode:"MT",tonnesPerUnit:"1"}]}}},
+   {config:{tallyUrl:"http://localhost:9000"},activeCompany:{name:"Test Company",guid:"company"},betweenWindows:async()=>{}});
+  assert.equal(requests.length,2);
+  assert.ok(requests.every(xml=>xml.includes("Only Selected Customer")&&xml.includes("MeenakshiRequestedVoucher")));
+  assert.match(requests[0],/<SVTODATE TYPE="Date">20260807/);
+  assert.match(requests[1],/<SVTODATE TYPE="Date">20260814/);
+  assert.equal(result.periodEnd,"2026-08-07");
+ }finally{globalThis.fetch=previous;}
+});
+
 test("Cash Discount fast path covers the whole year in bounded voucher windows without master exports", async () => {
   const originalFetch = globalThis.fetch;
   const requests = [];
