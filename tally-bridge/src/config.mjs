@@ -115,11 +115,16 @@ export function saveConfig(values) {
 export function setMode(mode) {
   if (mode !== "pc" && mode !== "server") throw new Error("Use --mode pc or --mode server.");
   const config = JSON.parse(readFileSync(configPath, "utf8"));
-  writeFileSync(configPath, `${JSON.stringify({ ...config, mode }, null, 2)}
+  writeFileSync(configPath, `${JSON.stringify({ ...config, mode, setupCloudPending: mode === "server" }, null, 2)}
 `, { encoding: "utf8", mode: 0o600 });
   return mode;
 }
 
 export function displayConfigPath() {
   return configPath;
+}
+
+export function acknowledgeServerSetup() {
+ const config=JSON.parse(readFileSync(configPath,"utf8"));
+ writeFileSync(configPath,JSON.stringify({...config,setupCloudPending:false},null,2),{encoding:"utf8",mode:0o600});
 }

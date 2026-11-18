@@ -6,7 +6,7 @@ import { userFacingError } from "@/lib/user-copy";
 import { Button, InlineMessage } from "./ui";
 import s from "./tally-connection.module.css";
 
-type ModeAnswer = { mode: "pc" | "server"; message?: string | null };
+type ModeAnswer = { mode: "pc" | "server"; observedMode?:string|null; runtime?:{protocol?:number};message?: string | null };
 
 /**
  * Administrators choose where this company's Tally checks run: on a staff PC
@@ -23,8 +23,8 @@ export function TallyModeSetting({ companyId, getToken }: { companyId: string; g
     let cancelled = false;
     void (async () => {
       const token = await getToken(); if (!token) return;
-      const answer = await apiRequest<ModeAnswer>(token, `/api/companies/${companyId}/check-jobs/mode`, { timeoutMs: 8_000 }).catch(() => null);
-      if (!cancelled) setMode(answer ?? { mode: "pc" });
+      const answer = await apiRequest<ModeAnswer>(token, `/api/companies/${companyId}/check-jobs/mode`, { timeoutMs: 8_000 }).catch(()=>{if(!cancelled)setError("Could not verify the connector mode. Refresh before changing it.");return null;});
+      if (!cancelled && answer) setMode(answer);
     })();
     return () => { cancelled = true; };
   }, [companyId, getToken]);
@@ -42,7 +42,7 @@ export function TallyModeSetting({ companyId, getToken }: { companyId: string; g
     }
   };
 
-  if (!mode) return null;
+  if (!mode) return error?<InlineMessage tone="error">{error}</InlineMessage>:null;
   const other = mode.mode === "pc" ? "server" : "pc";
   return (
     <div className={s.companies}>
@@ -54,7 +54,7 @@ export function TallyModeSetting({ companyId, getToken }: { companyId: string; g
       </p>
       {mode.mode === "server" && mode.message && <InlineMessage tone="warning">{mode.message}</InlineMessage>}
       {error && <InlineMessage tone="error">{error}</InlineMessage>}
-      {confirming
+      {mode.runtime?.protocol===1 ? <p>Actual connector mode: {mode.observedMode??"not reported"}. Server setup is managed from the connector&apos;s three-dot menu.</p> : confirming
         ? <span className={s.confirm}>
           <span>{confirming === "server" ? "Run checks on the Tally server? The connector there must be set to server mode." : "Run checks on the PC again?"}</span>
           <Button type="button" className="button-primary" disabled={saving} onClick={() => void change(confirming)}>{saving ? "Switching…" : "Switch"}</Button>

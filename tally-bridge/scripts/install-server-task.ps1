@@ -15,7 +15,7 @@
 # To go back to a normal PC connector, run with -Remove.
 param(
   [string]$NodePath = (Join-Path $PSScriptRoot 'Meenakshi Tally Connector.exe'),
-  [string]$BridgePath = (Join-Path $PSScriptRoot 'resources\app\src\bridge.mjs'),
+  [string]$BridgePath = (Join-Path $PSScriptRoot 'resources\app\worker.mjs'),
   [string]$UserName = "$env:USERDOMAIN\$env:USERNAME",
   [switch]$Remove
 )
@@ -42,6 +42,9 @@ if ($Remove) {
 
 if (-not (Test-Path $NodePath)) { throw "Node was not found at $NodePath" }
 if (-not (Test-Path $BridgePath)) { throw "The connector was not found at $BridgePath" }
+if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
+  Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+}
 $activeBridge = Get-CimInstance Win32_Process | Where-Object {
   $_.CommandLine -and $_.CommandLine.Contains($BridgePath) -and $_.CommandLine -match '\sstart(?:\s|$)'
 }

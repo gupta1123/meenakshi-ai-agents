@@ -1,5 +1,5 @@
 #define AppName "Meenakshi Tally Connector"
-#define AppVersion "0.5.4"
+#define AppVersion "0.6.0"
 #define AppPublisher "Meenakshi"
 #define AppInstallDir "C:\Meenakshi\tally-bridge"
 #define AppExeName "Meenakshi Tally Connector.exe"
@@ -51,8 +51,12 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\resources\app\app.ico"
 Name: "{group}\{#AppName} logs"; Filename: "{localappdata}\Meenakshi\logs"
 
+[Tasks]
+Name: "server"; Description: "Set up as the shared Tally server"; Flags: checkedonce
+
 [Run]
-Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExeName}"; Parameters: "--setup-server"; Description: "Launch and set up the Tally server"; Tasks: server; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Tasks: not server; Flags: nowait postinstall skipifsilent
 
 [Code]
 function PrepareToInstall(var NeedsRestart: Boolean): String;

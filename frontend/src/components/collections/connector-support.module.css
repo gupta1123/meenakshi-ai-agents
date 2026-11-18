@@ -1,0 +1,117 @@
+.root {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid #e5e2df;
+  color: #302c29;
+}
+.root h3 {
+  font-size: 17px;
+  margin: 0 0 6px;
+}
+.root h4 {
+  margin: 20px 0 10px;
+  font-size: 14px;
+}
+.root p {
+  font-size: 12px;
+  line-height: 1.5;
+  color: #746b63;
+}
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 16px 0;
+}
+.grid label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12px;
+}
+.root input:not([type="checkbox"]),
+.root select {
+  padding: 9px;
+  border: 1px solid #ded8d3;
+  border-radius: 7px;
+  background: white;
+  color: #302c29;
+  min-width: 0;
+  font: inherit;
+}
+.runtime {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 18px;
+  font-size: 12px;
+}
+.runtime dt {
+  color: #746b63;
+}
+.runtime dd {
+  margin: 0;
+}
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+.check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12px;
+}
+.history {
+  max-height: 240px;
+  overflow: auto;
+  margin: 18px 0;
+  border-top: 1px solid #e5e2df;
+}
+.history > div {
+  display: flex;
+  gap: 8px;
+  border-bottom: 1px solid #e5e2df;
+  padding: 8px 0;
+}
+.history button {
+  background: none;
+  border: 0;
+  text-align: left;
+  color: #4a3b31;
+  cursor: pointer;
+  font-size: 12px;
+}
+.result {
+  overflow: auto;
+  padding-top: 12px;
+  border-top: 1px solid #e5e2df;
+}
+.root table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.root th,
+.root td {
+  padding: 9px 7px;
+  text-align: left;
+  border-bottom: 1px solid #e5e2df;
+  vertical-align: top;
+}
+.root th {
+  color: #746b63;
+  font-weight: 600;
+}
+.logs {
+  white-space: pre-wrap;
+  max-height: 400px;
+  overflow: auto;
+  font-size: 11px;
+}
+@media (max-width: 600px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}
