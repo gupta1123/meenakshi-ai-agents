@@ -134,12 +134,13 @@ async function heartbeat(config, cachedCompanies = null) {
     const loader=await import(pathToFileURL(path.join(process.env.MEENAKSHI_BOOTSTRAP_DIRECTORY,"release-loader.mjs")).href);
     loader.markReleaseReady("worker");
   }
-  console.log(`MEENAKSHI_STATUS ${JSON.stringify({ ...snapshot, cloudConnected: true, bindings: cloud.bindings ?? [] })}`);
+  if(config.mode!=="server")console.log(`MEENAKSHI_STATUS ${JSON.stringify({ ...snapshot, cloudConnected: true, bindings: cloud.bindings ?? [] })}`);
   return snapshot;
 }
 
 function commandActivity(command, state, error = null) {
   recordRuntimeActivity(state === "running" ? "Working with Tally" : state === "failed" ? "Last action needs attention" : "Waiting for work");
+  if(readRuntimeStatus()?.mode==="server")return;
   const payload = command.payload && typeof command.payload === "object" ? command.payload : {};
   const voucherScope = payload.voucherScope && typeof payload.voucherScope === "object" ? payload.voucherScope : {};
   const customers = Array.isArray(payload.customers) ? payload.customers : voucherScope.customers;

@@ -1,4 +1,5 @@
 import test from "node:test";
+import {inspectConnectorRuntime} from "./connector-runtime.mjs";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { once } from "node:events";
@@ -52,6 +53,7 @@ test("packaged server starts headlessly, polls jobs and restarts after a hard st
     const exited=once(first,"exit");first.kill();await exited;
     const count=checks;ready=nextCheck();launch();await ready;
     assert.ok(checks>count,"the restarted package must poll the server queue again");
+    assert.ok(!diagnostics.includes("MEENAKSHI_STATUS"),"headless workers must not fill an unread console pipe with status snapshots");
   } finally {
     for(const child of children)if(child.exitCode===null&&child.signalCode===null){const exited=once(child,"exit");child.kill();await exited;}
     server.closeAllConnections();await new Promise(resolve=>server.close(resolve));
@@ -109,4 +111,11 @@ function Start-ScheduledTask {}
   const removed=await run(true);
   assert.equal(removed.code,0,removed.output);
   assert.deepEqual(JSON.parse(readFileSync(configPath,"utf8")),{mode:"pc",controlToken:"isolated-test-credential",setupCloudPending:false});
+});
+
+test("signed application manifest matches the actual packaged Electron runtime",{skip:process.platform!=="win32"},()=>{
+ const manifest=JSON.parse(Buffer.from(JSON.parse(readFileSync(new URL("../../backend/connector-release.json",import.meta.url),"utf8")).payload,"base64"));
+ const actual=inspectConnectorRuntime(runtime);
+ assert.equal(manifest.runtimeMajor,actual.major);
+ assert.equal(manifest.runtimeVersion,actual.electron);
 });

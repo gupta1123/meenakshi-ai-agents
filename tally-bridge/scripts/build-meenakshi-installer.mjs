@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import {findConnectorRuntime,inspectConnectorRuntime} from "./connector-runtime.mjs";
 import {createHash} from "node:crypto";
 import {applicationFileBytes} from "./application-file-bytes.mjs";
 
@@ -50,23 +51,6 @@ function validateSources() {
   ensureContains(definitionPath, connector.installDirectory, "Meenakshi install directory");
   ensureContains(definitionPath, connector.protocol, "Meenakshi installer protocol");
   console.log(`Installer sources validated for ${connector.name} (${connector.protocol}://).`);
-}
-
-function findRuntime() {
-  const candidates = [process.env[connector.runtimeVariable], connector.installDirectory].filter(Boolean);
-  for (const candidate of candidates) {
-    if (!fs.existsSync(candidate)) continue;
-    const entries = fs.readdirSync(candidate, { withFileTypes: true });
-    const preferred = entries.find((entry) => entry.isFile() && entry.name === connector.executableName);
-    if (preferred) return path.join(candidate, preferred.name);
-    const electron = entries.find((entry) => entry.isFile() && entry.name.toLowerCase() === "electron.exe");
-    if (electron) return path.join(candidate, electron.name);
-    const runtimes = entries
-      .filter((entry) => entry.isFile() && entry.name.toLowerCase().endsWith(".exe"))
-      .filter((entry) => !/(setup|unins|update|squirrel)/i.test(entry.name));
-    if (runtimes.length === 1) return path.join(candidate, runtimes[0].name);
-  }
-  throw new Error(`Missing Electron runtime. Set ${connector.runtimeVariable} to an Electron runtime directory.`);
 }
 
 function findInnoCompiler() {
@@ -128,7 +112,10 @@ validateSources();
 if (process.argv.includes("--validate")) process.exit(0);
 if (process.platform !== "win32") throw new Error("The Meenakshi setup executable must be built on Windows.");
 
-const runtimeExecutable = findRuntime();
+const runtimeExecutable = findConnectorRuntime();
+const actualRuntime=inspectConnectorRuntime(runtimeExecutable);
+const signedManifest=JSON.parse(Buffer.from(JSON.parse(fs.readFileSync(path.join(bridgeRoot,"..","backend","connector-release.json"),"utf8")).payload,"base64"));
+if(signedManifest.runtimeMajor!==actualRuntime.major)throw new Error("Signed update runtime does not match the runtime being installed. Rebuild the application manifest.");
 const compiler = findInnoCompiler();
 buildPayload(runtimeExecutable);
 fs.mkdirSync(outputRoot, { recursive: true });

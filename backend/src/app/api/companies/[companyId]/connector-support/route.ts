@@ -31,7 +31,7 @@ export async function GET(r: Request, c: Context) {
     const { data: jobs, error } = await createSupabaseAdminClient()
       .from("tally_support_jobs")
       .select(
-        "id,operation,status,request,progress,error,attempts,created_at,started_at,finished_at",
+        "id,operation,status,schemeType:request->>schemeType,diagnosticType:request->>type,savesResults:request->save,progress,error,attempts,created_at,started_at,finished_at",
       )
       .eq("company_id", companyId)
       .order("created_at", { ascending: false })
@@ -43,7 +43,7 @@ export async function GET(r: Request, c: Context) {
       );
     return jsonWithCors(
       r,
-      { ...status, jobs },
+      { ...status, jobs:(jobs??[]).map(({schemeType,diagnosticType,savesResults,...job})=>({...job,request:{schemeType,type:diagnosticType,save:savesResults===true}})) },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (e) {

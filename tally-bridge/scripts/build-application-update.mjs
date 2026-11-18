@@ -10,6 +10,7 @@ import {
 import { gzipSync } from "node:zlib";
 import { fileURLToPath } from "node:url";
 import {applicationFileBytes} from "./application-file-bytes.mjs";
+import {findConnectorRuntime,inspectConnectorRuntime} from "./connector-runtime.mjs";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const repo = path.dirname(root),
   shell = path.join(root, "installer", "electron-app");
@@ -90,10 +91,12 @@ for (const file of [
 ])
   add(path.join(shell, file), file);
 add(path.join(shell, "main.mjs"), "main-core.mjs");
+const runtime=inspectConnectorRuntime(findConnectorRuntime());
 const manifest = {
   protocol: 1,
   version,
-  runtimeMajor: 37,
+  runtimeMajor: runtime.major,
+  runtimeVersion:runtime.electron,
   publishedAt: new Date().toISOString(),
   notes: "Remote support, one-step server setup and small in-app updates.",
   files,

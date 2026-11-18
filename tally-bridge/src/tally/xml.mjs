@@ -96,7 +96,8 @@ export function buildCollectionExportXml({ collectionName, tallyType, fetchField
     ? [{ name: DATE_RANGE_FILTER, formula: `${DATE_NUMBER} >= ${dateNumber(dateFrom)} AND ${DATE_NUMBER} <= ${dateNumber(dateTo)}` }]
     : [];
   const formulae = [...requestedFormulae, ...rangeFilter];
-  const filterNames = [...requestedFilterNames, ...rangeFilter.map((formula) => formula.name)];
+  // Apply the cheap date bound before scanning ledger entries for each voucher.
+  const filterNames = [...rangeFilter.map((formula) => formula.name), ...requestedFilterNames];
   const staticVariables = [
     companyName ? `<SVCURRENTCOMPANY>${escapeXml(companyName)}</SVCURRENTCOMPANY>` : "",
     dateFrom ? `<SVFROMDATE TYPE=\"Date\">${escapeXml(String(dateFrom).replaceAll("-", ""))}</SVFROMDATE>` : "",

@@ -132,7 +132,7 @@ export async function runDiagnostic(input, context, deps = {}) {
       date: getTagText(b, "BILLDATE"),
       type: getTagText(b, "BILLTYPE"),
       signedAmount: amount(b).toFixed(2),
-    }));
+    })).filter(b=>b.billReference||!new Decimal(b.signedAmount).isZero());
     const billTotal = bills.reduce((n, b) => n.plus(amount(b)), new Decimal(0));
     return {
       type: request.type,
