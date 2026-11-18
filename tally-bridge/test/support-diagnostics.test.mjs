@@ -164,3 +164,10 @@ test("targeted recalculation resolves renamed ledgers and fails if a selected le
  assert.equal(rows[0].ledgerName,"Current name");assert.equal(input[0].ledgerName,"Old name");
  await assert.rejects(resolveSupportCustomers(input,context,{...deps,post:async()=>"<ENVELOPE/>"}),/No result was saved/);
 });
+
+for(const uploadFails of [false,true])test(`remote update exits only after its cloud result is committed (upload failure: ${uploadFails})`,async()=>{
+ const events=[];
+ const api=async(c,p,body)=>{if(!body)return{job:{id:"update-job",operation:"update",attempts:1,request:{}}};events.push(body.action);if(body.action==="finish"){assert.equal(body.result.afterFinish,undefined);if(uploadFails)throw new Error("Result upload failed");}return{};};
+ await processSupportJob({},null,{update:async()=>({state:"ready",restartScheduled:true,afterFinish:()=>events.push("exit")})},{api});
+ assert.deepEqual(events,uploadFails?["finish","fail"]:["finish","exit"]);
+});

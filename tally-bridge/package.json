@@ -1,7 +1,7 @@
 {
   "name": "meenakshi-tally-bridge",
   "private": true,
-  "version": "0.6.2",
+  "version": "0.6.3",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -22,7 +22,7 @@
     "test": "node --test ./test/*.test.mjs",
     "desktop:dev": "npm --prefix ./installer/electron-app run start",
     "installer:validate": "node ./scripts/build-meenakshi-installer.mjs --validate",
-    "installer:smoke": "node --test --test-concurrency=1 ./scripts/packaged-startup.test.mjs ./scripts/update-window.test.mjs",
+    "installer:smoke": "node --test --test-concurrency=1 ./scripts/packaged-startup.test.mjs ./scripts/update-window.test.mjs ./scripts/restart-handoff.test.mjs",
     "installer:build": "node ./scripts/build-meenakshi-installer.mjs",
     "seed:cd-test": "node ./scripts/seed-cd-test-cases.mjs",
     "seed:cd-recovery-test": "node ./scripts/seed-cd-recovery-cases.mjs",

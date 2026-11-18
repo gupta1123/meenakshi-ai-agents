@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { launchRestartTask } from "./restart-task.mjs";
 import { ApplicationUpdater } from "./updater.mjs";
 import { supportRequest } from "./client.mjs";
 import { BRIDGE_VERSION } from "../version.mjs";
@@ -28,44 +28,14 @@ export async function stageRemoteUpdate(config) {
   if (!updater.ready) return ready;
   await supportRequest(config, "/control", { action: "interrupt" });
   const activated = await updater.activate();
+  let uiPid = 0;
+  try { uiPid = Number(JSON.parse(fs.readFileSync(path.join(updater.directory, "gui-runtime.json"), "utf8")).pid) || 0; } catch {}
+  const handoff = await launchRestartTask({home,directory:updater.directory,workerPid:process.pid,uiPid:uiPid===process.pid?0:uiPid,closeUi:true,waitForWorkerExit:true,installer:activated.installer,installerSha256:activated.installerSha256});
   return {
     ...ready,
+    restartScheduled: true,
+    ...handoff,
     afterFinish: () => {
-      const args = [
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        path.join(home, "restart-connector.ps1"),
-        "-WorkerPid",
-        String(process.pid),
-      ];
-      try {
-        const gui = JSON.parse(
-          fs.readFileSync(
-            path.join(updater.directory, "gui-runtime.json"),
-            "utf8",
-          ),
-        );
-        if (gui.pid && gui.pid !== process.pid)
-          args.push("-UiPid", String(gui.pid), "-CloseUi");
-      } catch {}
-      if (activated.installer)
-        args.push(
-          "-InstallerPath",
-          activated.installer,
-          "-InstallerSha256",
-          activated.installerSha256,
-        );
-      const guiEnvironment={...process.env};delete guiEnvironment.ELECTRON_RUN_AS_NODE;
-      const helper = spawn("powershell.exe", args, {
-        env:guiEnvironment,
-        detached: true,
-        windowsHide: true,
-        stdio: "ignore",
-      });
-      helper.unref();
       setTimeout(() => process.exit(0), 1000);
     },
   };
