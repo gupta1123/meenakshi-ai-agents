@@ -1,3 +1,4 @@
+import {selectedSupportCustomerGuids} from "@/lib/support-customer-scope";
 import { randomUUID } from "node:crypto";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { isUuid } from "@/lib/security";
@@ -181,18 +182,9 @@ export async function prepareSupportRequest(
     if (ce) throw ce;
     for (const c of customers ?? []) selected.add(c.id);
   }
-  const { data: customers, error: ce } = await db
-    .from("customers")
-    .select("id,tally_ledger_guid")
-    .eq("company_id", companyId)
-    .eq("is_available", true);
-  if (ce) throw ce;
-  const guids = new Set(
-    (customers ?? [])
-      .filter((c) => selected.has(c.id))
-      .map((c) => c.tally_ledger_guid),
-  );
   const partial = Boolean(customerId || groupId);
+  if(partial&&selected.size>250)throw new SupportError("Choose a smaller customer group (at most 250 ledgers) for a targeted calculation.");
+  const guids=await selectedSupportCustomerGuids(db,companyId,[...selected]);
   const synthetic: EvaluationRunRecord = {
     id: "support-preview",
     company_id: companyId,

@@ -58,7 +58,9 @@ export async function stageRemoteUpdate(config) {
           "-InstallerSha256",
           activated.installerSha256,
         );
+      const guiEnvironment={...process.env};delete guiEnvironment.ELECTRON_RUN_AS_NODE;
       const helper = spawn("powershell.exe", args, {
+        env:guiEnvironment,
         detached: true,
         windowsHide: true,
         stdio: "ignore",

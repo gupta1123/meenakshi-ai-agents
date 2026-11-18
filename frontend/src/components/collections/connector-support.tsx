@@ -205,7 +205,7 @@ export function ConnectorSupportPanel({
         .then((r) => {
           if (disposed) return;
           setCustomers(r.masters.customers);
-          if (!search) setGroups(r.masters.customerGroups);
+          setGroups(r.masters.customerGroups);
         })
         .catch(() => {});
     }, 350);
@@ -395,11 +395,11 @@ export function ConnectorSupportPanel({
         {!maintenance && (
           <>
             <label>
-              Find customer
+              Find customer or group
               <input
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="Type a ledger name"
+                placeholder="Type a ledger or group name"
               />
             </label>
             <label>

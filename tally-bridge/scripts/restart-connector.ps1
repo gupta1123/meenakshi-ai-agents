@@ -24,4 +24,4 @@ if ($InstallerPath.Trim()) {
  if ($result.ExitCode -ne 0) { throw 'The runtime update did not complete.' }
 }
 if ($task) { Start-ScheduledTask -TaskName $taskName }
-if ($reopenUi) { Start-Process -FilePath $exe }
+if ($reopenUi) { Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue; Start-Process -FilePath $exe }

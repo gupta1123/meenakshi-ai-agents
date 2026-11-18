@@ -121,7 +121,7 @@ export class ApplicationUpdater {
         message: "Your connector is up to date.",
         version: this.version,
       });
-      return { available: false, version: this.version };
+      return { available: false, state:"current", message:"Your connector is up to date.", version: this.version };
     }
     const sameRuntime = this.runtimeMajor === manifest.runtimeMajor;
     if (!sameRuntime && !manifest.installer)
