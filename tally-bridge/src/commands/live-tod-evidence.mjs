@@ -3,6 +3,7 @@ import Decimal from "decimal.js";
 
 import { syncVouchers } from "./sync-vouchers.mjs";
 import { sourceSalesLedgerName } from "./voucher-ledgers.mjs";
+import { allocationCustomer, creditNoteEvidence, customerForVoucher, invoiceMatcher, matchCreditNotes } from "./credit-note-matching.mjs";
 
 const MAX_CHUNKS = 60;
 const MAX_MATCHING_VOUCHERS = 50_000;
@@ -63,41 +64,34 @@ function applyContribution({ aggregate, voucher, voucherTaxableValue, voucherTon
   aggregate.contributions.push({ tallyGuid: voucher.guid, voucherNumber: voucher.voucherNumber || null, voucherDate: voucher.voucherDate, voucherKind: voucher.voucherKind, tallyAlterId: voucher.alterId || null, linkedSalesVoucherGuid: voucher.linkedSalesVoucherGuid || null, sourceSalesLedgerName: sourceSalesLedgerName(voucher), taxableValueContribution: voucherTaxableValue.toFixed(), tonneContribution: voucherTonnes.toFixed() });
 }
 
-function byReference(allocations) {
-  const map = new Map();
-  for (const allocation of allocations) {
-    for (const key of [allocation.targetVoucherGuid, allocation.billReference].map(normalized).filter(Boolean)) {
-      const list = map.get(key) ?? [];
-      list.push(allocation);
-      map.set(key, list);
-    }
-  }
-  return map;
-}
-
 /**
  * Checks each period Sales invoice against its receipts; only invoices paid in full (GST-inclusive, ₹1 tolerance) by the due date count.
  * Credit Notes reduce what must be paid: our Cash Discount notes (by narration), and any other Credit Note
  * set against the bill in Tally (for example a manual discount note), for the amount set against it.
  */
-function checkPayments(pendingSales, allocations, paymentCheck, cdCreditByInvoice = new Map(), creditNoteAllocations = []) {
-  const paymentsByReference = byReference(allocations);
-  const creditNotesByReference = byReference(creditNoteAllocations);
+function checkPayments(pendingSales, allocations, paymentCheck, notes, customers) {
+  const invoices = pendingSales.map(({ voucher, aggregate }) => ({ tallyGuid: voucher.guid, voucherNumber: voucher.voucherNumber, voucherDate: voucher.voucherDate, customerId: aggregate.customerId, billReferences: (voucher.billAllocations ?? []).filter((allocation) => allocation.allocationType === "new_ref" && allocationCustomer(allocation, voucher, customers)?.customerId === aggregate.customerId).map((allocation) => allocation.billReference) }));
+  const matchInvoice = invoiceMatcher(invoices);
+  const notesByInvoice = matchCreditNotes(invoices, notes, customers);
+  const paymentsByInvoice = new Map();
+  for (const allocation of allocations) {
+    const matches = matchInvoice(allocation, { customerId: allocation.customerId });
+    if (matches.length !== 1) continue;
+    const key = matches[0].tallyGuid;
+    paymentsByInvoice.set(key, [...(paymentsByInvoice.get(key) ?? []), allocation]);
+  }
   const checks = [];
   for (const entry of pendingSales) {
     const { voucher } = entry;
-    const billReferences = (voucher.billAllocations ?? []).filter((allocation) => allocation.allocationType === "new_ref").map((allocation) => allocation.billReference).filter(Boolean);
-    const payments = [...new Map([voucher.guid, voucher.voucherNumber, ...billReferences]
-      .flatMap((reference) => paymentsByReference.get(normalized(reference)) ?? [])
-      .map((payment) => [`${payment.receiptGuid}:${payment.billReference}:${payment.allocatedAmount}`, payment])).values()]
+    const payments = [...new Map((paymentsByInvoice.get(voucher.guid) ?? [])
+      .map((payment) => [payment.allocationKey || `${payment.receiptGuid}:${payment.billReference}:${payment.allocatedAmount}`, payment])).values()]
       .sort((left, right) => left.receiptDate.localeCompare(right.receiptDate));
     // A discounted payment plus its Cash Discount Credit Note settles the
     // invoice (docs/CD_LOGIC.md §8): the Credit Note reduces what must be paid.
-    const cashDiscountCredit = voucher.voucherNumber ? (cdCreditByInvoice.get(`${normalized(voucher.partyLedgerName)}|${voucher.voucherNumber}`) ?? new Decimal(0)) : new Decimal(0);
-    const creditNotes = [...new Map([voucher.guid, voucher.voucherNumber, ...billReferences]
-      .flatMap((reference) => creditNotesByReference.get(normalized(reference)) ?? [])
-      .map((note) => [`${note.receiptGuid}:${note.billReference}:${note.allocatedAmount}`, note])).values()];
-    const otherCredit = creditNotes.reduce((total, note) => total.plus(new Decimal(note.allocatedAmount || 0).abs()), new Decimal(0));
+    const creditNotes = (notesByInvoice.get(voucher.guid) ?? []).filter((note) => note.purpose !== "sales_return" && new Decimal(note.amount).gt(0));
+    const cashDiscountCredit = creditNotes.filter((note) => note.purpose === "cash_discount").reduce((total, note) => total.plus(note.amount), new Decimal(0));
+    const otherNotes = creditNotes.filter((note) => note.purpose !== "cash_discount");
+    const otherCredit = otherNotes.reduce((total, note) => total.plus(note.amount), new Decimal(0));
     const invoiceAmount = new Decimal(voucher.grossAmount || 0).abs().minus(cashDiscountCredit).minus(otherCredit);
     const { nominalDueDate, dueDate, shiftedFor } = todPaymentDueDate(voucher.voucherDate, paymentCheck);
     let paidTotal = new Decimal(0);
@@ -107,10 +101,16 @@ function checkPayments(pendingSales, allocations, paymentCheck, cdCreditByInvoic
       const amount = new Decimal(payment.allocatedAmount || 0).abs();
       paidTotal = paidTotal.plus(amount);
       if (payment.receiptDate <= dueDate) paidByDueDate = paidByDueDate.plus(amount);
-      if (!paidInFullOn && paidTotal.gte(invoiceAmount.minus(PAYMENT_TOLERANCE))) paidInFullOn = payment.receiptDate;
     }
-    // Settled by Credit Notes alone.
-    if (!paidInFullOn && creditNotes.length && invoiceAmount.lte(PAYMENT_TOLERANCE)) paidInFullOn = creditNotes.map((note) => note.receiptDate).sort().at(-1);
+    // An earned CD may be booked later; other adjustments settle on their own date.
+    const settlementTarget = new Decimal(voucher.grossAmount || 0).abs().minus(cashDiscountCredit);
+    let settled = new Decimal(0);
+    const events = [...payments.map((payment) => ({ date: payment.receiptDate, amount: payment.allocatedAmount })), ...otherNotes.map((note) => ({ date: note.voucherDate, amount: note.amount }))].sort((a, b) => a.date.localeCompare(b.date));
+    for (const event of events) {
+      settled = settled.plus(new Decimal(event.amount).abs());
+      if (!paidInFullOn && settled.gte(settlementTarget.minus(PAYMENT_TOLERANCE))) paidInFullOn = event.date;
+    }
+    if (!paidInFullOn && creditNotes.length && settlementTarget.lte(PAYMENT_TOLERANCE)) paidInFullOn = creditNotes.map((note) => note.voucherDate).sort().at(-1);
     const counted = Boolean(paidInFullOn && paidInFullOn <= dueDate);
     const reason = counted ? "paid_in_full_on_time" : paidInFullOn ? "paid_after_due_date" : paidTotal.gt(0) ? "partly_paid" : "not_paid";
     checks.push({
@@ -129,7 +129,7 @@ function checkPayments(pendingSales, allocations, paymentCheck, cdCreditByInvoic
       paidByDueDate: paidByDueDate.toFixed(),
       paidTotal: paidTotal.toFixed(),
       payments: payments.map((payment) => ({ receiptNumber: payment.receiptNumber, receiptDate: payment.receiptDate, amount: new Decimal(payment.allocatedAmount || 0).abs().toFixed() })),
-      ...(creditNotes.length ? { creditNotes: creditNotes.map((note) => ({ creditNoteNumber: note.receiptNumber, creditNoteDate: note.receiptDate, amount: new Decimal(note.allocatedAmount || 0).abs().toFixed() })) } : {}),
+      ...(creditNotes.length ? { creditNotes: creditNotes.map((note) => ({ creditNoteNumber: note.voucherNumber, creditNoteDate: note.voucherDate, amount: note.amount })) } : {}),
       tonnes: entry.voucherTonnes.toFixed(),
       taxableValue: entry.voucherTaxableValue.toFixed(),
       counted,
@@ -146,7 +146,7 @@ export async function fetchLiveTodEvidence(command, context) {
   const eligibleGuids = new Set((scope.eligibleStockItemGuids ?? []).map(normalized).filter(Boolean));
   const eligibleNames = new Set((scope.eligibleStockItemNames ?? []).map(normalized).filter(Boolean));
   const conversions = new Map((scope.unitConversions ?? []).map((item) => [normalized(item?.uomCode), new Decimal(String(item?.tonnesPerUnit ?? "0"))]));
-  const requestedCustomers = Array.isArray(scope.customers) ? scope.customers : [{ customerId: scope.customerId, ledgerName: scope.customerLedgerName }];
+  const requestedCustomers = Array.isArray(scope.customers) ? scope.customers : [{ customerId: scope.customerId, tallyLedgerGuid: scope.customerLedgerGuid, ledgerName: scope.customerLedgerName }];
   const aggregates = new Map(requestedCustomers.filter((item) => item?.customerId && item?.ledgerName).map((item) => [normalized(item.ledgerName), emptyAggregate(item.customerId, item.ledgerName)]));
   if (!scope.dateFrom || !scope.dateTo || !aggregates.size) throw new Error("Live Turnover Discount evidence requires eligible customers and a bounded date range.");
   if (!eligibleGuids.size && !eligibleNames.size) throw new Error("The active Turnover Discount rule has no eligible Tally products.");
@@ -162,9 +162,7 @@ export async function fetchLiveTodEvidence(command, context) {
   const allocations = [];
   // Cash Discount Credit Notes by "<customer>|<invoice number>", read from our
   // narration "Being Cash Discount allowed against Inv No. <n> dt. …".
-  const cdCreditByInvoice = new Map();
-  // Other Credit Notes' "Agst Ref" allocations, which settle the bill they are set against.
-  const creditNoteAllocations = [];
+  const creditNotes = [];
   while (cursor) {
     await context.betweenWindows?.();
     if (context.isCancelled?.()) throw new Error("This Turnover Discount check was stopped.");
@@ -176,23 +174,17 @@ export async function fetchLiveTodEvidence(command, context) {
     for (const voucher of result.vouchers) {
       if (paymentCheck && ["receipt", "payment"].includes(voucher.voucherKind) && voucher.status === "posted") {
         for (const allocation of voucher.billAllocations ?? []) {
-          if (allocation.allocationType === "agst_ref") allocations.push({ receiptGuid: voucher.guid, receiptNumber: voucher.voucherNumber || null, receiptDate: voucher.voucherDate, billReference: allocation.billReference || null, targetVoucherGuid: allocation.targetVoucherGuid || null, allocatedAmount: allocation.allocatedAmount });
+          const owner = allocationCustomer(allocation, voucher, requestedCustomers);
+          if (allocation.allocationType === "agst_ref" && owner) allocations.push({ customerId: owner.customerId, allocationKey: allocation.allocationKey, receiptGuid: voucher.guid, receiptNumber: voucher.voucherNumber || null, receiptDate: voucher.voucherDate, billReference: allocation.billReference || null, targetVoucherGuid: allocation.targetVoucherGuid || null, targetVoucherNumber: allocation.targetVoucherNumber || null, allocatedAmount: allocation.allocatedAmount });
         }
       }
       if (paymentCheck && voucher.voucherKind === "credit_note" && voucher.status === "posted") {
-        const invoiceNumber = /Cash Discount allowed against Inv No\. (\S+) /i.exec(voucher.narration ?? "")?.[1];
-        if (invoiceNumber) {
-          const key = `${normalized(voucher.partyLedgerName)}|${invoiceNumber}`;
-          cdCreditByInvoice.set(key, (cdCreditByInvoice.get(key) ?? new Decimal(0)).plus(new Decimal(voucher.grossAmount || 0).abs()));
-        } else {
-          for (const allocation of voucher.billAllocations ?? []) {
-            if (allocation.allocationType === "agst_ref") creditNoteAllocations.push({ receiptGuid: voucher.guid, receiptNumber: voucher.voucherNumber || null, receiptDate: voucher.voucherDate, billReference: allocation.billReference || null, targetVoucherGuid: allocation.targetVoucherGuid || null, allocatedAmount: allocation.allocatedAmount });
-          }
-        }
+        creditNotes.push(creditNoteEvidence(voucher));
       }
       // Vouchers after the period are read only for their receipts and Cash Discount Credit Notes.
       if (voucher.voucherDate > scope.dateTo) continue;
-      const aggregate = aggregates.get(normalized(voucher.partyLedgerName));
+      const customer = customerForVoucher(voucher, requestedCustomers);
+      const aggregate = customer ? aggregates.get(normalized(customer.ledgerName)) : null;
       const sign = contributionSign(voucher);
       if (!aggregate || !sign || voucher.status !== "posted") continue;
       let voucherTaxableValue = new Decimal(0);
@@ -222,7 +214,7 @@ export async function fetchLiveTodEvidence(command, context) {
     }
     cursor = result.cursorTo;
   }
-  const paymentChecks = paymentCheck ? checkPayments(pendingSales, allocations, paymentCheck, cdCreditByInvoice, creditNoteAllocations) : null;
+  const paymentChecks = paymentCheck ? checkPayments(pendingSales, allocations, paymentCheck, creditNotes, requestedCustomers) : null;
 
   const customerAggregates = [...aggregates.values()].map((aggregate) => {
     aggregate.contributions.sort((left, right) => `${left.voucherDate}:${left.tallyGuid}`.localeCompare(`${right.voucherDate}:${right.tallyGuid}`));

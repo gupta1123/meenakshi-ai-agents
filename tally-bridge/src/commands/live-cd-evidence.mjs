@@ -4,6 +4,7 @@ import Decimal from "decimal.js";
 import { syncVouchers } from "./sync-vouchers.mjs";
 import { buildCollectionExportXml, extractBlocks, getAttribute, getTagText, postTallyXml } from "../tally/xml.mjs";
 import { sourceSalesLedgerName } from "./voucher-ledgers.mjs";
+import { CREDIT_NOTE_MATCHING_VERSION, allocationCustomer, creditNoteEvidence, creditNotePurpose, customerForVoucher, invoiceMatcher, matchCreditNotes } from "./credit-note-matching.mjs";
 
 const MAX_CHUNKS = 400;
 const MAX_INVOICES = 25_000;
@@ -57,7 +58,7 @@ export function canonicalJson(value) {
 function selectedCustomers(scope, masterResult) {
   if (Array.isArray(scope.customers) && scope.customers.length) {
     return scope.customers
-      .map((customer) => ({ customerId: customer?.customerId, ledgerName: String(customer?.ledgerName ?? "").trim() }))
+      .map((customer) => ({ customerId: customer?.customerId, tallyLedgerGuid: customer?.tallyLedgerGuid || customer?.customerId, ledgerName: String(customer?.ledgerName ?? "").trim() }))
       .filter((customer) => customer.customerId && customer.ledgerName);
   }
   const masters = masterResult?.masters ?? {};
@@ -82,6 +83,7 @@ function selectedCustomers(scope, masterResult) {
   }
   return customers.filter(covered).map((customer) => ({
     customerId: customer.guid,
+    tallyLedgerGuid: customer.guid,
     ledgerName: customer.ledgerName,
   }));
 }
@@ -136,7 +138,7 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
     vouchersScanned += result.vouchers.length;
     context.onProgress?.({ done: chunks, total: Math.max(totalChunks, chunks), nextDate: result.cursorTo ?? null, vouchersScanned });
     for (const voucher of result.vouchers) {
-      const customer = customers.get(normalized(voucher.partyLedgerName));
+      const customer = customerForVoucher(voucher, eligibleCustomers);
       // Only invoices dated within the rule (up to its end date) are checked.
       const invoiceInRule = !scope.invoiceDateTo || String(voucher.voucherDate ?? "").slice(0, 10) <= scope.invoiceDateTo;
       if (customer && voucher.voucherKind === "sales" && voucher.status === "posted" && invoiceInRule) {
@@ -145,7 +147,7 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
         // without inventory valuation or stock-master dependencies.
         const grossAmount = new Decimal(voucher.grossAmount || 0).abs();
         const billReferences = voucher.billAllocations
-          .filter((allocation) => allocation.allocationType === "new_ref")
+          .filter((allocation) => allocation.allocationType === "new_ref" && allocationCustomer(allocation, voucher, eligibleCustomers)?.customerId === customer.customerId)
           .map((allocation) => allocation.billReference)
           .filter(Boolean);
         let eligibleTonnes = new Decimal(0);
@@ -171,19 +173,24 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
       // Tally can carry an against-reference settlement in either a Receipt
       // or Payment voucher (for example after a reversal/correction). Finora
       // reads both, so the direct path must do the same.
-      if (perMt && customer && voucher.voucherKind === "credit_note" && voucher.status === "posted") {
-        creditNotes.push({ tallyGuid: voucher.guid, voucherNumber: voucher.voucherNumber || null, voucherDate: voucher.voucherDate, customerLedgerName: customer.ledgerName, amount: new Decimal(voucher.grossAmount || 0).abs().toFixed(), narration: voucher.narration || "" });
+      if (perMt && ["credit_note", "sales_return"].includes(voucher.voucherKind) && voucher.status === "posted") {
+        creditNotes.push(creditNoteEvidence(voucher));
       }
       if (perMt && customer && voucher.status === "posted" && ON_ACCOUNT_KINDS.has(voucher.voucherKind)) {
         for (const allocation of voucher.billAllocations) {
           if (allocation.allocationType !== "on_account") continue;
+          if (perMt && voucher.voucherKind === "credit_note" && creditNotePurpose(voucher) !== "adjustment") continue;
+          if (allocationCustomer(allocation, voucher, eligibleCustomers)?.customerId !== customer.customerId) continue;
           const amount = new Decimal(allocation.allocatedAmount || 0).abs();
           const debit = String(allocation.sourcePayload?.rawAmount ?? "").trim().startsWith("-");
           onAccount.push({ customerId: customer.customerId, date: voucher.voucherDate, amount: (debit ? amount.neg() : amount).toFixed(), source: `${voucher.voucherTypeName || voucher.voucherKind} ${voucher.voucherNumber || ""}`.trim() });
         }
       }
       if (settlesBills(voucher) && voucher.status === "posted") {
-        for (const allocation of voucher.billAllocations) allocations.push({ receiptGuid: voucher.guid, receiptNumber: voucher.voucherNumber || null, receiptType: voucher.voucherTypeName || null, receiptDate: voucher.voucherDate, billReference: allocation.billReference || null, targetVoucherGuid: allocation.targetVoucherGuid || null, allocationType: allocation.allocationType, allocatedAmount: allocation.allocatedAmount });
+        for (const allocation of voucher.billAllocations) {
+          const owner = allocationCustomer(allocation, voucher, eligibleCustomers);
+          if (owner) allocations.push({ customerId: owner.customerId, allocationKey: allocation.allocationKey, receiptGuid: voucher.guid, receiptNumber: voucher.voucherNumber || null, receiptType: voucher.voucherTypeName || null, receiptDate: voucher.voucherDate, billReference: allocation.billReference || null, targetVoucherGuid: allocation.targetVoucherGuid || null, targetVoucherNumber: allocation.targetVoucherNumber || null, allocationType: allocation.allocationType, allocatedAmount: allocation.allocatedAmount });
+        }
       }
       if (customer && voucher.voucherKind === "debit_note") {
         const amount = new Decimal(voucher.grossAmount || 0).abs().toFixed();
@@ -205,22 +212,24 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
     cursor = result.cursorTo;
     persist(null);
   }
-  const paymentsByReference = new Map();
+  const paymentsByInvoice = new Map();
+  const matchInvoice = invoiceMatcher(invoices);
   for (const allocation of allocations) {
     if (allocation.allocationType !== "agst_ref") continue;
-    const keys = [allocation.targetVoucherGuid, allocation.billReference].map(normalized).filter(Boolean);
-    for (const key of keys) {
-      const payments = paymentsByReference.get(key) ?? [];
+    const matches = matchInvoice(allocation, { customerId: allocation.customerId });
+    if (matches.length === 1) for (const invoice of matches) {
+      const key = invoice.tallyGuid;
+      const payments = paymentsByInvoice.get(key) ?? [];
       payments.push(allocation);
-      paymentsByReference.set(key, payments);
+      paymentsByInvoice.set(key, payments);
     }
   }
+  const notesByInvoice = perMt ? matchCreditNotes(invoices, creditNotes, eligibleCustomers) : new Map();
   const invoiceResults = invoices.map((invoice) => ({
     ...invoice,
     payments: [...new Map(
-      [invoice.tallyGuid, invoice.voucherNumber, ...(invoice.billReferences ?? [])]
-        .flatMap((reference) => paymentsByReference.get(normalized(reference)) ?? [])
-        .map((payment) => [`${payment.receiptGuid}:${payment.billReference}:${payment.allocatedAmount}`, payment]),
+      (paymentsByInvoice.get(invoice.tallyGuid) ?? [])
+        .map((payment) => [payment.allocationKey || `${payment.receiptGuid}:${payment.billReference}:${payment.allocatedAmount}`, payment]),
     ).values()],
     debitNotes: debitNotes.filter((note) => {
       if (normalized(note.customerLedgerName) !== normalized(invoice.customerLedgerName)) return false;
@@ -229,10 +238,7 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
       return references.has(normalized(note.targetVoucherGuid)) || references.has(normalized(note.billReference)) || note.narration.includes(invoice.tallyGuid)
         || Boolean(invoice.voucherNumber && note.narration.includes(`Inv No. ${invoice.voucherNumber} `));
     }),
-    // Our CD Credit Note narration: "Being Cash Discount allowed against Inv No. <n> dt. …".
-    ...(perMt ? { creditNotes: creditNotes.filter((note) => normalized(note.customerLedgerName) === normalized(invoice.customerLedgerName)
-      && /cash discount/i.test(note.narration)
-      && Boolean(invoice.voucherNumber && note.narration.includes(`Inv No. ${invoice.voucherNumber} `))) } : {}),
+    ...(perMt ? { creditNotes: notesByInvoice.get(invoice.tallyGuid) ?? [] } : {}),
   }));
   // The ledger opening is the balance on the first day of the books (1 April),
   // so it only applies when the check starts then. Read it only for customers
@@ -251,5 +257,5 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
     }
   }
   const sourceFingerprint = createHash("sha256").update(canonicalJson(customerCredits.length ? { invoices: invoiceResults, customerCredits } : invoiceResults)).digest("hex");
-  return { mode: "live_cd_batch", evaluationRunId: command.payload.evaluationRunId ?? null, ruleVersionId: scope.ruleVersionId ?? null, dateFrom: scope.dateFrom, dateTo: scope.dateTo, chunks, vouchersScanned, invoices: invoiceResults, customerCredits, sourceFingerprint };
+  return { mode: "live_cd_batch", creditNoteMatchingVersion: CREDIT_NOTE_MATCHING_VERSION, evaluationRunId: command.payload.evaluationRunId ?? null, ruleVersionId: scope.ruleVersionId ?? null, dateFrom: scope.dateFrom, dateTo: scope.dateTo, chunks, vouchersScanned, invoices: invoiceResults, customerCredits, sourceFingerprint };
 }

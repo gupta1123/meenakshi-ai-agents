@@ -7,6 +7,7 @@ import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { readIdempotencyKey } from "@/lib/tally/contracts";
 import { retireObsoleteEvaluationReads } from "@/lib/evaluation/refresh-commands.mjs";
+import { CdEvidenceSafetyError, requireCurrentCdCheck } from "@/lib/evaluation/cd-credit-note-safety";
 
 type RouteContext = { params: Promise<{ companyId: string; candidateId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -26,6 +27,7 @@ export async function POST(request: Request, context: RouteContext) {
     const { company, userId } = access;
     await requirePostingEnabled(company.id);
     const db = createSupabaseAdminClient();
+    await requireCurrentCdCheck(db, company.id);
     await retireObsoleteEvaluationReads(db, { companyId: company.id });
     const { data, error } = await db.rpc("enqueue_meenakshi_cd_credit_note", {
       p_company_id: company.id, p_candidate_id: candidateId, p_actor_id: userId, p_idempotency_key: idempotencyKey,
@@ -38,7 +40,7 @@ export async function POST(request: Request, context: RouteContext) {
     });
     return jsonWithCors(request, { posting: data }, { status: 201 });
   } catch (error) {
-    if (error instanceof MeenakshiAccessError || error instanceof RulebookRequestError) return jsonWithCors(request, { error: error.message }, { status: error.status });
+    if (error instanceof MeenakshiAccessError || error instanceof RulebookRequestError || error instanceof CdEvidenceSafetyError) return jsonWithCors(request, { error: error.message }, { status: error.status });
     console.error("Could not queue the Cash Discount Credit Note:", error);
     return jsonWithCors(request, { error: "Could not queue the Credit Note." }, { status: 500 });
   }

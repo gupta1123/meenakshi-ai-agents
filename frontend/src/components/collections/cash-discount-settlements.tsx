@@ -23,6 +23,7 @@ import { Button, Dialog, Drawer, EmptyState, InlineMessage, Skeleton, StatusBadg
 import { accessToken } from "./workspace";
 import { CdInvoicePanel } from "./cd-invoice-panel";
 import { GuidedVersionSummary } from "./guided-version-summary";
+import { canCreateCashDiscountNote } from "@/lib/cd-credit-note-state.mjs";
 import type { Calendar, ReferenceData, VersionDetail } from "./types";
 
 const NO_GROUP = "__no_group__";
@@ -33,6 +34,8 @@ export type CdSettlementRow = {
   segmentLabel: string; windowWorkingDays: number; windowDeadline: string; windowOpen: boolean;
   invoiceAmount: string; eligibleTonnes: string; amountPerTonne: string; discountAmount: string; discountedTarget: string;
   paidByDeadline: string; paidToDate: string; alreadyCredited: string; creditAmount: string;
+  invoiceAmountDue?: string; adjustmentByDeadline?: string; creditNoteReviewRequired?: boolean;
+  creditNoteReferences?: Array<{ tallyGuid: string; voucherNumber: string | null; voucherDate: string; amount: string; noteAmount?: string; purpose?: string; matchedBy?: string; reviewReason?: string | null }>;
   category: Category; status: string; gstLastDate: string; gstDeadlinePassed: boolean;
   paymentCount: number; latestPaymentDate: string | null; reviewMessage: string | null;
   customerGroup?: string | null;
@@ -41,6 +44,7 @@ export type CdSettlementRow = {
 };
 type CreditNote = { id: string; status: string; amount: string; verified_voucher_number: string | null; verified_at?: string | null; failure_reason: string | null; progress?: { stage: "queued" | "creating" | "verifying"; label: string }; whatsapp?: { status: string; sentAt: string | null } | null };
 type SettlementData = {
+  requiresRecheck?: boolean;
   run: { id: string; ruleVersionId?: string | null; completedAt: string | null; periodStart: string | null; periodEnd: string | null } | null;
   results: CdSettlementRow[];
   candidates: Array<{ id: string; invoice_tally_guid: string; status: string; remaining_recovery: string }>;
@@ -293,7 +297,7 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
       group.billed += Number(row.invoiceAmount || 0);
       group.tonnes += Number(row.eligibleTonnes || 0);
       if (note?.status === "created_verified" || row.status === "credited") group.created += 1;
-      else if (candidate && ["action_required", "review_required"].includes(candidate.status) && !row.gstDeadlinePassed) { group.toCreate += 1; group.toCreateAmount += Number(row.creditAmount || 0); }
+      else if (canCreateCashDiscountNote(row, candidate, note, data?.requiresRecheck !== false)) { group.toCreate += 1; group.toCreateAmount += Number(row.creditAmount || 0); }
       byGroup.set(key, group);
     }
     return [...byGroup.values()]
@@ -306,24 +310,24 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
   const scopedRows = useMemo(() => groupFilter === "all" ? rows : rows.filter((row) => (row.customerGroup || NO_GROUP) === groupFilter), [rows, groupFilter]);
   const counts = useMemo(() => Object.fromEntries(TABS.map((item) => [item.key, scopedRows.filter((row) => item.key === "all" ? true : item.key === "other" ? !["full_payment", "over_ninety_percent", "discounted_payment"].includes(row.category) : row.category === item.key).length])), [scopedRows]);
   // Still to create: has a Credit Note amount, not yet credited, GST deadline not passed.
-  const pendingAmount = (key: Tab) => scopedRows.filter((row) => (key === "all" || row.category === key) && Number(row.creditAmount) > 0 && row.status !== "credited" && data?.creditNotes[row.invoiceGuid]?.status !== "created_verified" && !row.gstDeadlinePassed).reduce((total, row) => total + Number(row.creditAmount || 0), 0);
+  const pendingAmount = (key: Tab) => scopedRows.filter((row) => (key === "all" || row.category === key) && canCreateCashDiscountNote(row, candidateByInvoice.get(row.invoiceGuid), data?.creditNotes[row.invoiceGuid], data?.requiresRecheck !== false)).reduce((total, row) => total + Number(row.creditAmount || 0), 0);
   const tabAmount = (key: Tab) => scopedRows.filter((row) => key === "all" || row.category === key).reduce((total, row) => total + Number(row.creditAmount || 0), 0);
   const activeTab = TABS.find((item) => item.key === tab)!;
   const creatableCandidate = (row: CdSettlementRow) => {
     const candidate = candidateByInvoice.get(row.invoiceGuid);
     const note = data?.creditNotes[row.invoiceGuid];
-    return isAdministrator && postingEnabled && candidate && ["action_required", "review_required"].includes(candidate.status) && (!note || ["failed", "cancelled"].includes(note.status)) ? candidate : null;
+    return isAdministrator && postingEnabled && canCreateCashDiscountNote(row, candidate, note, data?.requiresRecheck !== false) ? candidate : null;
   };
   // Selection is offered once inside a group (or a search), never on the group cards.
   const pageRows = visible.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
   const selectablePageIds = showCards ? [] : pageRows.map((row) => creatableCandidate(row)?.id).filter((id): id is string => Boolean(id));
   const allPageSelected = selectablePageIds.length > 0 && selectablePageIds.slice(0, 25).every((id) => selectedIds.includes(id));
-  const selectedRows = rows.filter((row) => { const id = candidateByInvoice.get(row.invoiceGuid)?.id; return Boolean(id && selectedIds.includes(id)); });
+  const selectedRows = rows.filter((row) => { const candidate = creatableCandidate(row); return Boolean(candidate && selectedIds.includes(candidate.id)); });
   const selectedTotal = selectedRows.reduce((total, row) => total + Number(row.creditAmount || 0), 0);
   const toggleSelected = (id: string) => setSelectedIds((current) => current.includes(id) ? current.filter((item) => item !== id) : current.length < 25 ? [...current, id] : current);
   const today = new Date().toISOString().slice(0, 10);
   const daysUntil = (date: string) => Math.round((new Date(`${date.slice(0, 10)}T00:00:00`).getTime() - new Date(`${today}T00:00:00`).getTime()) / 86_400_000);
-  const percentPaid = (row: CdSettlementRow) => Number(row.invoiceAmount) > 0 ? (Number(row.paidByDeadline) / Number(row.invoiceAmount)) * 100 : 0;
+  const percentPaid = (row: CdSettlementRow) => Number(row.invoiceAmountDue ?? row.invoiceAmount) > 0 ? (Number(row.paidByDeadline) / Number(row.invoiceAmountDue ?? row.invoiceAmount)) * 100 : 0;
 
   if (loading) return <DiscountLoading />;
 
@@ -331,6 +335,7 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
     {error && <InlineMessage tone="error">{error}</InlineMessage>}
     {serverCheck.error && <InlineMessage tone="error">{serverCheck.error}</InlineMessage>}
     {serverCheck.state?.message && <InlineMessage tone="info">{serverCheck.state.message}</InlineMessage>}
+    {data?.run && data.requiresRecheck !== false && <InlineMessage tone="info">This saved check needs to be refreshed before creating Credit Notes. Install connector 0.5.4 or newer on the Tally computer, then run Cash Discount again to check existing manual Credit Notes.</InlineMessage>}
     <WorkspacePageHeader title="Cash Discount" />
     <section className="tod-overview cd-overview" aria-label="Latest Cash Discount check">
       <div className="tod-overview-meta">
@@ -390,19 +395,19 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
         {pageRows.map((row) => {
           const note = data?.creditNotes[row.invoiceGuid];
           const candidate = candidateByInvoice.get(row.invoiceGuid);
-          const canCreate = isAdministrator && postingEnabled && candidate && ["action_required", "review_required"].includes(candidate.status) && (!note || ["failed", "cancelled"].includes(note.status));
+          const canCreate = Boolean(creatableCandidate(row));
           return <article key={row.invoiceGuid} className="cd-row-clickable" onClick={(event) => { if (!(event.target as HTMLElement).closest("button, input")) setOpenGuid(row.invoiceGuid); }}>
             <div className={selectablePageIds.length ? "cd-select-cell" : undefined}>{selectablePageIds.length > 0 && <span className="cd-row-check">{canCreate && <input type="checkbox" aria-label={`Select ${row.customerName} invoice ${row.invoiceNumber ?? ""}`} disabled={bulkCreating || (!selectedIds.includes(candidate!.id) && selectedIds.length >= 25)} checked={selectedIds.includes(candidate!.id)} onChange={() => toggleSelected(candidate!.id)} />}</span>}<strong>{row.customerName}</strong><small>Inv {row.invoiceNumber ?? "—"} · {shortDate(row.invoiceDate)} · {formatMoney(row.invoiceAmount)}</small>{((row.customerGroup && groupFilter === "all") || tab === "other" || tab === "all") && <span className="cd-row-tags">{row.customerGroup && groupFilter === "all" && <span className="cd-tag">{row.customerGroup}</span>}{(tab === "other" || tab === "all") && <span className={`cd-tag is-${row.category}`}>{CATEGORY_TAG[row.category] ?? row.category.replaceAll("_", " ")}</span>}</span>}</div>
             <div><strong>{row.windowWorkingDays} days</strong><small>due {shortDate(row.windowDeadline)}{row.windowOpen ? " · still open" : ""}</small></div>
             <div><strong>{formatMoney(row.paidByDeadline)} <span className="cd-percent">{percentPaid(row).toFixed(1)}%</span></strong>
-              <small>{row.category === "full_payment" ? "full bill, on time" : row.category === "discounted_payment" ? `target ${formatMoney(row.discountedTarget)}` : row.category === "over_ninety_percent" ? `short ${formatMoney(Number(row.invoiceAmount) - Number(row.paidByDeadline))}` : row.category === "awaiting_payment" ? `pay ${formatMoney(Math.max(0, Number(row.discountedTarget) - Number(row.paidByDeadline)))} by ${shortDate(row.windowDeadline)} for the discount` : row.paymentCount ? `${row.paymentCount} payment${row.paymentCount === 1 ? "" : "s"}` : "no payment"}{row.latestPaymentDate ? ` · last ${shortDate(row.latestPaymentDate)}` : ""}</small></div>
+              <small>{row.category === "full_payment" ? "amount due, on time" : row.category === "discounted_payment" ? `target ${formatMoney(row.discountedTarget)}` : row.category === "over_ninety_percent" ? `short ${formatMoney(Number(row.invoiceAmountDue ?? row.invoiceAmount) - Number(row.paidByDeadline))}` : row.category === "awaiting_payment" ? `pay ${formatMoney(Math.max(0, Number(row.discountedTarget) - Number(row.paidByDeadline)))} by ${shortDate(row.windowDeadline)} for the discount` : row.paymentCount ? `${row.paymentCount} payment${row.paymentCount === 1 ? "" : "s"}` : "no payment"}{row.latestPaymentDate ? ` · last ${shortDate(row.latestPaymentDate)}` : ""}</small></div>
             <div><strong>{formatMoney(row.discountAmount)}</strong><small>{formatTonnes(row.eligibleTonnes)} MT × ₹{Number(row.amountPerTonne).toLocaleString("en-IN")}/MT</small></div>
             <div className="cd-settlement-note">
               {note?.status === "created_verified" ? <StatusBadge status="created_verified">CN {note.verified_voucher_number ?? "created"}</StatusBadge>
                 : note && ["queued", "sending"].includes(note.status) ? <StatusBadge status={note.progress?.stage === "queued" || !note.progress ? "queued" : "posting"}>{note.progress?.label ?? "Waiting for Tally…"}</StatusBadge>
                 : row.status === "credited" ? <StatusBadge status="created_verified">Already credited</StatusBadge>
                 : canCreate ? <Button className="button-secondary" disabled={busyId === candidate!.id} onClick={() => void createCreditNote(row, candidate!.id)}>{busyId === candidate!.id ? "Queuing…" : `Create ₹${Number(row.creditAmount).toLocaleString("en-IN")}`}</Button>
-                : <small>{row.category === "full_payment" && !Number(row.creditAmount) ? "Run the check again" : ["full_payment", "discounted_payment", "over_ninety_percent"].includes(row.category) ? row.gstDeadlinePassed ? "GST deadline passed" : postingEnabled ? "Save the check first" : "Creation is off" : row.category === "awaiting_payment" ? "Window open" : row.category === "needs_review" ? row.reviewMessage ?? "Needs review" : "No discount"}</small>}
+                : <small>{data?.requiresRecheck !== false ? "Run the check again" : row.category === "full_payment" && !Number(row.creditAmount) ? "Run the check again" : ["full_payment", "discounted_payment", "over_ninety_percent"].includes(row.category) ? row.gstDeadlinePassed ? "GST deadline passed" : postingEnabled ? "Save the check first" : "Creation is off" : row.category === "awaiting_payment" ? "Window open" : row.category === "needs_review" ? row.reviewMessage ?? "Needs review" : "No discount"}</small>}
               {["full_payment", "discounted_payment", "over_ninety_percent"].includes(row.category) && note?.status !== "created_verified" && row.gstLastDate && (row.gstDeadlinePassed || daysUntil(row.gstLastDate) <= 30) && <small className="cd-gst-warning">{row.gstDeadlinePassed ? `GST deadline passed (${shortDate(row.gstLastDate)})` : `Create by ${shortDate(row.gstLastDate)} for GST`}</small>}
               {note?.status === "failed" && <small className="field-error">{/active Tally company does not match/i.test(note.failure_reason ?? "") ? `Tally had another company open. Open ${company.tally_company_name} in Tally, then create again.` : note.failure_reason ?? "Tally rejected it. Create again."}</small>}
             </div>
@@ -430,7 +435,7 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
       const openRow = openGuid ? rows.find((row) => row.invoiceGuid === openGuid) ?? null : null;
       const openNote = openRow ? data?.creditNotes[openRow.invoiceGuid] : undefined;
       const openCandidate = openRow ? candidateByInvoice.get(openRow.invoiceGuid) : undefined;
-      const openCanCreate = Boolean(isAdministrator && postingEnabled && openCandidate && ["action_required", "review_required"].includes(openCandidate.status) && (!openNote || ["failed", "cancelled"].includes(openNote.status)));
+      const openCanCreate = Boolean(openRow && creatableCandidate(openRow));
       return <CdInvoicePanel row={openRow} note={openNote} calendar={calendar} canCreate={openCanCreate} busy={Boolean(openCandidate && busyId === openCandidate.id)} companyName={company.tally_company_name} onCreate={() => { if (openRow && openCandidate) void createCreditNote(openRow, openCandidate.id); }} onClose={() => setOpenGuid(null)} />;
     })()}
     <Dialog open={bulkConfirmOpen} onClose={() => setBulkConfirmOpen(false)} title={`Create ${selectedRows.length} Credit Note${selectedRows.length === 1 ? "" : "s"}?`} description="Review the selected invoices before anything is queued for Tally.">

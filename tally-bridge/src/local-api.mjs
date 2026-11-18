@@ -107,7 +107,7 @@ export function startLocalApi(config) {
     const readStarted = performance.now();
     const isCancelled = () => item.cancelled;
     // Cash Discount saves its progress after every batch, so a connector crash or restart resumes instead of starting over.
-    const checkpoint = isCashDiscount ? createCheckpoint(canonicalJson({ company: activeCompany.guid || activeCompany.name, scope: body.voucherScope, evaluatedOn: body.evaluatedOn })) : null;
+    const checkpoint = isCashDiscount ? createCheckpoint(canonicalJson({ evidenceVersion: 1, company: activeCompany.guid || activeCompany.name, scope: body.voucherScope, evaluatedOn: body.evaluatedOn })) : null;
     item.checkpoint = checkpoint;
     const onResume = (info) => logLine("WARN", `${item.task} resumed after the connector stopped`, { job: item.id, ...info });
     const evidence = isCashDiscount

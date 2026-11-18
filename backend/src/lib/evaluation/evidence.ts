@@ -528,8 +528,8 @@ async function buildLiveTodVoucherScope(
     schemeType: "tod",
     evaluationRunId: run.id,
     ...(batchCustomers
-      ? { customers: batchCustomers.map((customer) => ({ customerId: customer.id, ledgerName: customer.ledgerName })) }
-      : { customerId: singleCustomer!.id, customerLedgerName: singleCustomer!.ledgerName }),
+      ? { customers: batchCustomers.map((customer) => ({ customerId: customer.id, tallyLedgerGuid: customer.tallyLedgerGuid, ledgerName: customer.ledgerName })) }
+      : { customerId: singleCustomer!.id, customerLedgerGuid: singleCustomer!.tallyLedgerGuid, customerLedgerName: singleCustomer!.ledgerName }),
     dateFrom: context.periodStart,
     dateTo: context.periodEnd,
     // TOD counts an invoice only when it is paid in full (GST-inclusive) within
@@ -563,7 +563,7 @@ export async function loadLiveTodLocalBootstrap(run: EvaluationRunRecord) {
       rule: group.rule,
       periodStart: group.periodStart,
       periodEnd: group.periodEnd,
-      customers: group.customers.map((customer) => ({ customerId: customer.id, ledgerName: customer.ledgerName })),
+      customers: group.customers.map((customer) => ({ customerId: customer.id, tallyLedgerGuid: customer.tallyLedgerGuid, ledgerName: customer.ledgerName })),
       voucherScope: await buildLiveTodVoucherScope(run, group),
     }))),
   };

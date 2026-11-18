@@ -4,6 +4,7 @@ import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/autho
 import { buildCheckJobInput, CheckJobRequestError } from "@/lib/check-jobs";
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { CdEvidenceSafetyError, requireCurrentCdConnector } from "@/lib/evaluation/cd-credit-note-safety";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -17,6 +18,8 @@ export async function POST(request: Request, context: RouteContext) {
     if (!isUuid(companyId)) return jsonWithCors(request, { error: "Invalid company id." }, { status: 400 });
     const access = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
     const input = buildCheckJobInput(await request.json().catch(() => null));
+    const calculationBody = input.request.body as { rule?: { cdDiscountBasis?: string } } | undefined;
+    if (input.kind === "cd" && calculationBody?.rule?.cdDiscountBasis === "amount_per_tonne") await requireCurrentCdConnector(createSupabaseAdminClient(), access.company.id);
     const { data, error } = await createSupabaseAdminClient().rpc("request_tally_check_job_v2", {
       p_organization_id: access.company.organization_id, p_company_id: access.company.id,
       p_kind: input.kind, p_scope_key: input.scopeKey, p_request: input.request, p_requested_by: access.userId,
@@ -32,7 +35,7 @@ export async function POST(request: Request, context: RouteContext) {
     });
     return jsonWithCors(request, result, { status: result.joined ? 200 : 201 });
   } catch (error) {
-    if (error instanceof MeenakshiAccessError || error instanceof CheckJobRequestError) return jsonWithCors(request, { error: error.message }, { status: error.status });
+    if (error instanceof MeenakshiAccessError || error instanceof CheckJobRequestError || error instanceof CdEvidenceSafetyError) return jsonWithCors(request, { error: error.message }, { status: error.status });
     console.error("Could not request check job:", error);
     return jsonWithCors(request, { error: "Could not start the check." }, { status: 500 });
   }

@@ -93,7 +93,12 @@ function parseInventoryLines(voucherXml) {
 }
 
 function parseBillAllocations(voucherXml, voucherGuid, voucherDate) {
-  return extractBlocks(voucherXml, "BILLALLOCATIONS.LIST").map((allocationXml, index) => {
+  const allEntries = extractBlocks(voucherXml, "ALLLEDGERENTRIES.LIST");
+  const entries = allEntries.length ? allEntries : extractBlocks(voucherXml, "LEDGERENTRIES.LIST");
+  const owned = entries.flatMap((entry, ledgerEntryIndex) => extractBlocks(entry, "BILLALLOCATIONS.LIST").map((allocationXml) => ({ allocationXml, ledgerEntryIndex, ledgerName: text(entry, "LEDGERNAME"), ledgerGuid: text(entry, "LEDGERGUID") })));
+  // Older exports sometimes put allocations directly under the voucher.
+  const allocations = owned.length ? owned : extractBlocks(voucherXml, "BILLALLOCATIONS.LIST").map((allocationXml) => ({ allocationXml }));
+  return allocations.map(({ allocationXml, ledgerName, ledgerGuid, ledgerEntryIndex }, index) => {
     const billReference = text(allocationXml, "NAME");
     const billType = text(allocationXml, "BILLTYPE");
     const allocatedAmount = decimalText(text(allocationXml, "AMOUNT"));
@@ -104,10 +109,15 @@ function parseBillAllocations(voucherXml, voucherGuid, voucherDate) {
       allocationDate: voucherDate,
       allocatedAmount: allocatedAmount.startsWith("-") ? allocatedAmount.slice(1) : allocatedAmount,
       targetVoucherGuid: text(allocationXml, "TARGETVOUCHERGUID") || text(allocationXml, "VOUCHERGUID"),
-      targetVoucherNumber: text(allocationXml, "VOUCHERNUMBER"),
+      // VOUCHERNUMBER on a bill allocation can inherit the source voucher's
+      // number. It must never be persisted as the target Sales invoice.
+      targetVoucherNumber: text(allocationXml, "TARGETVOUCHERNUMBER"),
+      ledgerName: ledgerName || null,
+      ledgerGuid: ledgerGuid || null,
+      ledgerEntryIndex: ledgerEntryIndex ?? null,
       sourcePayload: { billReference, billType, rawAmount: text(allocationXml, "AMOUNT") },
     };
-  }).filter((allocation) => allocation.billReference && allocation.allocatedAmount !== "0");
+  }).filter((allocation) => (allocation.billReference || allocation.targetVoucherGuid || allocation.allocationType === "on_account") && allocation.allocatedAmount !== "0");
 }
 
 function parseLedgerEntries(voucherXml) {
@@ -117,6 +127,7 @@ function parseLedgerEntries(voucherXml) {
     : extractBlocks(voucherXml, "LEDGERENTRIES.LIST");
   return entryBlocks.map((entryXml) => ({
     ledgerName: text(entryXml, "LEDGERNAME"),
+    ledgerGuid: text(entryXml, "LEDGERGUID"),
     amount: decimalText(text(entryXml, "AMOUNT")),
     isDeemedPositive: truthy(text(entryXml, "ISDEEMEDPOSITIVE")),
   })).filter((entry) => entry.ledgerName || entry.amount !== "0");

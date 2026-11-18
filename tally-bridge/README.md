@@ -4,6 +4,14 @@ This is the Windows-only local agent that talks to the Tally Prime HTTP/XML endp
 
 ## Server pilot (0.5.3)
 
+### Manual Credit Notes (0.5.4)
+
+Version 0.5.4 recognizes existing Cash Discount Credit Notes from their customer and invoice/bill allocations. It accepts manual wording and accounting notes without a party header. A note split across invoices uses each allocated amount once. On-account notes use an unambiguous full invoice reference; unresolved or partial notes require review and cannot create another Credit Note. Other adjustments remain separate from Cash Discount; sales returns require quantity review. CD and TOD share the matching code.
+
+Update the connector on the Tally computer using `MeenakshiTallyConnectorSetup-0.5.4.exe` under the same Windows account. Pairing and PC/server mode are preserved. Restart the connector (and the existing Windows background task if configured), confirm it is connected, then run a fresh CD check. The deployed app keeps older checks readable but blocks Credit Note creation until a check from the updated reader is saved. No database migration is needed for this update.
+
+For an isolated real-Tally check, keep **Solution Nyx** with GUID `6a1e6251-3050-4d46-8ccf-847e223ac92d` open locally and run `node scripts/verify-manual-credit-notes.mjs --seed`. This creates only dedicated test masters and three invoice/receipt/note sets. Running it again without `--seed` is read-only. `--runtime-source <packaged resources/app/src>` verifies the packaged reader against the same entries. The script refuses every other company and uses only `localhost:9000`.
+
 The hosted backend must have the server-job recovery migration before this version is used in server mode. Existing PC connectors can continue using the PC workflow.
 
 Version 0.5.3 adds a server status window with live background-process activity, Windows task state and startup-at-login status. Opening or closing this window does not start, stop or disconnect the background server. Status comes from the existing worker through a local named pipe; no browser API is enabled. Version 0.5.2 fixed Windows startup setup falsely reporting a failed mode change when using the bundled Electron runtime.

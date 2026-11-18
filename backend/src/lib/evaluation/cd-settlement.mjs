@@ -111,15 +111,20 @@ export function evaluateCashDiscountSettlements(rule, evaluatedOn, invoices, cus
       .sort((left, right) => left.receiptDate.localeCompare(right.receiptDate));
     const paidByPayments = payments.filter((payment) => payment.receiptDate <= deadline).reduce((total, payment) => total.plus(decimal(payment.allocatedAmount).abs()), decimal(0));
     const paidToDate = payments.filter((payment) => payment.receiptDate <= evaluatedOn).reduce((total, payment) => total.plus(decimal(payment.allocatedAmount).abs()), decimal(0));
-    const alreadyCredited = (invoice.creditNotes ?? []).reduce((total, note) => total.plus(decimal(note.amount).abs()), decimal(0));
+    const notes = (invoice.creditNotes ?? []).filter((note) => note.voucherDate <= evaluatedOn);
+    const cdNotes = notes.filter((note) => (!note.purpose || note.purpose === "cash_discount") && !note.reviewReason);
+    const alreadyCredited = cdNotes.reduce((total, note) => total.plus(decimal(note.amount).abs()), decimal(0));
+    const adjustments = notes.filter((note) => note.purpose === "adjustment" && !note.reviewReason);
+    const adjustmentByDeadline = adjustments.filter((note) => note.voucherDate <= deadline).reduce((total, note) => total.plus(decimal(note.amount).abs()), decimal(0));
+    const invoiceAmountDue = Decimal.max(invoiceAmount.minus(adjustmentByDeadline), 0);
     const windowOpen = evaluatedOn <= deadline;
-    const discountedTarget = invoiceAmount.minus(discount);
+    const discountedTarget = Decimal.max(invoiceAmountDue.minus(discount), 0);
 
     let category;
     if (missingUnits.length) category = "needs_review";
-    else if (paidByPayments.gte(invoiceAmount.minus(TOLERANCE))) category = "full_payment";
+    else if (paidByPayments.gte(invoiceAmountDue.minus(TOLERANCE))) category = "full_payment";
     else if (paidByPayments.minus(discountedTarget).abs().lte(TOLERANCE)) category = "discounted_payment";
-    else if (paidByPayments.gt(0) && invoiceAmount.minus(paidByPayments).lte(MAX_SHORT_FOR_REVIEW)) category = "over_ninety_percent";
+    else if (paidByPayments.gt(0) && invoiceAmountDue.minus(paidByPayments).lte(MAX_SHORT_FOR_REVIEW)) category = "over_ninety_percent";
     else category = windowOpen ? "awaiting_payment" : "not_eligible";
 
     // Missed on payments alone and the window has closed: use free on-account credit.
@@ -131,7 +136,7 @@ export function evaluateCashDiscountSettlements(rule, evaluatedOn, invoices, cus
       if (free.gt(0) && neededForDiscount.gt(0) && free.gte(neededForDiscount.minus(TOLERANCE))) {
         creditUsed = Decimal.min(free, neededForDiscount);
         category = "discounted_payment";
-      } else if (free.gt(0) && invoiceAmount.minus(paidByPayments.plus(free)).lte(MAX_SHORT_FOR_REVIEW)) {
+      } else if (free.gt(0) && invoiceAmountDue.minus(paidByPayments.plus(free)).lte(MAX_SHORT_FOR_REVIEW)) {
         creditUsed = free;
         category = "over_ninety_percent";
       }
@@ -139,19 +144,24 @@ export function evaluateCashDiscountSettlements(rule, evaluatedOn, invoices, cus
     }
     const paidByDeadline = paidByPayments.plus(creditUsed);
 
-    const short = Decimal.max(invoiceAmount.minus(paidByDeadline), 0);
+    const short = Decimal.max(invoiceAmountDue.minus(paidByDeadline), 0);
     // Paying the full bill on time still earns the discount; the customer just
     // did not deduct it, so the Credit Note leaves a credit on their ledger.
     const creditAmount = category === "discounted_payment" || category === "full_payment" ? discount
       : category === "over_ninety_percent" ? Decimal.min(short, discount)
       : decimal(0);
     const gstLastDate = gstCreditNoteLastDate(invoice.voucherDate);
-    const credited = alreadyCredited.gt(0);
-    const status = credited ? "credited"
+    const mismatchedCredit = alreadyCredited.gt(0) && alreadyCredited.minus(discount).abs().gt(TOLERANCE);
+    const creditNoteReviewRequired = mismatchedCredit || notes.some((note) => note.reviewReason || ["unclear", "sales_return"].includes(note.purpose)) || (adjustments.length > 0 && invoiceAmountDue.lte(0));
+    const credited = alreadyCredited.gt(0) && !creditNoteReviewRequired;
+    const status = creditNoteReviewRequired ? "credit_note_review" : credited ? "credited"
       : category === "discounted_payment" || category === "full_payment" ? "ready"
       : category === "over_ninety_percent" ? "review"
       : category;
-    const reviewMessage = category === "needs_review"
+    const reviewMessage = creditNoteReviewRequired
+      ? mismatchedCredit ? `Existing Cash Discount is ${money(alreadyCredited)}; the calculated discount is ${money(discount)}. Review the existing Credit Note before any further credit.`
+        : notes.find((note) => note.reviewReason)?.reviewReason ?? "Credit Notes cover the invoice amount. Review the adjustment before giving Cash Discount."
+      : category === "needs_review"
       ? `MT could not be worked out for unit${missingUnits.length === 1 ? "" : "s"} ${missingUnits.join(", ")}. Add the MT conversion to the rule.`
       : creditUsed.gt(0) ? `Includes ₹${money(creditUsed)} of the customer's on-account credit (not set against any bill in Tally).`
       : null;
@@ -169,6 +179,8 @@ export function evaluateCashDiscountSettlements(rule, evaluatedOn, invoices, cus
       windowDeadline: deadline,
       windowOpen,
       invoiceAmount: money(invoiceAmount),
+      invoiceAmountDue: money(invoiceAmountDue),
+      adjustmentByDeadline: money(adjustmentByDeadline),
       eligibleTonnes: tonnes.toDecimalPlaces(6).toFixed(),
       amountPerTonne: money(segment.amountPerTonne),
       discountAmount: money(discount),
@@ -178,14 +190,15 @@ export function evaluateCashDiscountSettlements(rule, evaluatedOn, invoices, cus
       paidToDate: money(paidToDate),
       alreadyCredited: money(alreadyCredited),
       creditAmount: money(creditAmount),
-      category,
+      category: creditNoteReviewRequired ? "needs_review" : category,
       status,
+      creditNoteReviewRequired,
       gstLastDate,
       gstDeadlinePassed: evaluatedOn > gstLastDate,
       paymentCount: payments.length,
       latestPaymentDate: payments.at(-1)?.receiptDate ?? null,
       reviewMessage,
-      creditNoteReferences: (invoice.creditNotes ?? []).map((note) => ({ tallyGuid: note.tallyGuid, voucherNumber: note.voucherNumber, voucherDate: note.voucherDate, amount: money(decimal(note.amount).abs()) })),
+      creditNoteReferences: notes.map((note) => ({ tallyGuid: note.tallyGuid, voucherNumber: note.voucherNumber, voucherDate: note.voucherDate, amount: money(decimal(note.amount).abs()), noteAmount: money(decimal(note.noteAmount ?? note.amount).abs()), purpose: note.purpose ?? "cash_discount", matchedBy: note.matchedBy ?? "narration", reviewReason: note.reviewReason ?? null })),
       // Shown in the invoice side panel: each payment and whether it counted.
       payments: payments.map((payment) => ({
         voucherNumber: payment.receiptNumber ?? null,
@@ -198,7 +211,7 @@ export function evaluateCashDiscountSettlements(rule, evaluatedOn, invoices, cus
     };
     results.push(row);
     order.set(row, index);
-    if (!credited && creditAmount.gt(0) && !row.gstDeadlinePassed) {
+    if (!alreadyCredited.gt(0) && !creditNoteReviewRequired && creditAmount.gt(0) && !row.gstDeadlinePassed) {
       const candidate = { ...row, status: category === "over_ninety_percent" ? "review_required" : "action_required" };
       candidates.push(candidate);
       order.set(candidate, index);

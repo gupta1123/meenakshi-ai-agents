@@ -6,6 +6,7 @@ import { RulebookRequestError } from "@/lib/rulebook/shared";
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { retireObsoleteEvaluationReads } from "@/lib/evaluation/refresh-commands.mjs";
+import { CdEvidenceSafetyError, requireCurrentCdCheck } from "@/lib/evaluation/cd-credit-note-safety";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -29,6 +30,7 @@ export async function POST(request: Request, context: RouteContext) {
     if (!candidateIds.length) return jsonWithCors(request, { error: "Select at least one invoice." }, { status: 400 });
     if (candidateIds.length > MAX_SELECTED) return jsonWithCors(request, { error: `Select up to ${MAX_SELECTED} invoices at a time.` }, { status: 400 });
     const db = createSupabaseAdminClient();
+    await requireCurrentCdCheck(db, company.id);
     await retireObsoleteEvaluationReads(db, { companyId: company.id });
     const batch = crypto.randomUUID();
     let queued = 0;
@@ -48,7 +50,7 @@ export async function POST(request: Request, context: RouteContext) {
     const message = queued ? `${queued} Credit Note${queued === 1 ? " is" : "s are"} queued for Tally.` : "No Credit Notes were queued.";
     return jsonWithCors(request, { queued, skipped: skipped.length, skippedReasons: skipped, message }, { status: queued ? 201 : 409 });
   } catch (error) {
-    if (error instanceof MeenakshiAccessError || error instanceof RulebookRequestError) return jsonWithCors(request, { error: error.message }, { status: error.status });
+    if (error instanceof MeenakshiAccessError || error instanceof RulebookRequestError || error instanceof CdEvidenceSafetyError) return jsonWithCors(request, { error: error.message }, { status: error.status });
     console.error("Could not queue Cash Discount Credit Notes:", error);
     return jsonWithCors(request, { error: "Could not queue the selected Credit Notes." }, { status: 500 });
   }

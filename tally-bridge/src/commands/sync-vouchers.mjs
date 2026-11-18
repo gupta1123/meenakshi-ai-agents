@@ -3,7 +3,8 @@ import { parseVouchers } from "../tally/vouchers.mjs";
 
 const VOUCHER_FETCH_FIELDS = [
   "Date,EffectiveDate,VoucherTypeName,VoucherType,VoucherTypeGUID,VoucherNumber,GUID,MasterID,AlterID,IsCancelled,IsOptional,IsReversed,PartyLedgerName,PartyLedgerGUID,LinkedSalesVoucherGUID,VoucherAmount,Amount,Narration",
-  "AllLedgerEntries.LedgerName,AllLedgerEntries.Amount,AllLedgerEntries.IsDeemedPositive,AllLedgerEntries.BillAllocations.Name,AllLedgerEntries.BillAllocations.BillType,AllLedgerEntries.BillAllocations.Amount,AllLedgerEntries.BillAllocations.TargetVoucherGUID,AllLedgerEntries.BillAllocations.VoucherNumber",
+  "AllLedgerEntries.LedgerName,AllLedgerEntries.LedgerGUID,AllLedgerEntries.Amount,AllLedgerEntries.IsDeemedPositive,AllLedgerEntries.BillAllocations.Name,AllLedgerEntries.BillAllocations.BillType,AllLedgerEntries.BillAllocations.Amount,AllLedgerEntries.BillAllocations.TargetVoucherGUID,AllLedgerEntries.BillAllocations.VoucherNumber",
+  "LedgerEntries.LedgerName,LedgerEntries.LedgerGUID,LedgerEntries.Amount,LedgerEntries.BillAllocations.Name,LedgerEntries.BillAllocations.BillType,LedgerEntries.BillAllocations.Amount,LedgerEntries.BillAllocations.TargetVoucherGUID,LedgerEntries.BillAllocations.VoucherNumber",
   "AllInventoryEntries.StockItemName,AllInventoryEntries.StockItemGUID,AllInventoryEntries.StockGroup,AllInventoryEntries.StockGroupGUID,AllInventoryEntries.ParentGUID,AllInventoryEntries.ActualQty,AllInventoryEntries.BilledQty,AllInventoryEntries.BaseUnits,AllInventoryEntries.Units,AllInventoryEntries.Amount",
   "InventoryEntries.StockItemName,InventoryEntries.StockItemGUID,InventoryEntries.StockGroup,InventoryEntries.StockGroupGUID,InventoryEntries.ParentGUID,InventoryEntries.ActualQty,InventoryEntries.BilledQty,InventoryEntries.BaseUnits,InventoryEntries.Units,InventoryEntries.Amount",
   "LedgerEntries.LedgerName,LedgerEntries.Amount,LedgerEntries.IsDeemedPositive,LedgerEntries.InventoryAllocations.StockItemName,LedgerEntries.InventoryAllocations.StockItemGUID,LedgerEntries.InventoryAllocations.StockGroup,LedgerEntries.InventoryAllocations.StockGroupGUID,LedgerEntries.InventoryAllocations.ParentGUID,LedgerEntries.InventoryAllocations.ActualQty,LedgerEntries.InventoryAllocations.BilledQty,LedgerEntries.InventoryAllocations.BaseUnits,LedgerEntries.InventoryAllocations.Units,LedgerEntries.InventoryAllocations.Amount",
@@ -13,7 +14,8 @@ const VOUCHER_FETCH_FIELDS = [
 // substantially smaller while preserving the fields used by live-cd-evidence.
 const CASH_DISCOUNT_FETCH_FIELDS = [
   "Date,EffectiveDate,VoucherTypeName,VoucherType,VoucherTypeGUID,VoucherNumber,GUID,MasterID,AlterID,IsCancelled,IsOptional,IsReversed,PartyLedgerName,PartyLedgerGUID,LinkedSalesVoucherGUID,VoucherAmount,Amount,Narration",
-  "AllLedgerEntries.LedgerName,AllLedgerEntries.Amount,AllLedgerEntries.IsDeemedPositive,AllLedgerEntries.BillAllocations.Name,AllLedgerEntries.BillAllocations.BillType,AllLedgerEntries.BillAllocations.Amount,AllLedgerEntries.BillAllocations.TargetVoucherGUID,AllLedgerEntries.BillAllocations.VoucherNumber",
+  "AllLedgerEntries.LedgerName,AllLedgerEntries.LedgerGUID,AllLedgerEntries.Amount,AllLedgerEntries.IsDeemedPositive,AllLedgerEntries.BillAllocations.Name,AllLedgerEntries.BillAllocations.BillType,AllLedgerEntries.BillAllocations.Amount,AllLedgerEntries.BillAllocations.TargetVoucherGUID,AllLedgerEntries.BillAllocations.VoucherNumber",
+  "LedgerEntries.LedgerName,LedgerEntries.LedgerGUID,LedgerEntries.Amount,LedgerEntries.BillAllocations.Name,LedgerEntries.BillAllocations.BillType,LedgerEntries.BillAllocations.Amount,LedgerEntries.BillAllocations.TargetVoucherGUID,LedgerEntries.BillAllocations.VoucherNumber",
 ].join(",");
 // A per-MT Cash Discount rule needs product quantities, so it adds the
 // inventory (and ledger inventory-allocation) fields back.
@@ -81,7 +83,6 @@ function chunkScope(scope, maximumDays = MAX_DAYS_PER_CHUNK) {
 }
 
 function matchesScope(voucher, scope) {
-  if (scope.customerLedgerName && voucher.partyLedgerName?.toLowerCase() !== String(scope.customerLedgerName).toLowerCase()) return false;
   if (scope.voucherReference) {
     const reference = String(scope.voucherReference).toLowerCase();
     const hasReference = voucher.voucherNumber?.toLowerCase() === reference
@@ -91,11 +92,13 @@ function matchesScope(voucher, scope) {
   const requestedCustomers = uniqueCustomerLedgerNames(scope);
   if (requestedCustomers.length) {
     const requested = new Set(requestedCustomers.map(normalized));
+    const requestedGuids = new Set([scope.customerLedgerGuid, ...(Array.isArray(scope.customers) ? scope.customers : []).map((customer) => customer.tallyLedgerGuid)].map(normalized).filter(Boolean));
     const voucherLedgers = [
       voucher.partyLedgerName,
       ...(Array.isArray(voucher.sourcePayload?.ledgerEntries) ? voucher.sourcePayload.ledgerEntries.map((entry) => entry.ledgerName) : []),
     ].map(normalized);
-    if (!voucherLedgers.some((name) => requested.has(name))) return false;
+    const voucherGuids = [voucher.partyLedgerGuid, ...(voucher.sourcePayload?.ledgerEntries ?? []).map((entry) => entry.ledgerGuid)].map(normalized);
+    if (!voucherLedgers.some((name) => requested.has(name)) && !voucherGuids.some((guid) => requestedGuids.has(guid))) return false;
   }
   return true;
 }
