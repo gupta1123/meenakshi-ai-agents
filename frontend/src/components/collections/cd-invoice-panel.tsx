@@ -69,7 +69,8 @@ export function CdInvoiceBody({ row, note, calendar, canCreate, busy, companyNam
   const discount = Number(row.discountAmount);
   const target = Number(row.discountedTarget);
   const credit = Number(row.creditAmount);
-  const owed = Math.max(0, bill - paid);
+  const amountDue = Number(row.invoiceAmountDue ?? row.invoiceAmount);
+  const owed = Math.max(0, amountDue - paid);
   const deadline = row.windowDeadline.slice(0, 10);
   const lastPaymentDate = [...(row.payments ?? [])].map((payment) => payment.date.slice(0, 10)).sort().at(-1) ?? null;
   const timelineEnd = lastPaymentDate && lastPaymentDate > deadline ? [lastPaymentDate, addDays(deadline, 7)].sort()[0] : deadline;
@@ -93,7 +94,9 @@ export function CdInvoiceBody({ row, note, calendar, canCreate, busy, companyNam
     ? `${exact(paid)} paid on day ${daysAfter(paidOn)} of ${row.windowWorkingDays} · ${shortDay(paidOn)}`
     : `No payment by the deadline, ${shortDay(deadline)}`;
   // The badge already says "Discount earned" / "Paid in full", so those need no sentence.
-  const result = row.category === "full_payment"
+  const result = row.status === "credited" ? "An existing Cash Discount Credit Note is recorded in Tally."
+    : row.creditNoteReviewRequired ? row.reviewMessage ?? "Review the existing Credit Note before any further credit."
+    : row.category === "full_payment"
     ? credit > 0 ? null : "Run the Cash Discount check again to work out its Credit Note."
     : row.category === "discounted_payment"
       ? null
@@ -119,8 +122,8 @@ export function CdInvoiceBody({ row, note, calendar, canCreate, busy, companyNam
       {/* The answer first: result, amount, the one payment fact, and the Credit Note. */}
       <header className={styles.hero}>
         <div className={styles.heroTop}>
-          <StatusBadge status={row.category === "discounted_payment" || row.category === "full_payment" ? "ready" : row.category === "over_ninety_percent" ? "needs_review" : "not_started"}>{CATEGORY_LABEL[row.category] ?? row.category}</StatusBadge>
-          <span className={styles.heroAmount}><small>{credit > 0 ? "Credit Note" : "Discount on offer"}</small><strong>{money(credit > 0 ? credit : discount)}</strong></span>
+          <StatusBadge status={row.status === "credited" ? "created_verified" : row.creditNoteReviewRequired || row.category === "needs_review" || row.category === "over_ninety_percent" ? "needs_review" : row.category === "discounted_payment" || row.category === "full_payment" ? "ready" : "not_started"}>{row.status === "credited" ? "Already credited" : CATEGORY_LABEL[row.category] ?? row.category}</StatusBadge>
+          <span className={styles.heroAmount}><small>{row.status === "credited" ? "Already given" : row.creditNoteReviewRequired ? "Calculated discount" : credit > 0 ? "Credit Note" : "Discount on offer"}</small><strong>{money(row.status === "credited" ? Number(row.alreadyCredited) : credit > 0 ? credit : discount)}</strong></span>
         </div>
         <p className={styles.heroFacts}>{facts}</p>
         {result && <p className={styles.heroContext}>{result}</p>}
@@ -141,6 +144,7 @@ export function CdInvoiceBody({ row, note, calendar, canCreate, busy, companyNam
         <h3 id="cd-calculation">Calculation</h3>
         <dl className={styles.ledger}>
           <div><dt>Invoice total</dt><dd>{money(bill)}</dd></div>
+          {Number(row.adjustmentByDeadline) > 0 && <div><dt>Other Credit Notes by the deadline</dt><dd>− {money(Number(row.adjustmentByDeadline))}</dd></div>}
           <div><dt>Discount <small>{formatTonnes(row.eligibleTonnes)} MT × ₹{Number(row.amountPerTonne).toLocaleString("en-IN")}/MT</small></dt><dd>− {money(discount)}</dd></div>
           <div className={styles.ledgerTotal}><dt>Amount due with discount</dt><dd>{money(target)}</dd></div>
         </dl>
@@ -162,6 +166,18 @@ export function CdInvoiceBody({ row, note, calendar, canCreate, busy, companyNam
           </dl>
         </details>}
       </section>
+
+      {(row.creditNoteReferences?.length ?? 0) > 0 && <section className={styles.section} aria-labelledby="cd-existing-notes">
+        <h3 id="cd-existing-notes">Existing Credit Notes in Tally</h3>
+        <p className={styles.paymentMeta}>Cash Discount already given: {money(Number(row.alreadyCredited))}</p>
+        <ul className={styles.payments} aria-label="Credit Notes linked to this invoice">
+          {row.creditNoteReferences!.map((existing, index) => <li key={`${existing.tallyGuid}-${index}`}>
+            <div><strong>CN {existing.voucherNumber ?? "—"}</strong><small>{longDate(existing.voucherDate)} · {existing.purpose === "cash_discount" ? "Cash Discount" : existing.purpose === "adjustment" ? "Other adjustment" : existing.purpose === "sales_return" ? "Sales return" : "Needs review"}</small><small>{existing.reviewReason ?? (existing.matchedBy === "narration" ? "Invoice named in the description" : "Linked to this invoice in Tally")}</small></div>
+            <div><strong>{money(Number(existing.matchedBy === "unresolved" || !Number(existing.amount) ? existing.noteAmount ?? existing.amount : existing.amount))}</strong>{(existing.matchedBy === "unresolved" || !Number(existing.amount)) && <small>Note total · allocation needs review</small>}</div>
+          </li>)}
+        </ul>
+        {row.creditNoteReviewRequired && <p className={styles.warn}>Review the existing notes before creating another Credit Note.</p>}
+      </section>}
 
       <section className={styles.section} aria-labelledby="cd-payment">
         <div className={styles.sectionHeading}>

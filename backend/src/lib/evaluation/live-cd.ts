@@ -11,6 +11,7 @@ import { loadLiveCdBatchRule, loadLiveCdLocalBootstrap, type EvaluationRunRecord
 import type { FrozenCdRule } from "./contracts";
 import { evaluateCashDiscountSettlements } from "./cd-settlement.mjs";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { CD_CREDIT_NOTE_MATCHING_VERSION, CD_RECHECK_MESSAGE, keepCdSettlementRow } from "./cd-credit-note-safety";
 
 type LiveCdPayment = {
   receiptGuid: string;
@@ -62,6 +63,7 @@ export type LiveCdBatch = {
   // On-account credit (+) / debit (−) per customer, from connector 0.4.3 on.
   customerCredits?: Array<{ customerId: string; date: string; amount: string; source?: string }>;
   sourceFingerprint: string;
+  creditNoteMatchingVersion?: number;
 };
 
 type VerifiedDebitNotePosting = {
@@ -351,6 +353,7 @@ export function mergeVerifiedDebitNotes(invoices: LiveCdInvoice[], postings: Ver
  * database allows one live Credit Note per invoice.
  */
 export async function completeCdSettlementRun(run: EvaluationRunRecord, batch: LiveCdBatch) {
+  if (batch.creditNoteMatchingVersion !== CD_CREDIT_NOTE_MATCHING_VERSION) throw new Error(CD_RECHECK_MESSAGE);
   const supabase = createSupabaseAdminClient();
   const bootstrap = await loadLiveCdLocalBootstrap(run, batch.ruleVersionId);
   const rule = bootstrap.rule as FrozenCdRule & { customerSegments?: Record<string, number> };
@@ -362,7 +365,7 @@ export async function completeCdSettlementRun(run: EvaluationRunRecord, batch: L
   // Not-eligible invoices (paid late or under 90%) need no action and were
   // ~96% of a large period (14 MB per check). Keep full rows only for the
   // rest and store the not-eligible ones as a count.
-  const actionable = result.results.filter((row) => row.category !== "not_eligible");
+  const actionable = result.results.filter(keepCdSettlementRow);
   // Tag each row with the customer's Tally group (the salesperson), which the
   // Cash Discount page filters by.
   const customerIds = [...new Set(actionable.map((row) => String(row.customerId ?? "")).filter(Boolean))];
@@ -381,12 +384,13 @@ export async function completeCdSettlementRun(run: EvaluationRunRecord, batch: L
   for (const row of actionable) row.customerGroup = groupByCustomer.get(String(row.customerId ?? "")) ?? null;
   const summary = {
     schemeType: "cd", cdDiscountBasis: "amount_per_tonne", outcome: "completed", liveOnly: true, ...result.totals,
+    creditNoteMatchingVersion: batch.creditNoteMatchingVersion,
     invoicesChecked: result.results.length,
     notEligibleCount: result.results.length - actionable.length,
     // Not-eligible invoices are not stored one by one (size); the dashboard
     // needs them per quarter and group, so keep a compact tally:
     // "YYYY-MM|customer ledger GUID" -> [invoices, MT].
-    notEligibleByMonth: result.results.filter((row) => row.category === "not_eligible").reduce<Record<string, [number, number]>>((tally, row) => {
+    notEligibleByMonth: result.results.filter((row) => !keepCdSettlementRow(row)).reduce<Record<string, [number, number]>>((tally, row) => {
       const key = `${String(row.invoiceDate ?? "").slice(0, 7)}|${String(row.customerId ?? "")}`;
       const entry: [number, number] = tally[key] ?? [0, 0];
       entry[0] += 1;

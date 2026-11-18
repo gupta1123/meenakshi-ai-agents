@@ -66,6 +66,12 @@ The screen **shows** the categories in the client's order: Full payment, Short u
 
 ## 7. The Credit Note
 
+**Existing/manual notes (connector 0.5.4):** match within the same customer using an invoice GUID or an exact bill reference. Retain the allocation's customer ledger and amount; a multi-invoice note must not give its full amount to every invoice. An unambiguously named invoice in a Cash Discount note's description remains a fallback for On Account notes. Clear Cash Discount wording or the debit-side Cash Discount ledger identifies its purpose. Generic discount notes, ambiguous references, reversals, partial/over-issued discounts and linked inventory returns stay visible for review and block another Credit Note. Never guess from amount alone. Ignore cancelled/optional notes. A note booked after the financial year end is still matched when present in the bounded evidence period.
+
+Other clearly identified commercial adjustments reduce the amount due only when booked by the CD deadline; they do not increase “Cash Discount already given”. A later adjustment stays visible but does not turn a late/short payment into an on-time one. A linked inventory return requires quantity review. Cash Discount notes already assigned to an invoice are excluded from the free On Account credit pool. Existing notes remain visible even when the invoice's payment category is otherwise not eligible.
+
+The app displays each matched note's number, date, allocated amount and purpose. Older saved checks must be refreshed with connector 0.5.4 or newer before either single or bulk creation; their previously generated candidates cannot authorize posting.
+
 A **normal Credit Note**, the same kind as the TOD Credit Note:
 - Accounting Invoice view.
 - The Sales (Discount) ledger: **SGST + CGST** for Tamil Nadu customers (GSTIN starts 33), otherwise **IGST 18%**. The discount is GST-inclusive, so the taxable part is discount ÷ 1.18.

@@ -11,6 +11,7 @@ import { buildCheckJobInput, CheckJobRequestError } from "./check-jobs.ts";
 import { isUuid, readBridgeToken } from "./security.ts";
 import { bridgeVersionIsOlder } from "./bridge.ts";
 import { processOneCheckJob } from "../../../tally-bridge/src/server-jobs.mjs";
+import { CdEvidenceSafetyError, requireCurrentCdConnector } from "./evaluation/cd-credit-note-safety.ts";
 
 // Real PostgreSQL functions/indexes in an isolated process. No .env or network.
 const db = new PGlite();
@@ -127,8 +128,8 @@ test("HTTP request -> API -> SQL queue -> real connector reader/calculator -> AP
       return{data:set?answer.rows:answer.rows[0].result,error:null};
     }catch(error){return{data:null,error};}
   };
-  const client={rpc,from:()=>{
-    const chain={select(){return chain;},eq(){return chain;},async maybeSingle(){return{data:{expected_tally_company_guid:f.connector,expected_tally_company_name:"Review company"},error:null};}};
+  const client={rpc,from:(table)=>{
+    const chain={select(){return chain;},eq(){return chain;},async maybeSingle(){return{data:table==="tally_connectors"?{bridge_version:"0.5.4"}:{connector_id:f.connector,expected_tally_company_guid:f.connector,expected_tally_company_name:"Review company"},error:null};}};
     return chain;
   }};
   class AccessError extends Error {}
@@ -137,6 +138,7 @@ test("HTTP request -> API -> SQL queue -> real connector reader/calculator -> AP
     "@/lib/audit":{auditUserAction:async()=>{}},
     "@/lib/authorization":{MeenakshiAccessError:AccessError,requireMeenakshiCompanyAccess:async()=>({userId:null,company:{id:f.company,organization_id:f.org}})},
     "@/lib/check-jobs":{buildCheckJobInput,CheckJobRequestError},
+    "@/lib/evaluation/cd-credit-note-safety":{CdEvidenceSafetyError,requireCurrentCdConnector},
     "@/lib/security":{isUuid,readBridgeToken},
     "@/lib/bridge":{bridgeVersionIsOlder,authenticateMeenakshiBridge:async(id,token)=>id===f.connector&&token==="test-credential"?{id,bridge_version:"0.5.1",machine_fingerprint:"installation"}:null},
     "@/lib/supabase/admin":{createSupabaseAdminClient:()=>client},

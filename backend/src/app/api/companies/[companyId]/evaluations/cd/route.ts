@@ -4,6 +4,7 @@ import { isUuid } from "@/lib/security";
 import { readIdempotencyKey } from "@/lib/tally/contracts";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { deriveRefreshScope, type EvaluationRunRecord } from "@/lib/evaluation/evidence";
+import { CdEvidenceSafetyError, requireCurrentCdConnector } from "@/lib/evaluation/cd-credit-note-safety";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -68,6 +69,7 @@ export async function POST(request: Request, context: RouteContext) {
       ]);
       if (bindingError) throw bindingError;
       if (!binding) throw new Error("Connect the intended Tally company before checking Cash Discounts.");
+      if (scope.voucherScope.cdDiscountBasis === "amount_per_tonne") await requireCurrentCdConnector(supabase, company.id);
       const commandPayload = {
         evaluationRunId: evaluationRun.id,
         voucherScope: scope.voucherScope,
@@ -108,7 +110,7 @@ export async function POST(request: Request, context: RouteContext) {
       throw dispatchError;
     }
   } catch (error) {
-    if (error instanceof MeenakshiAccessError) return jsonWithCors(request, { error: error.message }, { status: error.status });
+    if (error instanceof MeenakshiAccessError || error instanceof CdEvidenceSafetyError) return jsonWithCors(request, { error: error.message }, { status: error.status });
     const ruleError = cashDiscountRuleError(error);
     if (ruleError) return jsonWithCors(request, { error: ruleError }, { status: 409 });
     console.error("Could not request Cash Discount evaluation:", error);

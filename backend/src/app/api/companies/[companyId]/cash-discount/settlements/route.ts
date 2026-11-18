@@ -3,6 +3,7 @@ import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/autho
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { postingProgress } from "@/lib/notes/posting-progress.mjs";
+import { CD_CREDIT_NOTE_MATCHING_VERSION, keepCdSettlementRow } from "@/lib/evaluation/cd-credit-note-safety";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -71,7 +72,7 @@ export async function GET(request: Request, context: RouteContext) {
     const allResults = (Array.isArray(settlementResults) ? settlementResults : []) as Array<Record<string, unknown>>;
     // Checks saved before these fields existed: drop not-eligible rows (kept as
     // a count), and derive the invoice period and customer groups here.
-    const results = allResults.filter((row) => row.category !== "not_eligible");
+    const results = allResults.filter(keepCdSettlementRow);
     if (typeof totals.notEligibleCount !== "number") totals.notEligibleCount = allResults.length - results.length;
     if (typeof totals.invoicesChecked !== "number") totals.invoicesChecked = allResults.length;
     if (!totals.invoicePeriod && run?.period_start && run.period_end) {
@@ -128,6 +129,7 @@ export async function GET(request: Request, context: RouteContext) {
     return jsonWithCors(request, {
       run: run ? { id: run.id, status: run.status, ruleVersionId: run.scheme_version_id, periodStart: run.period_start, periodEnd: run.period_end, completedAt: run.completed_at } : null,
       totals,
+      requiresRecheck: Number(totals.creditNoteMatchingVersion) !== CD_CREDIT_NOTE_MATCHING_VERSION,
       results,
       candidates: candidates.data ?? [],
       creditNotes: noteByInvoice,

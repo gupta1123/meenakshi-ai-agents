@@ -103,7 +103,7 @@ export async function runCheckJob(job, { config, activeCompany, isCancelled, onP
   const readStarted = performance.now();
   // Resume after a restart: the checkpoint is keyed by company, scope and date.
   const checkpoint = isCashDiscount
-    ? deps.createCheckpoint(canonicalJson({ company: activeCompany.guid || activeCompany.name, scope: body.voucherScope, evaluatedOn: body.evaluatedOn }))
+    ? deps.createCheckpoint(canonicalJson({ evidenceVersion: 1, company: activeCompany.guid || activeCompany.name, scope: body.voucherScope, evaluatedOn: body.evaluatedOn }))
     : null;
   let evidence;
   try {
