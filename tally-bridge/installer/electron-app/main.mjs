@@ -420,11 +420,9 @@ ipcMain.handle("update:restart",async event=>{
  const monitor=await import(pathToFileURL(path.join(path.dirname(bridgePath),"desktop-monitor.mjs")).href);
  const runtime=await monitor.readDesktopRuntime();
  const ready=await applicationUpdater.activate();
- const args=["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",path.join(installDirectory,"restart-connector.ps1"),"-UiPid",String(process.pid),"-WorkerPid",String(runtime.runtime?.pid||bridgeProcess?.pid||0)];
- if(ready.installer)args.push("-InstallerPath",ready.installer,"-InstallerSha256",ready.installerSha256);
- const helper=spawn("powershell.exe",args,{detached:true,windowsHide:true,stdio:"ignore"});
- await new Promise((resolve,reject)=>{helper.once("spawn",resolve);helper.once("error",reject);});helper.unref();
- quitting=true;disconnectFinished=true;stopBridge();setTimeout(()=>app.exit(0),1000);return{ok:true};
+ const {launchRestartTask}=await import(pathToFileURL(path.join(path.dirname(bridgePath),"support","restart-task.mjs")).href);
+ const handoff=await launchRestartTask({home:installDirectory,directory:applicationUpdater.directory,uiPid:process.pid,workerPid:runtime.runtime?.pid||bridgeProcess?.pid||0,installer:ready.installer,installerSha256:ready.installerSha256});
+ quitting=true;disconnectFinished=true;stopBridge();setTimeout(()=>app.exit(0),1000);return{ok:true,...handoff};
 });
 
 function createWindow() {

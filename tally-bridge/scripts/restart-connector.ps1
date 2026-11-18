@@ -1,11 +1,25 @@
-param([int]$UiPid=0,[int]$WorkerPid=0,[switch]$CloseUi,[string]$InstallerPath="",[string]$InstallerSha256="")
+param([int]$UiPid=0,[int]$WorkerPid=0,[switch]$CloseUi,[switch]$WaitForWorkerExit,[string]$HandoffFile="",[string]$InstallerPath="",[string]$InstallerSha256="")
 $ErrorActionPreference="Stop"
 $restartLogDirectory=Join-Path $env:LOCALAPPDATA 'Meenakshi\logs'
 New-Item -ItemType Directory -Path $restartLogDirectory -Force | Out-Null
-$restartLog=Join-Path $restartLogDirectory ('connector-'+(Get-Date -Format 'yyyy-MM-dd')+'.log')
+$restartLog=Join-Path $restartLogDirectory ('connector-'+(Get-Date).ToUniversalTime().ToString('yyyy-MM-dd')+'.log')
 function Write-RestartLog([string]$Message) { Add-Content -LiteralPath $restartLog -Value ((Get-Date).ToUniversalTime().ToString('o')+' INFO connector restart '+$Message) }
-trap { Write-RestartLog ('failed: '+$_.Exception.Message); exit 1 }
+$handoffValidated=$false
+function Write-Handoff([string]$State,[string]$ErrorMessage="") {
+ if($handoffValidated -and $HandoffFile){[IO.File]::WriteAllText($HandoffFile,(@{state=$State;pid=$PID;error=$ErrorMessage;at=(Get-Date).ToUniversalTime().ToString('o')}|ConvertTo-Json -Compress))}
+}
+trap { Write-RestartLog ('failed: '+$_.Exception.Message); Write-Handoff 'failed' $_.Exception.Message; exit 1 }
+if($HandoffFile){
+ $HandoffFile=[IO.Path]::GetFullPath($HandoffFile)
+ if([IO.Path]::GetFileName($HandoffFile) -notmatch '^[a-fA-F0-9-]{36}\.json$' -or [IO.Path]::GetFileName([IO.Path]::GetDirectoryName($HandoffFile)) -ne 'restart-handoffs'){throw 'Invalid restart acknowledgement path.'}
+ $handoffValidated=$true
+}
 Write-RestartLog ('started ui='+$UiPid+' worker='+$WorkerPid)
+Write-Handoff 'started'
+if($WaitForWorkerExit -and $WorkerPid -gt 0){
+ $waitingWorker=Get-Process -Id $WorkerPid -ErrorAction SilentlyContinue
+ if($waitingWorker){Wait-Process -Id $WorkerPid -Timeout 150 -ErrorAction Stop}
+}
 $installRoot=[IO.Path]::GetFullPath($PSScriptRoot)
 $exe=Join-Path $installRoot 'Meenakshi Tally Connector.exe'
 $reopenUi=$UiPid -gt 0 -and -not $CloseUi
@@ -39,3 +53,4 @@ if ($InstallerPath.Trim()) {
 if ($task) { Start-ScheduledTask -TaskName $taskName }
 if ($reopenUi) { Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue; Start-Process -FilePath $exe }
 Write-RestartLog ('completed task='+[bool]$task+' ui='+$reopenUi)
+Write-Handoff 'completed'
