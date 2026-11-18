@@ -194,10 +194,10 @@
       const updatePanel=document.getElementById("update-panel"),updateAction=document.getElementById("update-action");
       let updatePhase="idle";
       function renderUpdate(state){
-        updatePhase=state.state||(!state.available?"current":"available");state.state=updatePhase;const busy=["checking","downloading"].includes(state.state);
+        updatePhase=state.state||(!state.available?"current":"available");state={...state,state:updatePhase};const busy=["checking","downloading"].includes(state.state);
         document.getElementById("update-close").disabled=busy;
         const progress=document.getElementById("update-progress");progress.hidden=state.state!=="downloading";
-        if(state.total)progress.value=Math.round(100*state.received/state.total);
+        if(state.state==="downloading"&&Number.isFinite(state.received)&&Number.isFinite(state.total)&&state.total>0)progress.value=Math.min(100,Math.max(0,Math.round(100*state.received/state.total)));
         document.getElementById("update-title").textContent=state.state==="ready"?"Ready to restart":state.state==="current"?"Up to date":"Update connector";
         document.getElementById("update-detail").textContent=state.message||
           (state.state==="available"?"Version "+state.version+" is available. Only changed application files are downloaded when the runtime is unchanged.":

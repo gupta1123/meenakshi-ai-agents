@@ -422,8 +422,9 @@ ipcMain.handle("update:restart",async event=>{
  const ready=await applicationUpdater.activate();
  const args=["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File",path.join(installDirectory,"restart-connector.ps1"),"-UiPid",String(process.pid),"-WorkerPid",String(runtime.runtime?.pid||bridgeProcess?.pid||0)];
  if(ready.installer)args.push("-InstallerPath",ready.installer,"-InstallerSha256",ready.installerSha256);
- const helper=spawn("powershell.exe",args,{detached:true,windowsHide:true,stdio:"ignore"});helper.unref();
- quitting=true;disconnectFinished=true;stopBridge();app.exit(0);return{ok:true};
+ const helper=spawn("powershell.exe",args,{detached:true,windowsHide:true,stdio:"ignore"});
+ await new Promise((resolve,reject)=>{helper.once("spawn",resolve);helper.once("error",reject);});helper.unref();
+ quitting=true;disconnectFinished=true;stopBridge();setTimeout(()=>app.exit(0),1000);return{ok:true};
 });
 
 function createWindow() {

@@ -29,7 +29,7 @@ test(
   const win=new BrowserWindow({show:false,webPreferences:{contextIsolation:true,nodeIntegration:false,preload:${JSON.stringify(path.join(root, "installer/electron-app/preload.cjs"))}}});
   ipcMain.handle("app:version",()=>"0.6.0");
   ipcMain.handle("update:check",()=>({state:"available",available:true,version:"0.6.1"}));
-  ipcMain.handle("update:download",async()=>{win.webContents.send("update-status",{state:"downloading",received:250,total:1000,version:"0.6.1"});await delay(250);return{state:"ready",version:"0.6.1"};});
+  ipcMain.handle("update:download",async()=>{win.webContents.send("update-status",{state:"downloading",received:250,total:1000,version:"0.6.1"});await delay(250);const ready={state:"ready",version:"0.6.1",downloadedBytes:1000,total:1000,reused:44,files:6};win.webContents.send("update-status",ready);return ready;});
   ipcMain.handle("update:restart",()=>{restarts++;return{ok:true};});
   await win.loadFile(${JSON.stringify(path.join(root, "installer/electron-app/index.html"))});
   const run=source=>win.webContents.executeJavaScript(source);
@@ -40,6 +40,10 @@ test(
   assert.equal(await run('document.getElementById("update-action").disabled'),true);
   await delay(250);
   assert.equal(await run('document.getElementById("update-action").textContent'),"Restart and update");
+  assert.equal(await run('document.getElementById("update-action").hidden'),false);
+  assert.equal(await run('document.getElementById("update-action").disabled'),false);
+  assert.equal(await run('document.getElementById("update-progress").hidden'),true);
+  assert.match(await run('document.getElementById("update-detail").textContent'),/downloaded and verified/);
   assert.equal(BrowserWindow.getAllWindows().length,1);
   await run('document.getElementById("update-action").click()');await delay(100);
   assert.equal(restarts,1);fs.writeFileSync(${JSON.stringify(out)},JSON.stringify({windows:1,restarts,progress:true,ready:true}));app.exit(0);
