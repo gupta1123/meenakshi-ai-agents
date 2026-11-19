@@ -23,8 +23,9 @@ import { Button, Dialog, Drawer, EmptyState, InlineMessage, Skeleton, StatusBadg
 import { accessToken } from "./workspace";
 import { CdInvoicePanel } from "./cd-invoice-panel";
 import { GuidedVersionSummary } from "./guided-version-summary";
-import { canCreateCashDiscountNote } from "@/lib/cd-credit-note-state.mjs";
+import { canCreateCashDiscountNote, supportsManualCreditNotes } from "@/lib/cd-credit-note-state.mjs";
 import type { Calendar, ReferenceData, VersionDetail } from "./types";
+import { useWorkspaceSession } from "./workspace-session";
 
 const NO_GROUP = "__no_group__";
 
@@ -75,6 +76,7 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
   tallyMode: TallyMode;
 }) {
   const { company, companyKey } = useCompany();
+  const { health } = useWorkspaceSession();
   // Errors stay on this page: the shared workspace error would replace the
   // whole page with "Workspace unavailable".
   const [error, setError] = useState<string | null>(null);
@@ -92,6 +94,10 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
     })();
   }, [company.id]);
   const [data, setData] = useState<SettlementData | null>(null);
+  const requiresRecheck = data?.requiresRecheck !== false;
+  const savedCheckNeedsRefresh = Boolean(data?.run && requiresRecheck);
+  const connectorVersion = health?.companyId === company.id ? health.connector?.bridgeVersion : null;
+  const connectorNeedsUpdate = Boolean(connectorVersion && !supportsManualCreditNotes(connectorVersion));
   const [liveRows, setLiveRows] = useState<CdSettlementRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [localPhase, setPhase] = useState<"reading" | "saving" | null>(null);
@@ -297,26 +303,26 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
       group.billed += Number(row.invoiceAmount || 0);
       group.tonnes += Number(row.eligibleTonnes || 0);
       if (note?.status === "created_verified" || row.status === "credited") group.created += 1;
-      else if (canCreateCashDiscountNote(row, candidate, note, data?.requiresRecheck !== false)) { group.toCreate += 1; group.toCreateAmount += Number(row.creditAmount || 0); }
+      else if (canCreateCashDiscountNote(row, candidate, note, requiresRecheck)) { group.toCreate += 1; group.toCreateAmount += Number(row.creditAmount || 0); }
       byGroup.set(key, group);
     }
     return [...byGroup.values()]
       .map((group) => ({ ...group, customers: group.customers.size, segments: [...group.segments].sort() }))
       .sort((left, right) => right.credit - left.credit || right.invoices - left.invoices || left.name.localeCompare(right.name));
-  }, [rows, tab, segmentFilter, data, candidateByInvoice]);
+  }, [rows, tab, segmentFilter, data, candidateByInvoice, requiresRecheck]);
   // Cards first; a search goes straight to matching invoices across groups.
   const showCards = groupFilter === "all" && !q && groupSummaries.length > 1;
   const visible = rows.filter(inTab).filter(matchesFilters).filter((row) => !q || row.customerName.toLowerCase().includes(q) || (row.invoiceNumber ?? "").toLowerCase().includes(q));
   const scopedRows = useMemo(() => groupFilter === "all" ? rows : rows.filter((row) => (row.customerGroup || NO_GROUP) === groupFilter), [rows, groupFilter]);
   const counts = useMemo(() => Object.fromEntries(TABS.map((item) => [item.key, scopedRows.filter((row) => item.key === "all" ? true : item.key === "other" ? !["full_payment", "over_ninety_percent", "discounted_payment"].includes(row.category) : row.category === item.key).length])), [scopedRows]);
   // Still to create: has a Credit Note amount, not yet credited, GST deadline not passed.
-  const pendingAmount = (key: Tab) => scopedRows.filter((row) => (key === "all" || row.category === key) && canCreateCashDiscountNote(row, candidateByInvoice.get(row.invoiceGuid), data?.creditNotes[row.invoiceGuid], data?.requiresRecheck !== false)).reduce((total, row) => total + Number(row.creditAmount || 0), 0);
+  const pendingAmount = (key: Tab) => scopedRows.filter((row) => (key === "all" || row.category === key) && canCreateCashDiscountNote(row, candidateByInvoice.get(row.invoiceGuid), data?.creditNotes[row.invoiceGuid], requiresRecheck)).reduce((total, row) => total + Number(row.creditAmount || 0), 0);
   const tabAmount = (key: Tab) => scopedRows.filter((row) => key === "all" || row.category === key).reduce((total, row) => total + Number(row.creditAmount || 0), 0);
   const activeTab = TABS.find((item) => item.key === tab)!;
   const creatableCandidate = (row: CdSettlementRow) => {
     const candidate = candidateByInvoice.get(row.invoiceGuid);
     const note = data?.creditNotes[row.invoiceGuid];
-    return isAdministrator && postingEnabled && canCreateCashDiscountNote(row, candidate, note, data?.requiresRecheck !== false) ? candidate : null;
+    return isAdministrator && postingEnabled && canCreateCashDiscountNote(row, candidate, note, requiresRecheck) ? candidate : null;
   };
   // Selection is offered once inside a group (or a search), never on the group cards.
   const pageRows = visible.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
@@ -335,13 +341,17 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
     {error && <InlineMessage tone="error">{error}</InlineMessage>}
     {serverCheck.error && <InlineMessage tone="error">{serverCheck.error}</InlineMessage>}
     {serverCheck.state?.message && <InlineMessage tone="info">{serverCheck.state.message}</InlineMessage>}
-    {data?.run && data.requiresRecheck !== false && <InlineMessage tone="info">This saved check needs to be refreshed before creating Credit Notes. Install connector 0.5.4 or newer on the Tally computer, then run Cash Discount again to check existing manual Credit Notes.</InlineMessage>}
     <WorkspacePageHeader title="Cash Discount" />
     <section className="tod-overview cd-overview" aria-label="Latest Cash Discount check">
       <div className="tod-overview-meta">
-        <div className="tod-period-context">{phase ? <StatusBadge status={phase === "saving" ? "posting" : "evaluating"}>{phase === "saving" ? "Saving" : "Checking"}</StatusBadge> : data?.run ? <StatusBadge status="ready" /> : <StatusBadge status="not_started">Not checked</StatusBadge>}{data?.run && !phase && data.totals?.invoicePeriod && <span className="cd-head-facts"><strong>{shortDate(data.totals.invoicePeriod.from)} – {shortDate(data.totals.invoicePeriod.to)}</strong>{typeof data.totals.invoicesChecked === "number" && ` · ${data.totals.invoicesChecked.toLocaleString("en-IN")} checked`}{(data.totals.notEligibleCount ?? 0) > 0 && data.totals.invoicesChecked ? <span title="Paid late, or short of the bill by more than ₹10,000"> · {Math.round((data.totals.notEligibleCount! / data.totals.invoicesChecked) * 100)}% not eligible</span> : null}</span>}</div>
+        <div className="tod-period-context">
+          {phase ? <StatusBadge status={phase === "saving" ? "posting" : "evaluating"}>{phase === "saving" ? "Saving" : "Checking"}</StatusBadge>
+            : savedCheckNeedsRefresh ? <StatusBadge status="needs_review">Refresh needed</StatusBadge>
+            : data?.run ? <StatusBadge status="ready" /> : <StatusBadge status="not_started">Not checked</StatusBadge>}
+          {data?.run && !phase && data.totals?.invoicePeriod && <span className="cd-head-facts"><strong>{shortDate(data.totals.invoicePeriod.from)} – {shortDate(data.totals.invoicePeriod.to)}</strong>{typeof data.totals.invoicesChecked === "number" && ` · ${data.totals.invoicesChecked.toLocaleString("en-IN")} checked`}{(data.totals.notEligibleCount ?? 0) > 0 && data.totals.invoicesChecked ? <span title="Paid late, or short of the bill by more than ₹10,000"> · {Math.round((data.totals.notEligibleCount! / data.totals.invoicesChecked) * 100)}% not eligible</span> : null}</span>}
+        </div>
         <div className="tod-overview-actions"><span>{phase ? "Checking Tally…" : data?.run?.completedAt ? `Calculated ${formatDate(data.run.completedAt)}` : "Not calculated yet"}</span>
-          <Button className="button-secondary" disabled={Boolean(phase)} onClick={() => void calculate()}><RefreshCw className={phase ? "spin" : undefined} size={15} />{phase ? "Checking Tally…" : "Calculate"}</Button>
+          <Button className="button-secondary" disabled={Boolean(phase)} onClick={() => void calculate()}><RefreshCw className={phase ? "spin" : undefined} size={15} />{phase ? "Checking Tally…" : savedCheckNeedsRefresh ? "Refresh Cash Discount" : "Calculate"}</Button>
           <Button className="button-quiet" onClick={openRulePanel}>Active rule</Button></div>
       </div>
       {phase === "reading" && reconnect && <div className="cd-check-progress" role="alert">
@@ -360,6 +370,14 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
       </div>}
       {!data?.run && !phase && <div className="cd-overview-body"><h2>Run a Tally check</h2><p>Press Calculate to sort invoices into Full payment, Short up to ₹10,000 and Discounted payment.</p></div>}
     </section>
+    {savedCheckNeedsRefresh && !phase && (
+      <InlineMessage tone="warning">
+        <strong>Credit Notes are on hold until this check is refreshed.</strong>{" "}
+        {connectorNeedsUpdate
+          ? <>Update the Tally connector from {connectorVersion} to 0.5.4 or newer, then select Refresh Cash Discount. <Link href="/tally">Open Tally connection</Link></>
+          : "Select Refresh Cash Discount to check Tally for existing Credit Notes and update which invoices are eligible."}
+      </InlineMessage>
+    )}
     {!postingEnabled && <InlineMessage tone="info">Credit Note creation is off. Turn it on from Credit Notes to create Credit Notes in Tally.</InlineMessage>}
     {rows.length > 0 && <div className="cd-action-cards cd-category-cards" role="tablist" aria-label="Cash Discount categories">
       {TABS.filter((item) => item.key !== "other" || counts.other > 0 || tab === "other").map((item) => <button key={item.key} type="button" role="tab" aria-selected={tab === item.key} className={`cd-action-card${tab === item.key ? " selected" : ""}${item.key === "over_ninety_percent" && counts[item.key] ? " has-attention" : ""}`} onClick={() => setTab(item.key)}>
@@ -407,7 +425,8 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
                 : note && ["queued", "sending"].includes(note.status) ? <StatusBadge status={note.progress?.stage === "queued" || !note.progress ? "queued" : "posting"}>{note.progress?.label ?? "Waiting for Tally…"}</StatusBadge>
                 : row.status === "credited" ? <StatusBadge status="created_verified">Already credited</StatusBadge>
                 : canCreate ? <Button className="button-secondary" disabled={busyId === candidate!.id} onClick={() => void createCreditNote(row, candidate!.id)}>{busyId === candidate!.id ? "Queuing…" : `Create ₹${Number(row.creditAmount).toLocaleString("en-IN")}`}</Button>
-                : <small>{data?.requiresRecheck !== false ? "Run the check again" : row.category === "full_payment" && !Number(row.creditAmount) ? "Run the check again" : ["full_payment", "discounted_payment", "over_ninety_percent"].includes(row.category) ? row.gstDeadlinePassed ? "GST deadline passed" : postingEnabled ? "Save the check first" : "Creation is off" : row.category === "awaiting_payment" ? "Window open" : row.category === "needs_review" ? row.reviewMessage ?? "Needs review" : "No discount"}</small>}
+                : requiresRecheck ? null
+                : <small>{row.category === "full_payment" && !Number(row.creditAmount) ? Number(row.discountAmount) > 0 ? "No credit amount saved" : "No discount" : ["full_payment", "discounted_payment", "over_ninety_percent"].includes(row.category) ? row.gstDeadlinePassed ? "GST deadline passed" : postingEnabled ? "Save the check first" : "Creation is off" : row.category === "awaiting_payment" ? "Window open" : row.category === "needs_review" ? row.reviewMessage ?? "Needs review" : "No discount"}</small>}
               {["full_payment", "discounted_payment", "over_ninety_percent"].includes(row.category) && note?.status !== "created_verified" && row.gstLastDate && (row.gstDeadlinePassed || daysUntil(row.gstLastDate) <= 30) && <small className="cd-gst-warning">{row.gstDeadlinePassed ? `GST deadline passed (${shortDate(row.gstLastDate)})` : `Create by ${shortDate(row.gstLastDate)} for GST`}</small>}
               {note?.status === "failed" && <small className="field-error">{/active Tally company does not match/i.test(note.failure_reason ?? "") ? `Tally had another company open. Open ${company.tally_company_name} in Tally, then create again.` : note.failure_reason ?? "Tally rejected it. Create again."}</small>}
             </div>
