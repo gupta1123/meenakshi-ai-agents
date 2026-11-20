@@ -301,7 +301,7 @@ export async function runLocalCashDiscount(bootstrap: LocalCdBootstrap, signal?:
   await lookupMode?.();
   if (!serverContext && bootstrap.rule.cdDiscountBasis === "amount_per_tonne") {
     const { supportsManualCreditNotes } = await import("./cd-credit-note-state.mjs");
-    if (!supportsManualCreditNotes(await readLocalConnectorVersion())) throw new LocalCalculationError("Install connector 0.5.4 or newer on this Tally computer so existing manual Credit Notes are checked.", "tally_read");
+    if (!supportsManualCreditNotes(await readLocalConnectorVersion())) throw new LocalCalculationError("Install connector 0.6.4 or newer on this Tally computer so existing manual Credit Notes are checked.", "tally_read");
   }
   // A per-MT rule reads every invoice since its effective date: 18 months is
   // about 55 batches and 10 minutes. The page shows batch progress meanwhile.

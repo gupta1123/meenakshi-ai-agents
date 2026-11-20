@@ -17,6 +17,6 @@ test("genuine short-payment review remains creatable, but expired or unbacked ro
   assert.equal(canCreateCashDiscountNote(row, null, null, false), false);
 });
 test("per-MT CD requires the updated connector, with correct version ordering", () => {
-  for (const version of [null, "0.5.3", "0.4.9", "invalid", "0.5.4-preview"]) assert.equal(supportsManualCreditNotes(version), false);
-  for (const version of ["0.5.4", "0.5.10", "0.6.0", "1.0.0"]) assert.equal(supportsManualCreditNotes(version), true);
+  for (const version of [null, "0.5.3", "0.4.9", "invalid", "0.6.4-preview", "0.6.3"]) assert.equal(supportsManualCreditNotes(version), false);
+  for (const version of ["0.6.4", "0.6.10", "0.7.0", "1.0.0"]) assert.equal(supportsManualCreditNotes(version), true);
 });

@@ -20,7 +20,7 @@ const evidence = {
   ruleVersionId: "rule",
   dateFrom: "2025-04-01",
   dateTo: "2026-11-18",
-  creditNoteMatchingVersion: 1,
+  creditNoteMatchingVersion: 2,
   invoices: [
     { customerId: "selected", tallyGuid: "invoice", voucherDate: "2026-03-23" },
   ],

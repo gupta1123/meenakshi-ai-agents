@@ -129,7 +129,7 @@ test("HTTP request -> API -> SQL queue -> real connector reader/calculator -> AP
     }catch(error){return{data:null,error};}
   };
   const client={rpc,from:(table)=>{
-    const chain={select(){return chain;},eq(){return chain;},async maybeSingle(){return{data:table==="tally_connectors"?{bridge_version:"0.5.4"}:{connector_id:f.connector,expected_tally_company_guid:f.connector,expected_tally_company_name:"Review company"},error:null};}};
+    const chain={select(){return chain;},eq(){return chain;},async maybeSingle(){return{data:table==="tally_connectors"?{bridge_version:"0.6.4"}:{connector_id:f.connector,expected_tally_company_guid:f.connector,expected_tally_company_name:"Review company"},error:null};}};
     return chain;
   }};
   class AccessError extends Error {}

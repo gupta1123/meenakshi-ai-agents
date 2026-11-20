@@ -1,6 +1,6 @@
 import Decimal from "decimal.js";
 
-export const CREDIT_NOTE_MATCHING_VERSION = 1;
+export const CREDIT_NOTE_MATCHING_VERSION = 2;
 export const normalized = (value) => String(value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
 const cashDiscount = /\bcash\s*discount\b|\bc\s*\.?\s*d\.?\b/i;
 const otherDiscount = /\b(?:turnover|trade|quantity)\s*discount\b|\b(?:tod|rate\s*(?:diff(?:erence)?|adjustment)|price\s*(?:diff(?:erence)?|adjustment)|rebate)\b/i;
@@ -65,7 +65,18 @@ export function invoiceMatcher(invoices) {
   };
 }
 
-/** Actual per-invoice allocations win. Narration is only an unambiguous fallback. */
+// Tally users sometimes name full invoice numbers by just their serial after
+// "B.No." / "Bill No.". Read only the labelled list, never quantities or rates.
+function narratedBillSerials(text) {
+  const serials = new Set();
+  const lists = /\b(?:b(?:ill)?\.?\s*nos?\.?|invoices?(?:\s+nos?\.?)?|bills?)\s*[:#.-]?\s*(\d+(?![\w/-]|\.\d)(?:\s*(?:,|&|\band\b)\s*\d+(?![\w/-]|\.\d))*)/gi;
+  for (const list of text.matchAll(lists)) {
+    for (const number of list[1].match(/\d+/g)) serials.add(number);
+  }
+  return serials;
+}
+
+/** Allocations establish amounts. Additional narrated invoices can require review. */
 export function matchCreditNotes(invoices, notes, customers) {
   const matchInvoice = invoiceMatcher(invoices);
   const result = new Map(invoices.map((invoice) => [invoice.tallyGuid, []]));
@@ -101,6 +112,23 @@ export function matchCreditNotes(invoices, notes, customers) {
         const amount = entries.length ? entries.reduce((total, entry) => total.plus(entry.amount || 0), new Decimal(0)) : new Decimal(note.grossAmount || 0).abs();
         add(matches[0], amount.gt(0) ? amount : 0, "narration", amount.gt(0) ? null : "Credit Note has no customer credit amount.");
       } else for (const invoice of matches.length ? matches : possible) add(invoice, 0, "unresolved", matches.length ? "Credit Note names more than one invoice without bill allocations." : "Cash Discount Credit Note has no clear invoice link.");
+    }
+    if (purpose === "cash_discount" && allocations.length) {
+      const customer = customerForVoucher(note, customers);
+      const owned = allocations.filter(a => customer && allocationCustomer(a, note, customers)?.customerId === customer.customerId);
+      if (owned.length) {
+        const narration = note.narration ?? "";
+        const serials = narratedBillSerials(narration);
+        for (const invoice of byCustomer.get(customer.customerId) ?? []) {
+          if (matched.has(invoice.tallyGuid) || invoice.voucherDate > note.voucherDate) continue;
+          const refs = [invoice.voucherNumber, ...(invoice.billReferences ?? [])].filter(Boolean);
+          // Do not override an authoritative target GUID on the same bill reference.
+          if (owned.some(a => a.targetVoucherGuid && refs.some(ref => normalized(ref) === normalized(a.billReference)))) continue;
+          const named = refs.some(ref => serials.has(String(ref).split("/").pop()) ||
+            (!/^\d+$/.test(ref) && containsReference(narration, ref)));
+          if (named) add(invoice, 0, "narration", "Cash Discount Credit Note names this invoice but allocates its amount to other bills. Review before issuing another credit.");
+        }
+      }
     }
     const total = [...matched.values()].reduce((sum, item) => sum.plus(item.amount), new Decimal(0));
     const customerCredits = (note.sourcePayload?.ledgerEntries ?? []).reduce((sum, entry) => sum.plus(Decimal.max(new Decimal(entry.amount || 0), 0)), new Decimal(0));
