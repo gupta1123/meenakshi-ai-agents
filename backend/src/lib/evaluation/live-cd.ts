@@ -374,7 +374,7 @@ export async function completeCdSettlementRun(run: EvaluationRunRecord, batch: L
       .eq("status","completed").eq("scheme_version_id",rule.id).eq("summary->>evidenceSchemaVersion","2")
       .order("completed_at",{ascending:false}).limit(1);
     if(error)throw error;
-    if(!previous?.length)throw new Error("A full connector 0.6.0 CD check is required before saving a partial refresh.");
+    if(Number(previous?.[0]?.summary?.creditNoteMatchingVersion) !== CD_CREDIT_NOTE_MATCHING_VERSION)throw new Error("A full connector 0.6.4 CD check is required before saving a partial refresh.");
     const prior=previous[0].summary as Record<string,unknown>;
     const approved=new Set((bootstrap.voucherScope as {customers:Array<{customerId:string}>}).customers.map(c=>c.customerId));
     if(customerScope.some(id=>!approved.has(id)))throw new Error("Partial CD scope contains a customer outside this rule.");

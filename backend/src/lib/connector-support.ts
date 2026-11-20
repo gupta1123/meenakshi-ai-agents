@@ -229,9 +229,9 @@ export async function prepareSupportRequest(
         .eq("summary->>cdDiscountBasis", "amount_per_tonne")
         .order("completed_at", { ascending: false })
         .limit(1);
-      if (Number(prior?.[0]?.summary?.evidenceSchemaVersion) !== 2)
+      if (Number(prior?.[0]?.summary?.evidenceSchemaVersion) !== 2 || Number(prior?.[0]?.summary?.creditNoteMatchingVersion) !== 2)
         throw new SupportError(
-          "Run one full CD check with connector 0.6.0 before saving a partial refresh. A diagnostic run is available now.",
+          "Run one full CD check with connector 0.6.4 before saving a partial refresh. A diagnostic run is available now.",
           409,
         );
     }
@@ -377,7 +377,7 @@ export async function finishSupportCalculation(
       job.request.schemeType,
     );
     if (job.request.schemeType === "cd") {
-      if (calculation.evidence.creditNoteMatchingVersion !== 1)
+      if (calculation.evidence.creditNoteMatchingVersion !== 2)
         throw new SupportError(
           "The connector did not check manual Credit Notes.",
         );

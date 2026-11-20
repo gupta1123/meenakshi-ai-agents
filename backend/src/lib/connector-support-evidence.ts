@@ -21,7 +21,7 @@ export function validateSupportEvidence(
       evidence.dateTo !== scope.dateTo ||
       !Array.isArray(evidence.invoices) ||
       evidence.invoices.length > 25000 ||
-      evidence.creditNoteMatchingVersion !== 1
+      evidence.creditNoteMatchingVersion !== 2
     )
       throw new Error(
         "CD evidence does not match the requested rule and period.",

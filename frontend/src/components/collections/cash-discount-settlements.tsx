@@ -374,7 +374,7 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
       <InlineMessage tone="warning">
         <strong>Credit Notes are on hold until this check is refreshed.</strong>{" "}
         {connectorNeedsUpdate
-          ? <>Update the Tally connector from {connectorVersion} to 0.5.4 or newer, then select Refresh Cash Discount. <Link href="/tally">Open Tally connection</Link></>
+          ? <>Update the Tally connector from {connectorVersion} to 0.6.4 or newer, then select Refresh Cash Discount. <Link href="/tally">Open Tally connection</Link></>
           : "Select Refresh Cash Discount to check Tally for existing Credit Notes and update which invoices are eligible."}
       </InlineMessage>
     )}

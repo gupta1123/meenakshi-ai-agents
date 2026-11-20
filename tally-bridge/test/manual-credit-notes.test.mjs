@@ -240,3 +240,23 @@ test("TOD respects the date of a non-CD adjustment", async () => {
   assert.equal(payment.counted, false);
   assert.equal(payment.paidInFullOn, "2026-04-20");
 });
+
+test("a CD note with three allocations and five named bills holds both narration-only invoices", async () => {
+  const serials = ["5854", "6016", "6405", "7206", "8714", "8724", "500", "72060"];
+  const numbers = serials.map(serial => "MUI/25-26/" + serial);
+  const vouchers = numbers.flatMap((number, i) => [sale(number, "bill-" + serials[i]), receipt("95000", number)]);
+  const bills = [[numbers[0], "8920"], [numbers[1], "2750"], [numbers[2], "2795"]];
+  const cd = note({ number: "182", amount: "14465", narration: "Being Cash Discount allowed to party vide B.No.5854, 6016, 6405,7206 & 8714 (28.930 x 500/-)", entries: ledger(customer.ledgerName, "14465", bills) + ledger("Discount Allowed", "-14465") });
+  const result = await check([...vouchers, cd]);
+  const rows = new Map(result.results.map(row => [row.invoiceNumber, row]));
+  for (const number of numbers.slice(3, 5)) {
+    const row = rows.get(number);
+    assert.equal(row.status, "credit_note_review");
+    assert.equal(row.alreadyCredited, "0.00");
+    assert.equal(row.creditNoteReferences[0].voucherNumber, "182");
+    assert.equal(row.creditNoteReferences[0].matchedBy, "narration");
+    assert.ok(!result.candidates.some(candidate => candidate.invoiceGuid === row.invoiceGuid));
+  }
+  for (const number of numbers.slice(5)) assert.equal(rows.get(number).status, "ready");
+  assert.deepEqual(numbers.slice(0, 3).map(n => rows.get(n).alreadyCredited), ["8920.00", "2750.00", "2795.00"]);
+});

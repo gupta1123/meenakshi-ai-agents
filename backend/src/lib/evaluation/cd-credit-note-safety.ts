@@ -1,9 +1,9 @@
 import type { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { bridgeVersionIsOlder } from "@/lib/bridge";
 
-export const CD_CREDIT_NOTE_MATCHING_VERSION = 1;
-export const CD_CONNECTOR_MINIMUM = "0.5.4";
-export const CD_RECHECK_MESSAGE = "Install connector 0.5.4 or newer on the Tally computer, then run Cash Discount again before creating Credit Notes. The saved check has not checked manual Credit Notes reliably.";
+export const CD_CREDIT_NOTE_MATCHING_VERSION = 2;
+export const CD_CONNECTOR_MINIMUM = "0.6.4";
+export const CD_RECHECK_MESSAGE = "Install connector 0.6.4 or newer on the Tally computer, then run Cash Discount again before creating Credit Notes. The saved check has not checked manual Credit Notes reliably.";
 export class CdEvidenceSafetyError extends Error { readonly status = 409; }
 type Database = ReturnType<typeof createSupabaseAdminClient>;
 
@@ -17,7 +17,7 @@ export async function requireCurrentCdConnector(db: Database, companyId: string)
   if (!binding) throw new CdEvidenceSafetyError("Connect the intended Tally company before checking Cash Discount.");
   const result = await db.from("tally_connectors").select("bridge_version").eq("id", binding.connector_id).maybeSingle();
   if (result.error) throw result.error;
-  if (!result.data?.bridge_version || bridgeVersionIsOlder(result.data.bridge_version, CD_CONNECTOR_MINIMUM)) throw new CdEvidenceSafetyError("Cash Discount needs connector 0.5.4 or newer on the Tally computer so existing manual Credit Notes are checked.");
+  if (!result.data?.bridge_version || bridgeVersionIsOlder(result.data.bridge_version, CD_CONNECTOR_MINIMUM)) throw new CdEvidenceSafetyError("Cash Discount needs connector 0.6.4 or newer on the Tally computer so existing manual Credit Notes are checked.");
 }
 
 /** Old saved candidates must not remain postable after the reader is fixed. */

@@ -10,16 +10,16 @@ function database(rows) {
   } };
 }
 test("old or missing CD snapshots cannot authorize single or bulk credit creation", async () => {
-  for (const run of [null, { matchingVersion: null }, { matchingVersion: 0 }]) {
+  for (const run of [null, { matchingVersion: null }, { matchingVersion: 0 }, { matchingVersion: 1 }]) {
     await assert.rejects(requireCurrentCdCheck(database({ evaluation_runs: run }), "company"), /run Cash Discount again/);
   }
-  await requireCurrentCdCheck(database({ evaluation_runs: { matchingVersion: 1 } }), "company");
+  await requireCurrentCdCheck(database({ evaluation_runs: { matchingVersion: 2 } }), "company");
 });
 test("server checks need the reader update before a Tally read is queued", async () => {
   const binding = { connector_id: "connector" };
-  for (const version of [null, "0.5.3", "0.4.3"]) await assert.rejects(requireCurrentCdConnector(database({ tally_connector_company_bindings: binding, tally_connectors: { bridge_version: version } }), "company"), /0.5.4/);
-  await requireCurrentCdConnector(database({ tally_connector_company_bindings: binding, tally_connectors: { bridge_version: "0.5.4" } }), "company");
-  await requireCurrentCdConnector(database({ tally_connector_company_bindings: binding, tally_connectors: { bridge_version: "0.6.0" } }), "company");
+  for (const version of [null, "0.5.3", "0.4.3", "0.6.3"]) await assert.rejects(requireCurrentCdConnector(database({ tally_connector_company_bindings: binding, tally_connectors: { bridge_version: version } }), "company"), /0.6.4/);
+  await requireCurrentCdConnector(database({ tally_connector_company_bindings: binding, tally_connectors: { bridge_version: "0.6.4" } }), "company");
+  await requireCurrentCdConnector(database({ tally_connector_company_bindings: binding, tally_connectors: { bridge_version: "0.7.0" } }), "company");
 });
 test("old connector evidence cannot overwrite the saved settlement snapshot", async () => {
   await assert.rejects(completeCdSettlementRun({}, { invoices: [] }), /run Cash Discount again/);
