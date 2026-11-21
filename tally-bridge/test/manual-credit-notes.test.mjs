@@ -260,3 +260,31 @@ test("a CD note with three allocations and five named bills holds both narration
   for (const number of numbers.slice(5)) assert.equal(rows.get(number).status, "ready");
   assert.deepEqual(numbers.slice(0, 3).map(n => rows.get(n).alreadyCredited), ["8920.00", "2750.00", "2795.00"]);
 });
+for (const paymentDate of ["20260322", "20260323"]) {
+  test(`CD and TOD count the applied part of an advance dated ${paymentDate} and its linked settlement journal`, async () => {
+    const number = "S1";
+    const inv = voucher({ guid: "s", type: "Sales", number, amount: "100000", date: "20260323", inventory,
+      entries: ledger(customer.ledgerName, "-100000", [["ADV-17", "-95000", "Agst Ref"], [number, "-5000", "New Ref"]]) });
+    const pay = voucher({ guid: "r", type: "Receipt", number: "17", amount: "99000", date: paymentDate,
+      entries: ledger(customer.ledgerName, "99000", [["ADV-17", "99000", "Advance"]]) });
+    const journal = voucher({ guid: "j", type: "Journal", number: "6", amount: "5000", date: "20260323",
+      entries: ledger(customer.ledgerName, "5000", [[number, "5000"]]) + ledger("Mintifi", "-5000") });
+    const rows = [inv, pay, journal];
+    const cd = await check(rows);
+    assert.equal(cd.results[0].paidByDeadline, "100000.00");
+    const tod = (await check(rows, { tod: true })).customerAggregates[0].paymentChecks[0];
+    assert.equal(tod.reason, "paid_in_full_on_time");
+    assert.equal(tod.paidByDueDate, "100000");
+    assert.deepEqual(tod.payments.map(p => p.amount).sort(), ["5000", "95000"]);
+  });
+}
+
+test("ambiguous advance references never pay an invoice twice", async () => {
+  const inv = voucher({ guid: "s", type: "Sales", number: "S", amount: "100000", date: "20260323", inventory,
+    entries: ledger(customer.ledgerName, "-100000", [["ADV", "-100000", "Agst Ref"]]) });
+  const receipts = ["1","2"].map(guid => voucher({ guid, type: "Receipt", number: guid, amount: "100000", date: "20260322",
+    entries: ledger(customer.ledgerName, "100000", [["ADV", "100000", "New Ref"]]) }));
+  const rows = [inv, ...receipts];
+  assert.equal((await check(rows)).results[0].paidByDeadline, "0.00");
+  assert.equal((await check(rows, { tod: true })).customerAggregates[0].paymentChecks[0].paidByDueDate, "0");
+});

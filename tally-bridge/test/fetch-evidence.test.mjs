@@ -81,10 +81,12 @@ test("remote TOD retains the customer filter and seven-day windows including pay
    dateFrom:"2026-08-01",dateTo:"2026-08-07",paymentCheck:{readTo:"2026-08-14",dueDays:25},
    customers:[{customerId:"one",ledgerName:"Only Selected Customer"}],eligibleStockItemNames:["Steel"],unitConversions:[{uomCode:"MT",tonnesPerUnit:"1"}]}}},
    {config:{tallyUrl:"http://localhost:9000"},activeCompany:{name:"Test Company",guid:"company"},betweenWindows:async()=>{}});
-  assert.equal(requests.length,2);
+  assert.equal(requests.length,3);
   assert.ok(requests.every(xml=>xml.includes("Only Selected Customer")&&xml.includes("MeenakshiRequestedVoucher")));
-  assert.match(requests[0],/<SVTODATE TYPE="Date">20260807/);
-  assert.match(requests[1],/<SVTODATE TYPE="Date">20260814/);
+  assert.match(requests[0],/<SVFROMDATE TYPE="Date">20260731/);
+  assert.match(requests[0],/<SVTODATE TYPE="Date">20260806/);
+  assert.match(requests[1],/<SVTODATE TYPE="Date">20260813/);
+  assert.match(requests[2],/<SVTODATE TYPE="Date">20260814/);
   assert.equal(result.periodEnd,"2026-08-07");
  }finally{globalThis.fetch=previous;}
 });
@@ -120,7 +122,7 @@ test("Cash Discount fast path covers the whole year in bounded voucher windows w
       const iso = value => `${value.slice(0,4)}-${value.slice(4,6)}-${value.slice(6,8)}`;
       return [new Date(iso(from)), new Date(iso(to))];
     });
-    assert.equal(dates[0][0].toISOString().slice(0,10), "2026-01-01");
+    assert.equal(dates[0][0].toISOString().slice(0,10), "2025-12-31");
     assert.equal(dates.at(-1)[1].toISOString().slice(0,10), "2026-12-31");
     dates.forEach(([from,to], i) => {
       assert.ok((to - from) / 86400000 < 10, "each window must be at most ten days");
