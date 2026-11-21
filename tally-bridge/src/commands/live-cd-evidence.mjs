@@ -1,3 +1,4 @@
+import { advanceDraws, matchPayments, paymentWindowStart, settlementAllocations } from "./payment-matching.mjs";
 import { createHash } from "node:crypto";
 import Decimal from "decimal.js";
 import {BRIDGE_VERSION} from "../version.mjs";
@@ -5,7 +6,7 @@ import {BRIDGE_VERSION} from "../version.mjs";
 import { syncVouchers } from "./sync-vouchers.mjs";
 import { buildCollectionExportXml, extractBlocks, getAttribute, getTagText, postTallyXml } from "../tally/xml.mjs";
 import { sourceSalesLedgerName } from "./voucher-ledgers.mjs";
-import { CREDIT_NOTE_MATCHING_VERSION, allocationCustomer, creditNoteEvidence, creditNotePurpose, customerForVoucher, invoiceMatcher, matchCreditNotes } from "./credit-note-matching.mjs";
+import { CREDIT_NOTE_MATCHING_VERSION, allocationCustomer, creditNoteEvidence, creditNotePurpose, customerForVoucher, matchCreditNotes } from "./credit-note-matching.mjs";
 
 const MAX_CHUNKS = 400;
 const MAX_INVOICES = 25_000;
@@ -106,9 +107,8 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
   const creditNotes = [];
   // On-account credit (+) and debit (−) per customer: money not set against any bill.
   const onAccount = [];
-  const settlesBills = (voucher) => ["receipt", "payment"].includes(voucher.voucherKind)
-    || (perMt && voucher.voucherKind === "other" && /journal|payment/i.test(String(voucher.voucherTypeName ?? "")));
-  let cursor = scope.dateFrom;
+  const readFrom = paymentWindowStart(scope.dateFrom);
+  let cursor = readFrom;
   let chunks = 0;
   let vouchersScanned = 0;
   // Resume after a crash or restart: the checkpoint holds everything read so far.
@@ -135,12 +135,14 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
     if (days === 0) throw new Error(`Tally could not give the data for ${cursor} even one day at a time, and the connector stopped each time it tried. Ask support to look at that day in Tally.`);
     await context.betweenWindows?.(); // server mode: lets a waiting Credit Note run between read windows
     persist(cursor); // marks this window as "being read": if the connector dies now, the next try uses a smaller window
-    const result = await syncVouchers({ ...command, payload: { ...command.payload, syncRunId: command.payload.voucherSyncRunId, requestedScope: { ...scope, customers: eligibleCustomers, cursor, chunkDays: days } } }, context);
+    const result = await syncVouchers({ ...command, payload: { ...command.payload, syncRunId: command.payload.voucherSyncRunId, requestedScope: { ...scope, dateFrom: readFrom, customers: eligibleCustomers, cursor, chunkDays: days } } }, context);
     chunks += 1;
     vouchersScanned += result.vouchers.length;
     context.onProgress?.({ done: chunks, total: Math.max(totalChunks, chunks), nextDate: result.cursorTo ?? null, vouchersScanned });
     for (const voucher of result.vouchers) {
       const customer = customerForVoucher(voucher, eligibleCustomers);
+      allocations.push(...settlementAllocations(voucher, eligibleCustomers, perMt));
+      if (voucher.voucherDate < scope.dateFrom) continue;
       // Only invoices dated within the rule (up to its end date) are checked.
       const invoiceInRule = !scope.invoiceDateTo || String(voucher.voucherDate ?? "").slice(0, 10) <= scope.invoiceDateTo;
       if (customer && voucher.voucherKind === "sales" && voucher.status === "posted" && invoiceInRule) {
@@ -169,7 +171,7 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
         // A per-MT rule pays only on eligible product tonnes: an invoice with no
         // eligible line (and no unit problem to report) can never earn it.
         if (perMt && eligibleTonnes.lte(0) && missingUnits.size === 0) continue;
-        invoices.push({ customerId: customer.customerId, customerLedgerName: customer.ledgerName, sourceSalesLedgerName: sourceSalesLedgerName(voucher), tallyGuid: voucher.guid, voucherNumber: voucher.voucherNumber || null, billReferences, voucherDate: voucher.voucherDate, grossAmount: grossAmount.toFixed(), eligibleValue: grossAmount.toFixed(), narration: voucher.narration || "", inventoryLineCount: 0, ...(perMt ? { eligibleTonnes: eligibleTonnes.toFixed(), missingUnits: [...missingUnits].sort(), productLines } : {}) });
+        invoices.push({ customerId: customer.customerId, customerLedgerName: customer.ledgerName, sourceSalesLedgerName: sourceSalesLedgerName(voucher), tallyGuid: voucher.guid, voucherNumber: voucher.voucherNumber || null, billReferences, advanceDraws: advanceDraws(voucher, customer.customerId, eligibleCustomers), voucherDate: voucher.voucherDate, grossAmount: grossAmount.toFixed(), eligibleValue: grossAmount.toFixed(), narration: voucher.narration || "", inventoryLineCount: 0, ...(perMt ? { eligibleTonnes: eligibleTonnes.toFixed(), missingUnits: [...missingUnits].sort(), productLines } : {}) });
         if (invoices.length > MAX_INVOICES) throw new Error("The Cash Discount calculation found too many Sales invoices. Set an earlier end date on the Cash Discount rule, or start it later.");
       }
       // Tally can carry an against-reference settlement in either a Receipt
@@ -186,12 +188,6 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
           const amount = new Decimal(allocation.allocatedAmount || 0).abs();
           const debit = String(allocation.sourcePayload?.rawAmount ?? "").trim().startsWith("-");
           onAccount.push({ customerId: customer.customerId, date: voucher.voucherDate, amount: (debit ? amount.neg() : amount).toFixed(), source: `${voucher.voucherTypeName || voucher.voucherKind} ${voucher.voucherNumber || ""}`.trim() });
-        }
-      }
-      if (settlesBills(voucher) && voucher.status === "posted") {
-        for (const allocation of voucher.billAllocations) {
-          const owner = allocationCustomer(allocation, voucher, eligibleCustomers);
-          if (owner) allocations.push({ customerId: owner.customerId, allocationKey: allocation.allocationKey, receiptGuid: voucher.guid, receiptNumber: voucher.voucherNumber || null, receiptType: voucher.voucherTypeName || null, receiptDate: voucher.voucherDate, billReference: allocation.billReference || null, targetVoucherGuid: allocation.targetVoucherGuid || null, targetVoucherNumber: allocation.targetVoucherNumber || null, allocationType: allocation.allocationType, allocatedAmount: allocation.allocatedAmount });
         }
       }
       if (customer && voucher.voucherKind === "debit_note") {
@@ -214,20 +210,9 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
     cursor = result.cursorTo;
     persist(null);
   }
-  const paymentsByInvoice = new Map();
-  const matchInvoice = invoiceMatcher(invoices);
-  for (const allocation of allocations) {
-    if (allocation.allocationType !== "agst_ref") continue;
-    const matches = matchInvoice(allocation, { customerId: allocation.customerId });
-    if (matches.length === 1) for (const invoice of matches) {
-      const key = invoice.tallyGuid;
-      const payments = paymentsByInvoice.get(key) ?? [];
-      payments.push(allocation);
-      paymentsByInvoice.set(key, payments);
-    }
-  }
+  const paymentsByInvoice = matchPayments(invoices, allocations);
   const notesByInvoice = perMt ? matchCreditNotes(invoices, creditNotes, eligibleCustomers) : new Map();
-  const invoiceResults = invoices.map((invoice) => ({
+  const invoiceResults = invoices.map(({ advanceDraws: _draws, ...invoice }) => ({
     ...invoice,
     payments: [...new Map(
       (paymentsByInvoice.get(invoice.tallyGuid) ?? [])

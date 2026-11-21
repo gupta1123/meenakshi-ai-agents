@@ -1,10 +1,11 @@
+import { advanceDraws, matchPayments, paymentWindowStart, settlementAllocations } from "./payment-matching.mjs";
 import { createHash } from "node:crypto";
 import Decimal from "decimal.js";
 import {BRIDGE_VERSION} from "../version.mjs";
 
 import { syncVouchers } from "./sync-vouchers.mjs";
 import { sourceSalesLedgerName } from "./voucher-ledgers.mjs";
-import { allocationCustomer, creditNoteEvidence, customerForVoucher, invoiceMatcher, matchCreditNotes } from "./credit-note-matching.mjs";
+import { allocationCustomer, creditNoteEvidence, customerForVoucher, matchCreditNotes } from "./credit-note-matching.mjs";
 
 const MAX_CHUNKS = 60;
 const MAX_MATCHING_VOUCHERS = 50_000;
@@ -71,16 +72,9 @@ function applyContribution({ aggregate, voucher, voucherTaxableValue, voucherTon
  * set against the bill in Tally (for example a manual discount note), for the amount set against it.
  */
 function checkPayments(pendingSales, allocations, paymentCheck, notes, customers) {
-  const invoices = pendingSales.map(({ voucher, aggregate }) => ({ tallyGuid: voucher.guid, voucherNumber: voucher.voucherNumber, voucherDate: voucher.voucherDate, customerId: aggregate.customerId, billReferences: (voucher.billAllocations ?? []).filter((allocation) => allocation.allocationType === "new_ref" && allocationCustomer(allocation, voucher, customers)?.customerId === aggregate.customerId).map((allocation) => allocation.billReference) }));
-  const matchInvoice = invoiceMatcher(invoices);
+  const invoices = pendingSales.map(({ voucher, aggregate }) => ({ tallyGuid: voucher.guid, voucherNumber: voucher.voucherNumber, voucherDate: voucher.voucherDate, customerId: aggregate.customerId, advanceDraws: advanceDraws(voucher, aggregate.customerId, customers), billReferences: (voucher.billAllocations ?? []).filter((allocation) => allocation.allocationType === "new_ref" && allocationCustomer(allocation, voucher, customers)?.customerId === aggregate.customerId).map((allocation) => allocation.billReference) }));
   const notesByInvoice = matchCreditNotes(invoices, notes, customers);
-  const paymentsByInvoice = new Map();
-  for (const allocation of allocations) {
-    const matches = matchInvoice(allocation, { customerId: allocation.customerId });
-    if (matches.length !== 1) continue;
-    const key = matches[0].tallyGuid;
-    paymentsByInvoice.set(key, [...(paymentsByInvoice.get(key) ?? []), allocation]);
-  }
+  const paymentsByInvoice = matchPayments(invoices, allocations);
   const checks = [];
   for (const entry of pendingSales) {
     const { voucher } = entry;
@@ -155,7 +149,8 @@ export async function fetchLiveTodEvidence(command, context) {
   const paymentCheck = scope.paymentCheck && typeof scope.paymentCheck === "object" ? scope.paymentCheck : null;
   const readTo = paymentCheck?.readTo && paymentCheck.readTo > scope.dateTo ? paymentCheck.readTo : scope.dateTo;
 
-  let cursor = scope.dateFrom;
+  const readFrom = paymentCheck ? paymentWindowStart(scope.dateFrom) : scope.dateFrom;
+  let cursor = readFrom;
   let chunks = 0;
   let vouchersScanned = 0;
   let totalMatchingVouchers = 0;
@@ -168,17 +163,13 @@ export async function fetchLiveTodEvidence(command, context) {
     await context.betweenWindows?.();
     if (context.isCancelled?.()) throw new Error("This Turnover Discount check was stopped.");
     if (chunks >= MAX_CHUNKS) throw new Error("The requested Tally period is too large for one live calculation.");
-    const result = await syncVouchers({ ...command, payload: { ...command.payload, syncRunId: command.payload.voucherSyncRunId, requestedScope: { ...scope, customerLedgerName: null, customers: scope.diagnosticTargeted ? requestedCustomers : null, dateTo: readTo, cursor } } }, context);
+    const result = await syncVouchers({ ...command, payload: { ...command.payload, syncRunId: command.payload.voucherSyncRunId, requestedScope: { ...scope, dateFrom: readFrom, customerLedgerName: null, customers: scope.diagnosticTargeted ? requestedCustomers : null, dateTo: readTo, cursor } } }, context);
     chunks += 1;
     context.onProgress?.({ done: chunks, nextDate: result.cursorTo, vouchersScanned: vouchersScanned + result.vouchers.length });
     vouchersScanned += result.vouchers.length;
     for (const voucher of result.vouchers) {
-      if (paymentCheck && ["receipt", "payment"].includes(voucher.voucherKind) && voucher.status === "posted") {
-        for (const allocation of voucher.billAllocations ?? []) {
-          const owner = allocationCustomer(allocation, voucher, requestedCustomers);
-          if (allocation.allocationType === "agst_ref" && owner) allocations.push({ customerId: owner.customerId, allocationKey: allocation.allocationKey, receiptGuid: voucher.guid, receiptNumber: voucher.voucherNumber || null, receiptDate: voucher.voucherDate, billReference: allocation.billReference || null, targetVoucherGuid: allocation.targetVoucherGuid || null, targetVoucherNumber: allocation.targetVoucherNumber || null, allocatedAmount: allocation.allocatedAmount });
-        }
-      }
+      if (paymentCheck) allocations.push(...settlementAllocations(voucher, requestedCustomers, true));
+      if (voucher.voucherDate < scope.dateFrom) continue;
       if (paymentCheck && voucher.voucherKind === "credit_note" && voucher.status === "posted") {
         creditNotes.push(creditNoteEvidence(voucher));
       }

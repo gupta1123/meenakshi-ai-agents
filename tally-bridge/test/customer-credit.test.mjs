@@ -90,7 +90,7 @@ test("Turnover Discount counts a manual Credit Note set against the bill", async
     + "<NARRATION>Being Amount credited twds Discount allowed vide B.No.2626 (42.240 x 500/-)</NARRATION>"
     + "<ALLLEDGERENTRIES.LIST><LEDGERNAME>BKP Traders</LEDGERNAME><AMOUNT>21120</AMOUNT><BILLALLOCATIONS.LIST><NAME>MUI/2626</NAME><BILLTYPE>Agst Ref</BILLTYPE><AMOUNT>21120</AMOUNT></BILLALLOCATIONS.LIST></ALLLEDGERENTRIES.LIST></VOUCHER>";
   const run = async (vouchers) => {
-    globalThis.fetch = async (_url, options) => new Response(`<ENVELOPE>${String(options?.body ?? "").includes("20260801</SVFROMDATE") ? vouchers : ""}</ENVELOPE>`, { status: 200 });
+    globalThis.fetch = async (_url, options) => new Response(`<ENVELOPE>${String(options?.body ?? "").includes("20260731</SVFROMDATE") ? vouchers : ""}</ENVELOPE>`, { status: 200 });
     const result = await fetchLiveTodEvidence({ payload: { evaluationRunId: "e-1", voucherScope: {
       purpose: "live_tod_evaluation", liveAggregation: true, dateFrom: "2026-08-01", dateTo: "2026-08-31",
       customers: [{ customerId: "bkp", ledgerName: "BKP Traders" }], eligibleStockItemNames: ["Steel"],
@@ -127,7 +127,7 @@ test("Cash Discount reads on-account credit and the opening on-account balance",
     const body = String(options?.body ?? "");
     requests.push(body);
     if (body.includes("<TYPE>Ledger</TYPE>")) return new Response(`<ENVELOPE>${ledger}</ENVELOPE>`, { status: 200 });
-    return new Response(`<ENVELOPE>${body.includes("20250401</SVFROMDATE") ? sales + receipt : ""}</ENVELOPE>`, { status: 200 });
+    return new Response(`<ENVELOPE>${body.includes("20250331</SVFROMDATE") ? sales + receipt : ""}</ENVELOPE>`, { status: 200 });
   };
   try {
     const evidence = await fetchLiveCdEvidence({ payload: { evaluationRunId: "e-1", voucherScope: {
