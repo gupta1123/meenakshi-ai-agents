@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { localTallyUrls, findBoundTally } from "./tally/local-instances.mjs";
 import {pathToFileURL} from "node:url";
 import path from "node:path";
 import {processSupportJob,supportRequest} from "./support/client.mjs";
@@ -267,12 +268,30 @@ async function startBridge(config) {
   let cachedCompanies = [];
   let nextHeartbeatAt = 0;
   let nextCompanyListAt = 0;
+  let nextDiscoveryAt = 0;
+  const configuredUrl = config.tallyUrl;
+  const discoverLocal = serverMode && process.platform === "win32" &&
+    ["localhost", "127.0.0.1", "[::1]"].includes(new URL(configuredUrl).hostname);
   try { for (;;) {
     try {
       const now = Date.now();
       if (!snapshot || now >= nextHeartbeatAt) {
         const refreshCompanyList = now >= nextCompanyListAt || cachedCompanies.length === 0;
         snapshot = await heartbeat(config, refreshCompanyList ? null : cachedCompanies);
+        const bindings = readRuntimeStatus()?.connection?.bindings ?? [];
+        if (discoverLocal && bindings.length === 1 && !bindings[0].matches && bindings[0].expectedCompany?.guid && now >= nextDiscoveryAt) {
+          nextDiscoveryAt = now + 300000;
+          try {
+            const urls = await localTallyUrls();
+            const selected = await findBoundTally(urls, bindings[0].expectedCompany.guid);
+            logLine("INFO", "Checked local Tally listeners", { urls, selected });
+            const nextUrl = selected || configuredUrl;
+            if (nextUrl !== config.tallyUrl) {
+              config = { ...config, tallyUrl: nextUrl };
+              snapshot = await heartbeat(config);
+            }
+          } catch (error) { logLine("WARN", "Local Tally discovery unavailable", { error: error.message }); }
+        }
         cachedCompanies = snapshot.availableCompanies;
         nextHeartbeatAt = Date.now() + config.heartbeatIntervalMs;
         if (refreshCompanyList || snapshot.companySnapshotFresh) nextCompanyListAt = Date.now() + config.companyListIntervalMs;
