@@ -9,10 +9,10 @@ function sameCompany(left, right) {
   return left.name.trim().toLowerCase() === right.name.trim().toLowerCase();
 }
 
-export async function probeTallyCompanies(tallyUrl) {
-  const name = await probeCurrentCompanyName(tallyUrl);
+export async function probeTallyCompanies(tallyUrl, options = {}) {
+  const name = await probeCurrentCompanyName(tallyUrl, options);
 
-  const companiesXml = await postTallyXml(tallyUrl, buildCompanyCollectionXml(), { operation: "Read Tally companies" });
+  const companiesXml = await postTallyXml(tallyUrl, buildCompanyCollectionXml(), { ...options, operation: "Read Tally companies" });
   const seen = new Set();
   const companies = extractBlocks(companiesXml, "COMPANY").flatMap((companyXml) => {
     const company = {
@@ -30,8 +30,8 @@ export async function probeTallyCompanies(tallyUrl) {
   return { activeCompany: active, availableCompanies };
 }
 
-export async function probeCurrentCompanyName(tallyUrl) {
-  const currentXml = await postTallyXml(tallyUrl, buildCurrentCompanyXml(), { operation: "Read active Tally company" });
+export async function probeCurrentCompanyName(tallyUrl, options = {}) {
+  const currentXml = await postTallyXml(tallyUrl, buildCurrentCompanyXml(), { ...options, operation: "Read active Tally company" });
   const name = getTagText(currentXml, "RESULT") || getTagText(currentXml, "COMPANYNAME");
   if (!name) throw new Error("Tally did not identify the currently active company.");
   return name.trim();

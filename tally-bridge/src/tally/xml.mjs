@@ -131,7 +131,7 @@ export function buildCollectionExportXml({ collectionName, tallyType, fetchField
   ].join("");
 }
 
-export async function postTallyXml(tallyUrl, xml, { timeoutMs = DEFAULT_TIMEOUT_MS, operation = "Tally request" } = {}) {
+export async function postTallyXml(tallyUrl, xml, { timeoutMs = DEFAULT_TIMEOUT_MS, redirect = "follow", operation = "Tally request" } = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -139,7 +139,7 @@ export async function postTallyXml(tallyUrl, xml, { timeoutMs = DEFAULT_TIMEOUT_
       method: "POST",
       headers: { "content-type": "text/xml" },
       body: xml,
-      signal: controller.signal,
+      signal: controller.signal, redirect,
     });
     const responseXml = await response.text();
     const lineError = getTagText(responseXml, "LINEERROR");
