@@ -92,6 +92,25 @@ export async function prepareSupportRequest(
       : [];
     return { operation, connector, request: { days } };
   }
+  if (operation === "diagnostic" && input.type === "company_overview") {
+    // Month-by-month voucher counts of whichever company is open in Tally.
+    // Read-only, dates only. It deliberately does not need the linked company.
+    const from = input.dateFrom,
+      to = input.dateTo;
+    if (!iso(from) || !iso(to) || from > to)
+      throw new SupportError("Choose a valid date range.");
+    const months =
+      (Number(to.slice(0, 4)) - Number(from.slice(0, 4))) * 12 +
+      Number(to.slice(5, 7)) -
+      Number(from.slice(5, 7)) +
+      1;
+    if (months > 36) throw new SupportError("Choose at most 36 months.");
+    return {
+      operation,
+      connector,
+      request: { type: "company_overview", dateFrom: from, dateTo: to, pauseMs },
+    };
+  }
   if (operation === "diagnostic") {
     if (!isUuid(input.customerId)) throw new SupportError("Choose a customer.");
     const { data: c, error } = await db
