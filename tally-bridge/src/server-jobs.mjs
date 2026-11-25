@@ -32,7 +32,11 @@ function normalized(value) { return String(value ?? "").trim().toLowerCase(); }
 export function companiesMatch(expected, active) {
   const expectedGuid = normalized(expected?.guid);
   const activeGuid = normalized(active?.guid);
-  if (expectedGuid || activeGuid) return Boolean(expectedGuid && activeGuid) && expectedGuid === activeGuid;
+  if (expectedGuid || activeGuid) {
+    if (!(expectedGuid && activeGuid && expectedGuid === activeGuid)) return false;
+    // Financial-year companies split from one company share a GUID, so the year in the name decides.
+    return !normalized(expected?.name) || !normalized(active?.name) || normalized(expected.name) === normalized(active.name);
+  }
   return normalized(expected?.name) !== "" && normalized(expected?.name) === normalized(active?.name);
 }
 

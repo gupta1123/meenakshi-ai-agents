@@ -201,3 +201,9 @@ test("one queued TOD job reads every period and returns evidence ready for brows
   assert.equal(result.totals.projectedDiscount,"1400.00");
   assert.deepEqual(result.evidence.customerAggregates.map((a)=>[a.periodStart,a.periodEnd]),periods);
 });
+
+test("companies that share a GUID but are different financial years do not match", () => {
+  assert.equal(companiesMatch({ guid: "g", name: "Co - (2025-2026)" }, { guid: "G", name: "Co - (2026-2027)" }), false);
+  assert.equal(companiesMatch({ guid: "g", name: "Co - (2025-2026)" }, { guid: "G", name: " co - (2025-2026) " }), true);
+  assert.equal(companiesMatch({ guid: "g" }, { guid: "g", name: "Co" }), true);
+});
