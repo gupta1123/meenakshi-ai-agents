@@ -34,3 +34,18 @@ test("company overview refuses bad or very long ranges and stops when cancelled"
     /stopped/,
   );
 });
+
+test("company overview can read a named company on another local port", async () => {
+  const urls = [];
+  const post = async (url, xml) => { urls.push([url, xml]); return "<ENVELOPE></ENVELOPE>"; };
+  const result = await runCompanyOverview(
+    { dateFrom: "2026-04-01", dateTo: "2026-04-05", port: 9002, companyName: "Other Co - (2025-2026)", pauseMs: 1000 },
+    { config: { tallyUrl: "http://localhost:9000" }, activeCompany: null },
+    { post, pause: async () => {} },
+  );
+  assert.equal(urls[0][0], "http://127.0.0.1:9002");
+  assert.match(urls[0][1], /<SVCURRENTCOMPANY>Other Co - \(2025-2026\)<\/SVCURRENTCOMPANY>/);
+  assert.deepEqual(result.company, { name: "Other Co - (2025-2026)", port: 9002 });
+  assert.throws(() => validateCompanyOverview({ dateFrom: "2026-04-01", dateTo: "2026-04-05", port: 80, companyName: "X" }), /valid Tally port/);
+  assert.throws(() => validateCompanyOverview({ dateFrom: "2026-04-01", dateTo: "2026-04-05", port: 9002 }), /Name the Tally company/);
+});

@@ -1,5 +1,6 @@
 import { runDiagnostic, resolveSupportCustomers } from "./diagnostics.mjs";
 import { runCompanyOverview } from "./company-overview.mjs";
+import { runTallyPorts } from "./tally-ports.mjs";
 import { runCheckJob } from "../server-jobs.mjs";
 import { sendLogDays } from "../log-upload.mjs";
 import { listLogDays } from "../connector-log.mjs";
@@ -98,8 +99,10 @@ export async function processSupportJob(
     let result;
     if (job.operation === "diagnostic" && job.request?.type === "company_overview") {
       // Read-only month counts of whichever company is open (no customer, no amounts).
-      if (!activeCompany) throw new Error("No Tally company is open.");
+      if (!activeCompany && !job.request.port) throw new Error("No Tally company is open.");
       result = await (deps.companyOverview ?? runCompanyOverview)(job.request, context);
+    } else if (job.operation === "diagnostic" && job.request?.type === "tally_ports") {
+      result = await (deps.tallyPorts ?? runTallyPorts)(job.request, context);
     } else if (["diagnostic", "recalculate"].includes(job.operation)) {
       if (
         !activeCompany ||
