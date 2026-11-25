@@ -279,11 +279,14 @@ async function startBridge(config) {
         const refreshCompanyList = now >= nextCompanyListAt || cachedCompanies.length === 0;
         snapshot = await heartbeat(config, refreshCompanyList ? null : cachedCompanies);
         const bindings = readRuntimeStatus()?.connection?.bindings ?? [];
-        if (discoverLocal && bindings.length === 1 && !bindings[0].matches && bindings[0].expectedCompany?.guid && now >= nextDiscoveryAt) {
+        const expectedName = String(bindings[0]?.expectedCompany?.name ?? "").trim().toLowerCase();
+        const openName = String(snapshot.activeCompany?.name ?? "").trim().toLowerCase();
+        const wrongYear = Boolean(expectedName && openName && expectedName !== openName);
+        if (discoverLocal && bindings.length === 1 && (!bindings[0].matches || wrongYear) && bindings[0].expectedCompany?.guid && now >= nextDiscoveryAt) {
           nextDiscoveryAt = now + 300000;
           try {
             const urls = await localTallyUrls();
-            const selected = await findBoundTally(urls, bindings[0].expectedCompany.guid);
+            const selected = await findBoundTally(urls, bindings[0].expectedCompany.guid, undefined, bindings[0].expectedCompany.name);
             logLine("INFO", "Checked local Tally listeners", { urls, selected });
             const nextUrl = selected || configuredUrl;
             if (nextUrl !== config.tallyUrl) {

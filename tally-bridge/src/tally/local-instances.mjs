@@ -23,10 +23,17 @@ export async function localTallyUrls() {
   return [...urls];
 }
 
-export async function findBoundTally(urls, guid, probe = probeTallyCompanies) {
+// Two Tally companies (for example two financial years split from one company) can share
+// one GUID and differ only by name, so when a name is given the listener holding that exact
+// name wins, and a renamed company on its own is still found by GUID.
+export async function findBoundTally(urls, guid, probe = probeTallyCompanies, expectedName = "") {
+  const wanted = String(expectedName ?? "").trim().toLowerCase();
+  let byGuid = null;
   for (const url of urls) {
     const snapshot = await probe(url, { timeoutMs: 2000, redirect: "error" }).catch(() => null);
-    if (guid && snapshot?.activeCompany?.guid?.toLowerCase() === guid.toLowerCase()) return url;
+    if (!guid || snapshot?.activeCompany?.guid?.toLowerCase() !== guid.toLowerCase()) continue;
+    if (!wanted || String(snapshot.activeCompany.name ?? "").trim().toLowerCase() === wanted) return url;
+    byGuid ??= url;
   }
-  return null;
+  return byGuid;
 }
