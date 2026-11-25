@@ -16,13 +16,20 @@ export function validateCompanyOverview(input) {
     throw new Error("A valid date range is required.");
   const months = (Number(input.dateTo.slice(0, 4)) - Number(input.dateFrom.slice(0, 4))) * 12 + Number(input.dateTo.slice(5, 7)) - Number(input.dateFrom.slice(5, 7)) + 1;
   if (months > MAX_MONTHS) throw new Error(`Choose at most ${MAX_MONTHS} months.`);
-  return { dateFrom: input.dateFrom, dateTo: input.dateTo, pauseMs: Math.max(1000, Math.min(10000, Number(input.pauseMs) || 2000)) };
+  const port = input.port === undefined || input.port === null ? null : Number(input.port);
+  if (port !== null && (!Number.isInteger(port) || port < 1024 || port > 65535)) throw new Error("Choose a valid Tally port.");
+  const companyName = input.companyName === undefined || input.companyName === null ? null : String(input.companyName).trim();
+  if (port !== null && !companyName) throw new Error("Name the Tally company on that port.");
+  return { dateFrom: input.dateFrom, dateTo: input.dateTo, port, companyName, pauseMs: Math.max(1000, Math.min(10000, Number(input.pauseMs) || 2000)) };
 }
 
 export async function runCompanyOverview(input, context, deps = {}) {
   const request = validateCompanyOverview(input);
   const post = deps.post ?? postTallyXml;
   const pause = deps.pause ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  // A named port reads that company on that local Tally; otherwise the open, linked one.
+  const tallyUrl = request.port ? `http://127.0.0.1:${request.port}` : context.config.tallyUrl;
+  const companyName = request.port ? request.companyName : context.activeCompany.name;
   const counts = new Map();
   let windows = 0;
   for (let from = request.dateFrom; from <= request.dateTo; from = addDays(from, WINDOW_DAYS)) {
@@ -31,9 +38,9 @@ export async function runCompanyOverview(input, context, deps = {}) {
     const to = addDays(from, WINDOW_DAYS - 1) > request.dateTo ? request.dateTo : addDays(from, WINDOW_DAYS - 1);
     const xml = buildCollectionExportXml({
       collectionName: "Meenakshi Support Voucher Dates", tallyType: "Voucher", fetchFields: "Date",
-      companyName: context.activeCompany.name, dateFrom: from, dateTo: to,
+      companyName, dateFrom: from, dateTo: to,
     });
-    const response = await post(context.config.tallyUrl, xml, { timeoutMs: 30_000, operation: "Count vouchers in a small window" });
+    const response = await post(tallyUrl, xml, { timeoutMs: 30_000, operation: "Count vouchers in a small window" });
     recordRuntimeRead();
     windows += 1;
     for (const block of extractBlocks(response, "VOUCHER")) {
@@ -48,7 +55,7 @@ export async function runCompanyOverview(input, context, deps = {}) {
   const months = [...counts.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([month, vouchers]) => ({ month, vouchers }));
   return {
     type: "company_overview",
-    company: { name: context.activeCompany.name, guid: context.activeCompany.guid },
+    company: request.port ? { name: companyName, port: request.port } : { name: context.activeCompany.name, guid: context.activeCompany.guid },
     dateFrom: request.dateFrom, dateTo: request.dateTo, windows,
     totalVouchers: months.reduce((sum, row) => sum + row.vouchers, 0),
     months,

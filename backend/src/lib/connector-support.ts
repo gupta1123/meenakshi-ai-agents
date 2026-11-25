@@ -92,6 +92,10 @@ export async function prepareSupportRequest(
       : [];
     return { operation, connector, request: { days } };
   }
+  if (operation === "diagnostic" && input.type === "tally_ports") {
+    // Which local Tally listeners exist and which companies each one holds.
+    return { operation, connector, request: { type: "tally_ports" } };
+  }
   if (operation === "diagnostic" && input.type === "company_overview") {
     // Month-by-month voucher counts of whichever company is open in Tally.
     // Read-only, dates only. It deliberately does not need the linked company.
@@ -105,10 +109,21 @@ export async function prepareSupportRequest(
       Number(from.slice(5, 7)) +
       1;
     if (months > 36) throw new SupportError("Choose at most 36 months.");
+    // Optionally read a named company on another local Tally port.
+    const port = input.port === undefined || input.port === null ? null : Number(input.port);
+    const companyName = String(input.companyName ?? "").trim();
+    if (port !== null && (!Number.isInteger(port) || port < 1024 || port > 65535 || !companyName || companyName.length > 200))
+      throw new SupportError("Choose a valid Tally port and company name.");
     return {
       operation,
       connector,
-      request: { type: "company_overview", dateFrom: from, dateTo: to, pauseMs },
+      request: {
+        type: "company_overview",
+        dateFrom: from,
+        dateTo: to,
+        pauseMs,
+        ...(port !== null ? { port, companyName } : {}),
+      },
     };
   }
   if (operation === "diagnostic") {
