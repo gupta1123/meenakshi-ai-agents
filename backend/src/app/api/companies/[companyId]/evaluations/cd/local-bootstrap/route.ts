@@ -5,6 +5,7 @@ import { requireRequestUser } from "@/lib/api/request-auth";
 import { loadLiveCdLocalBootstrap, type EvaluationRunRecord } from "@/lib/evaluation/evidence";
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { continuationWindow, loadYearSuccessor } from "@/lib/year-continuation";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -24,8 +25,14 @@ export async function GET(request: Request, context: RouteContext) {
   try {
     const { companyId } = await context.params;
     if (!isUuid(companyId)) return jsonWithCors(request, { error: "Invalid company id." }, { status: 400 });
-    const { company } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
+    const { company, organization } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
     await requireCurrentCheckPage(request, company.id);
+    // Receipts for this year's invoices may sit in the next year's Tally company; tell the connector where.
+    const successor = await loadYearSuccessor(company, organization.id);
+    const withContinuation = (scope: Record<string, unknown>) => {
+      const window = successor ? continuationWindow(successor, String(scope.dateTo ?? "")) : null;
+      return window ? { ...scope, continuation: window } : scope;
+    };
     const url = new URL(request.url);
     const today = new Date().toISOString().slice(0, 10);
     const requested = url.searchParams.get("evaluatedOn") ?? today;
@@ -67,7 +74,7 @@ export async function GET(request: Request, context: RouteContext) {
               evaluatedOn: rpc.evaluatedOn,
               expectedCompany: { name: company.tally_company_name, guid: company.tally_company_guid, booksFrom: company.tally_books_from ?? null },
               rule: rpc.rule,
-              voucherScope: { ...(rpc.voucherScope as Record<string, unknown>), evaluationRunId: null },
+              voucherScope: withContinuation({ ...(rpc.voucherScope as Record<string, unknown>), evaluationRunId: null }),
             },
             { headers: { "Cache-Control": "private, max-age=30, stale-while-revalidate=120", "X-Cache": "MISS-RPC" } }
           );
@@ -87,7 +94,7 @@ export async function GET(request: Request, context: RouteContext) {
       evaluatedOn: bootstrap.evaluatedOn,
       expectedCompany: { name: company.tally_company_name, guid: company.tally_company_guid, booksFrom: company.tally_books_from ?? null },
       rule: bootstrap.rule,
-      voucherScope: { ...bootstrap.voucherScope, evaluationRunId: null },
+      voucherScope: withContinuation({ ...bootstrap.voucherScope, evaluationRunId: null }),
     }, { headers: { "Cache-Control": "private, max-age=30, stale-while-revalidate=120" } });
   } catch (error) {
     if (error instanceof MeenakshiAccessError) return jsonWithCors(request, { error: error.message }, { status: error.status });

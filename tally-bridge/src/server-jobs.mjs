@@ -47,7 +47,7 @@ export function assertRightCompany(job, activeCompany) {
  * Runs one claimed check job and returns the result in the same shape the PC
  * connector gives the browser: { ...calculation, evidence, durationMs, timings }.
  */
-export async function runCheckJob(job, { config, activeCompany, isCancelled, onProgress, betweenWindows }, deps = defaultDeps) {
+export async function runCheckJob(job, { config, activeCompany, isCancelled, onProgress, betweenWindows, resolveTarget = null }, deps = defaultDeps) {
   assertRightCompany(job, activeCompany);
   if (job.kind === "einvoice") {
     // One company, one day, one voucher: a small read, so it needs no windows or checkpoint.
@@ -74,7 +74,7 @@ export async function runCheckJob(job, { config, activeCompany, isCancelled, onP
     const results = [];
     for (const batch of body.batches) {
       if (isCancelled()) throw Object.assign(new Error("The check was stopped."), { cancelled: true });
-      results.push(await runCheckJob({ ...job, request: { body: { ...batch, evaluatedOn: body.evaluatedOn } } }, { config, activeCompany, isCancelled, onProgress, betweenWindows }, deps));
+      results.push(await runCheckJob({ ...job, request: { body: { ...batch, evaluatedOn: body.evaluatedOn } } }, { config, activeCompany, isCancelled, onProgress, betweenWindows, resolveTarget }, deps));
     }
     const first = results[0];
     return {
@@ -101,16 +101,16 @@ export async function runCheckJob(job, { config, activeCompany, isCancelled, onP
   const readStarted = performance.now();
   // Resume after a restart: the checkpoint is keyed by company, scope and date.
   const checkpoint = isCashDiscount
-    ? deps.createCheckpoint(canonicalJson({ evidenceVersion: 3, company: activeCompany.guid || activeCompany.name, scope: body.voucherScope, evaluatedOn: body.evaluatedOn }))
+    ? deps.createCheckpoint(canonicalJson({ evidenceVersion: 4, company: activeCompany.guid || activeCompany.name, scope: body.voucherScope, evaluatedOn: body.evaluatedOn }))
     : null;
   let evidence;
   try {
     evidence = isCashDiscount
       ? await deps.fetchLiveCdEvidence(command, {
-        config, activeCompany, isCancelled, onProgress, checkpoint, betweenWindows,
+        config, activeCompany, isCancelled, onProgress, checkpoint, betweenWindows, resolveTarget,
         onResume: (info) => logLine("WARN", "server check resumed after the connector stopped", { job: job.id, ...info }),
       }, null)
-      : await deps.fetchLiveTodEvidence(command, { config, activeCompany, isCancelled, onProgress, betweenWindows });
+      : await deps.fetchLiveTodEvidence(command, { config, activeCompany, isCancelled, onProgress, betweenWindows, resolveTarget });
   } catch (error) {
     // Stopped on purpose mid-window: keep the progress, but don't count it as a crash.
     if (isCancelled()) checkpoint?.settle();
@@ -187,7 +187,7 @@ export async function processOneCheckJob(config, activeCompany, { processCommand
   let calculated = false;
   try {
     const result = await runCheckJob(job, {
-      config, activeCompany, isCancelled,
+      config, activeCompany, isCancelled, resolveTarget,
       onProgress: (update) => { progress = { ...progress, ...update }; },
       betweenWindows: processCommand
         ? async () => {
