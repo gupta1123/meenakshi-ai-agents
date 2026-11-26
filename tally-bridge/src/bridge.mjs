@@ -129,7 +129,26 @@ async function mergeServerSnapshot(snapshot, instances) {
     seen.add(key);
     return [{ ...entry.company, isActive: key === companyKey(focus.company) }];
   });
-  return { ...snapshot, tallyReachable: true, companyLoaded: true, activeCompany: focus.company, activeUrl: focus.url, availableCompanies, companySnapshotFresh: true, error: null };
+  const endpoints = list.filter((entry, index) => list.findIndex((other) => companyKey(other.company) === companyKey(entry.company)) === index);
+  return { ...snapshot, tallyReachable: true, companyLoaded: true, activeCompany: focus.company, activeUrl: focus.url, availableCompanies, companyEndpoints: endpoints, companySnapshotFresh: true, error: null };
+}
+
+// Server mode: every open company has its own master change counter, so a master change in
+// ANY year's company is noticed (not only the one the connector happens to be focused on).
+const companyCounters = new Map();
+async function readCompanyCounters(endpoints) {
+  const result = [];
+  for (const entry of endpoints) {
+    const key = companyKey(entry.company);
+    let cached = companyCounters.get(key);
+    if (!cached || Date.now() - cached.readAt > CHANGE_COUNTER_INTERVAL_MS) {
+      const value = await probeMasterChangeCounter(entry.url, entry.company.name).catch(() => null);
+      cached = { value: value ?? cached?.value ?? null, readAt: Date.now() };
+      companyCounters.set(key, cached);
+    }
+    if (cached.value != null) result.push({ name: entry.company.name, guid: entry.company.guid, booksFrom: entry.company.booksFrom ?? null, counter: cached.value });
+  }
+  return result;
 }
 
 async function heartbeat(config, cachedCompanies = null, instances = null) {
@@ -143,6 +162,7 @@ async function heartbeat(config, cachedCompanies = null, instances = null) {
       changeCounter = { value: value ?? (company === changeCounter.company ? changeCounter.value : null), readAt: Date.now(), company };
     }
     snapshot.masterChangeCounter = changeCounter.company === company ? changeCounter.value : null;
+    if (snapshot.companyEndpoints?.length) snapshot.masterChangeCounters = await readCompanyCounters(snapshot.companyEndpoints).catch(() => []);
   }
   if(config.setupCloudPending && config.mode==="server"){
     const startup=await readWindowsStartup();
