@@ -13,7 +13,7 @@ test("the desktop monitor receives connection and activity changes without confi
   assert.equal(status.connection.bindings[0].matches, true);
   assert.equal(status.connection.activeCompany.name, "Test company");
   assert.ok(Date.parse(status.connection.checkedAt));
-  assert.doesNotMatch(JSON.stringify(status), /private|invoices|999/);
+  assert.doesNotMatch(JSON.stringify(status), /private|invoices|"amount"/);
   recordRuntimeFailure();
   assert.equal(readRuntimeStatus().connection.cloudConnected, false);
   beginRuntimeStatus({ mode: "pc" });

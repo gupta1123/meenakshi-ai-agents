@@ -21,13 +21,13 @@ export async function GET(request: Request) {
     const job = (data as Array<Record<string, unknown>> | null)?.[0];
     if (!job) return jsonWithCors(request, { job: null });
     const { data: binding } = await db.from("tally_connector_company_bindings")
-      .select("expected_tally_company_guid, expected_tally_company_name")
+      .select("expected_tally_company_guid, expected_tally_company_name, expected_tally_books_from")
       .eq("connector_id", connector.id).eq("company_id", String(job.company_id)).eq("is_active", true).maybeSingle();
     return jsonWithCors(request, {
       job: {
         id: job.id, companyId: job.company_id, kind: job.kind, scopeKey: job.scope_key, request: job.request,
         attempt: job.attempts, requestedBy: job.requested_by,
-        expectedTallyCompany: { guid: binding?.expected_tally_company_guid ?? null, name: binding?.expected_tally_company_name ?? null },
+        expectedTallyCompany: { guid: binding?.expected_tally_company_guid ?? null, name: binding?.expected_tally_company_name ?? null, booksFrom: binding?.expected_tally_books_from ?? null },
       },
     });
   } catch (error) {

@@ -55,7 +55,7 @@ export async function GET(request: Request) {
           const [{ data: organizations, error: organizationError }, { data: features, error: featureError }, { data: companies, error: companyError }] = await Promise.all([
             supabase.from("organizations").select("id, code, name, timezone").in("id", organizationIds).eq("is_active", true),
             supabase.from("organization_features").select("organization_id").in("organization_id", organizationIds).eq("feature", MEENAKSHI_FEATURE).eq("is_enabled", true),
-            supabase.from("companies").select("id, organization_id, code, tally_company_guid, tally_company_name, timezone").in("organization_id", organizationIds).eq("is_active", true).order("code"),
+            supabase.from("companies").select("id, organization_id, code, tally_company_guid, tally_company_name, tally_books_from, timezone").in("organization_id", organizationIds).eq("is_active", true).order("code"),
           ]);
           if (organizationError || featureError || companyError) throw organizationError ?? featureError ?? companyError;
           const enabled = new Set(((features ?? []) as Array<{ organization_id: string }>).map((r) => r.organization_id));
@@ -92,7 +92,7 @@ export async function GET(request: Request) {
     const [{ data: organizations, error: organizationError }, { data: features, error: featureError }, { data: companies, error: companyError }] = await Promise.all([
       supabase.from("organizations").select("id, code, name, timezone").in("id", organizationIds).eq("is_active", true),
       supabase.from("organization_features").select("organization_id").in("organization_id", organizationIds).eq("feature", MEENAKSHI_FEATURE).eq("is_enabled", true),
-      supabase.from("companies").select("id, organization_id, code, tally_company_guid, tally_company_name, timezone").in("organization_id", organizationIds).eq("is_active", true).order("code"),
+      supabase.from("companies").select("id, organization_id, code, tally_company_guid, tally_company_name, tally_books_from, timezone").in("organization_id", organizationIds).eq("is_active", true).order("code"),
     ]);
     if (organizationError || featureError || companyError) throw organizationError ?? featureError ?? companyError;
     const enabled = new Set(((features ?? []) as Array<{ organization_id: string }>).map((r) => r.organization_id));

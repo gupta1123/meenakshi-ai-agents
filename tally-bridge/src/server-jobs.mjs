@@ -18,6 +18,7 @@ import { BRIDGE_VERSION } from "./version.mjs";
 import { logLine } from "./connector-log.mjs";
 import { recordRuntimeActivity, recordRuntimeHeartbeat } from "./runtime-status.mjs";
 import Decimal from "decimal.js";
+import { sameTallyCompany } from "./tally/company-identity.mjs";
 
 const PROGRESS_INTERVAL_MS = 20_000;
 
@@ -30,14 +31,7 @@ const defaultDeps = {
 function normalized(value) { return String(value ?? "").trim().toLowerCase(); }
 
 export function companiesMatch(expected, active) {
-  const expectedGuid = normalized(expected?.guid);
-  const activeGuid = normalized(active?.guid);
-  if (expectedGuid || activeGuid) {
-    if (!(expectedGuid && activeGuid && expectedGuid === activeGuid)) return false;
-    // Financial-year companies split from one company share a GUID, so the year in the name decides.
-    return !normalized(expected?.name) || !normalized(active?.name) || normalized(expected.name) === normalized(active.name);
-  }
-  return normalized(expected?.name) !== "" && normalized(expected?.name) === normalized(active?.name);
+  return sameTallyCompany(expected, active);
 }
 
 /** Does the Tally company that is open match the one the job was queued for? */
@@ -147,10 +141,16 @@ export async function runCheckJob(job, { config, activeCompany, isCancelled, onP
  * Claims and runs at most one queued check. `processCommand` lets a waiting
  * Credit Note run between read windows. Returns true when a job was handled.
  */
-export async function processOneCheckJob(config, activeCompany, { processCommand = null } = {}, deps = defaultDeps) {
+export async function processOneCheckJob(config, activeCompany, { processCommand = null, resolveTarget = null } = {}, deps = defaultDeps) {
   if (!activeCompany) return false;
   const { job } = await deps.claimNextCheckJob(config);
   if (!job) return false;
+  if (resolveTarget) {
+    // The Tally program that has this check's company open may be on another port.
+    const target = await resolveTarget(job.expectedTallyCompany).catch(() => null);
+    // No target: keep the current company, so the right-company check below refuses a wrong one.
+    if (target) { config = target.config; activeCompany = target.activeCompany; }
+  }
   logLine("INFO", `server check started`, { job: job.id, kind: job.kind, attempt: job.attempt, requestedBy: job.requestedBy });
   const activity = job.kind === "cd" ? "Checking Cash Discount" : job.kind === "tod" ? "Checking Turnover Discount" : "Reading an e-Invoice";
   recordRuntimeActivity(activity);

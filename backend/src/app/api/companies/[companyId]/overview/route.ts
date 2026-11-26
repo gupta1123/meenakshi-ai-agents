@@ -38,7 +38,7 @@ async function loadOverviewFallback(companyId: string) {
   // Preserves exact previous semantics but keeps it out of the fast path.
   const supabase = createSupabaseAdminClient();
   const [bindingResult, recoveryResult, proposalResult, creditNoteCountResult, creditNoteAwaitingResult, queuedMessageCountResult, failedMessageResult, recentMessageResult] = await Promise.all([
-    supabase.from("tally_connector_company_bindings").select("connector_id, expected_tally_company_guid, expected_tally_company_name, observed_tally_company_guid, observed_tally_company_name").eq("company_id", companyId).eq("is_active", true).maybeSingle(),
+    supabase.from("tally_connector_company_bindings").select("connector_id, expected_tally_company_guid, expected_tally_company_name, observed_tally_company_guid, observed_tally_company_name, expected_tally_books_from, observed_tally_books_from").eq("company_id", companyId).eq("is_active", true).maybeSingle(),
     supabase.from("cash_discount_recovery_candidates").select("status, remaining_recovery").eq("company_id", companyId).eq("current_snapshot", true).in("status", ["action_required", "review_required", "posting"]),
     supabase.from("discount_proposals").select("id, customer_id, status, calculated_discount_amount, latest_evaluated_at").eq("company_id", companyId).eq("scheme_type", "tod").order("updated_at", { ascending: false }).limit(250),
     supabase.from("credit_note_postings").select("id", { count: "exact", head: true }).eq("company_id", companyId),
@@ -50,7 +50,7 @@ async function loadOverviewFallback(companyId: string) {
   const firstError = [bindingResult.error, recoveryResult.error, proposalResult.error, creditNoteCountResult.error, creditNoteAwaitingResult.error, queuedMessageCountResult.error, failedMessageResult.error, recentMessageResult.error].find(Boolean);
   if (firstError) throw firstError;
 
-  const binding = bindingResult.data as { connector_id: string; expected_tally_company_guid: string; expected_tally_company_name: string; observed_tally_company_guid: string | null; observed_tally_company_name: string | null } | null;
+  const binding = bindingResult.data as { connector_id: string; expected_tally_company_guid: string; expected_tally_company_name: string; observed_tally_company_guid: string | null; observed_tally_company_name: string | null; expected_tally_books_from: string | null; observed_tally_books_from: string | null } | null;
   const connectorResult = binding
     ? await supabase.from("tally_connectors").select("id, status, last_heartbeat_at").eq("id", binding.connector_id).maybeSingle()
     : { data: null, error: null };
@@ -58,7 +58,7 @@ async function loadOverviewFallback(companyId: string) {
   const connector = connectorResult.data as Pick<TallyConnectorRow, "id" | "status" | "last_heartbeat_at"> | null;
   const heartbeatAt = connector?.last_heartbeat_at ?? null;
   const heartbeatStale = !heartbeatAt || Date.now() - new Date(heartbeatAt).getTime() > BRIDGE_HEARTBEAT_STALE_MS;
-  const companyMatches = Boolean(binding && tallyCompanyMatches(binding.expected_tally_company_guid, binding.expected_tally_company_name, binding.observed_tally_company_guid, binding.observed_tally_company_name));
+  const companyMatches = Boolean(binding && tallyCompanyMatches(binding.expected_tally_company_guid, binding.expected_tally_company_name, binding.observed_tally_company_guid, binding.observed_tally_company_name, binding.expected_tally_books_from, binding.observed_tally_books_from));
   const tallyStatus = !binding ? "not_bound" : !connector || connector.status !== "paired" ? "awaiting_pairing" : heartbeatStale ? "bridge_stale" : companyMatches ? "ready" : "company_mismatch";
 
   const recoveries = recoveryResult.data ?? [];

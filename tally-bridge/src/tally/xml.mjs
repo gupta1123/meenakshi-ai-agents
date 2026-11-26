@@ -73,7 +73,7 @@ export function buildCompanyCollectionXml() {
     "<TYPE>Collection</TYPE><ID>Meenakshi Available Companies</ID></HEADER><BODY><DESC>",
     "<STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>",
     "<TDL><TDLMESSAGE><COLLECTION NAME=\"Meenakshi Available Companies\" ISMODIFY=\"No\">",
-    "<TYPE>Company</TYPE><FETCH>Name,GUID,MasterID,AlterID</FETCH>",
+    "<TYPE>Company</TYPE><FETCH>Name,GUID,MasterID,AlterID,BooksFrom</FETCH>",
     "</COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>",
   ].join("");
 }

@@ -1,24 +1,22 @@
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { appendMeenakshiAuditEvent } from "@/lib/audit";
-import { authenticateMeenakshiBridge, bridgeVersionIsOlder, MINIMUM_BRIDGE_VERSION, tallyCompanyMatches } from "@/lib/bridge";
+import { authenticateMeenakshiBridge, bridgeVersionIsOlder, MINIMUM_BRIDGE_VERSION, normalizeBooksFrom, sameTallyCompany as sameCompanyIdentity } from "@/lib/bridge";
 import { isUuid, readBridgeToken, readText, requestIpHash } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { noteMasterCounter } from "@/lib/tally/auto-sync";
 
-type BindingRow = { id: string; company_id: string; expected_tally_company_guid: string; expected_tally_company_name: string };
-type TallyCompany = { name: string; guid: string; isActive: boolean };
+type BindingRow = { id: string; company_id: string; expected_tally_company_guid: string; expected_tally_company_name: string; expected_tally_books_from: string | null };
+type TallyCompany = { name: string; guid: string; booksFrom: string | null; isActive: boolean };
 
 function readActiveCompany(body: Record<string, unknown>) {
   const active = body.activeCompany && typeof body.activeCompany === "object" ? body.activeCompany as Record<string, unknown> : {};
-  return { guid: readText(active.guid ?? body.activeCompanyGuid, 500), name: readText(active.name ?? active.companyName ?? body.activeCompanyName, 500) };
+  return { guid: readText(active.guid ?? body.activeCompanyGuid, 500), name: readText(active.name ?? active.companyName ?? body.activeCompanyName, 500), booksFrom: normalizeBooksFrom(active.booksFrom) };
 }
 
-function sameTallyCompany(left: Pick<TallyCompany, "name" | "guid">, right: Pick<TallyCompany, "name" | "guid">) {
-  if (left.guid && right.guid) return left.guid.toLowerCase() === right.guid.toLowerCase();
-  return left.name.toLowerCase() === right.name.toLowerCase();
-}
+// One Tally company is one GUID plus one financial year, so two years of the same company are two entries.
+const companyKey = (company: { guid: string; booksFrom: string | null }) => `${company.guid.toLowerCase()}|${company.booksFrom ?? ""}`;
 
-function readAvailableCompanies(body: Record<string, unknown>, activeCompany: { name: string | null; guid: string | null }) {
+function readAvailableCompanies(body: Record<string, unknown>, activeCompany: { name: string | null; guid: string | null; booksFrom: string | null }) {
   const values = Array.isArray(body.availableCompanies) ? body.availableCompanies : [];
   const seen = new Set<string>();
   const companies: TallyCompany[] = [];
@@ -29,20 +27,54 @@ function readAvailableCompanies(body: Record<string, unknown>, activeCompany: { 
     const name = readText(row.name ?? row.companyName, 500);
     const guid = readText(row.guid, 500);
     if (!name || !guid) continue;
-    const key = guid.toLowerCase();
+    const booksFrom = normalizeBooksFrom(row.booksFrom);
+    const key = companyKey({ guid, booksFrom });
     if (seen.has(key)) continue;
     seen.add(key);
-    companies.push({ name, guid, isActive: false });
+    companies.push({ name, guid, booksFrom, isActive: false });
   }
 
   if (activeCompany.name && activeCompany.guid) {
-    const active = { name: activeCompany.name, guid: activeCompany.guid };
-    const existing = companies.find((company) => sameTallyCompany(company, active));
+    const active = { name: activeCompany.name, guid: activeCompany.guid, booksFrom: activeCompany.booksFrom };
+    const existing = companies.find((company) => sameCompanyIdentity(active, company));
     if (existing) existing.isActive = true;
     else companies.unshift({ ...active, isActive: true });
   }
 
   return companies.sort((left, right) => Number(right.isActive) - Number(left.isActive));
+}
+
+type SupabaseAdmin = ReturnType<typeof createSupabaseAdminClient>;
+
+/**
+ * Record which Tally companies this connector can see. Matching is on GUID plus
+ * financial year, so two years of one company are two rows. A row written before
+ * years were known (no books-from) is adopted by its matching company.
+ */
+async function recordObservations(supabase: SupabaseAdmin, connector: { id: string; organization_id: string }, companies: TallyCompany[], now: string) {
+  const { data, error } = await supabase.from("tally_connector_company_observations").select("id, tally_company_guid, tally_books_from").eq("connector_id", connector.id);
+  if (error) throw error;
+  const existing = (data ?? []) as Array<{ id: string; tally_company_guid: string; tally_books_from: string | null }>;
+  const used = new Set<string>();
+  const updates: Array<Record<string, unknown>> = [];
+  const inserts: Array<Record<string, unknown>> = [];
+  for (const company of companies) {
+    const sameGuid = (row: { id: string; tally_company_guid: string }) => !used.has(row.id) && row.tally_company_guid.toLowerCase() === company.guid.toLowerCase();
+    const match = existing.find((row) => sameGuid(row) && (row.tally_books_from ?? null) === company.booksFrom)
+      ?? (company.booksFrom ? existing.find((row) => sameGuid(row) && row.tally_books_from === null) : undefined);
+    const row = { organization_id: connector.organization_id, connector_id: connector.id, tally_company_guid: company.guid, tally_company_name: company.name, tally_books_from: company.booksFrom, is_available: true, is_active: company.isActive, last_seen_at: now };
+    if (match) { used.add(match.id); updates.push({ id: match.id, ...row }); } else inserts.push(row);
+  }
+  if (updates.length) {
+    const { error: updateError } = await supabase.from("tally_connector_company_observations").upsert(updates, { onConflict: "id" });
+    if (updateError) throw updateError;
+  }
+  for (const row of inserts) {
+    const { error: insertError } = await supabase.from("tally_connector_company_observations").insert(row);
+    // 23505: the old one-company-per-GUID rule is still in force, so a second year cannot be stored yet.
+    if (insertError && insertError.code !== "23505") throw insertError;
+    if (insertError) console.warn("Could not store a second financial-year company yet (old unique rule still applies):", row.tally_company_name);
+  }
 }
 
 function isRuntimeSchemaUnavailable(error: unknown) {
@@ -123,56 +155,56 @@ export async function POST(request: Request) {
     if (runtimeSchemaAvailable && refreshCompanyObservations) {
       const unavailable = await supabase.from("tally_connector_company_observations").update({ is_available: false, is_active: false }).eq("connector_id", connector.id);
       if (unavailable.error) throw unavailable.error;
-      if (availableCompanies.length > 0) {
-        const observations = availableCompanies.map((company) => ({
-          organization_id: connector.organization_id,
-          connector_id: connector.id,
-          tally_company_guid: company.guid,
-          tally_company_name: company.name,
-          is_available: true,
-          is_active: company.isActive,
-          last_seen_at: now,
-        }));
-        const { error: observationError } = await supabase.from("tally_connector_company_observations").upsert(observations, { onConflict: "connector_id,tally_company_guid" });
-        if (observationError) throw observationError;
-      }
+      if (availableCompanies.length > 0) await recordObservations(supabase, connector, availableCompanies, now);
     } else if (runtimeSchemaAvailable && activeCompany.name && activeCompany.guid) {
       // The bridge probes the active company on every heartbeat, whereas the
       // full company list is intentionally cached. Keep this lightweight live
       // pointer current so the web workspace can follow a Tally Prime switch
       // without waiting for the next full company-list refresh.
-      const deactivatePrevious = await supabase
+      const { data: activeRows, error: activeRowsError } = await supabase
         .from("tally_connector_company_observations")
-        .update({ is_active: false })
+        .select("id, tally_company_guid, tally_books_from")
         .eq("connector_id", connector.id)
-        .eq("is_active", true)
-        .neq("tally_company_guid", activeCompany.guid);
-      if (deactivatePrevious.error) throw deactivatePrevious.error;
-      const { error: activeObservationError } = await supabase
-        .from("tally_connector_company_observations")
-        .upsert({
-          organization_id: connector.organization_id,
-          connector_id: connector.id,
-          tally_company_guid: activeCompany.guid,
-          tally_company_name: activeCompany.name,
-          is_available: true,
-          is_active: true,
-          last_seen_at: now,
-        }, { onConflict: "connector_id,tally_company_guid" });
-      if (activeObservationError) throw activeObservationError;
+        .eq("is_active", true);
+      if (activeRowsError) throw activeRowsError;
+      const active = { guid: activeCompany.guid, name: activeCompany.name, booksFrom: activeCompany.booksFrom };
+      const stale = ((activeRows ?? []) as Array<{ id: string; tally_company_guid: string; tally_books_from: string | null }>)
+        .filter((row) => !sameCompanyIdentity(active, { guid: row.tally_company_guid, booksFrom: row.tally_books_from, name: activeCompany.name }))
+        .map((row) => row.id);
+      if (stale.length) {
+        const deactivatePrevious = await supabase.from("tally_connector_company_observations").update({ is_active: false }).in("id", stale);
+        if (deactivatePrevious.error) throw deactivatePrevious.error;
+      }
+      await recordObservations(supabase, connector, [{ name: activeCompany.name, guid: activeCompany.guid, booksFrom: activeCompany.booksFrom, isActive: true }], now);
     }
-    const { data: bindings, error: bindingError } = await supabase.from("tally_connector_company_bindings").select("id, company_id, expected_tally_company_guid, expected_tally_company_name").eq("connector_id", connector.id).eq("is_active", true);
+    const { data: bindings, error: bindingError } = await supabase.from("tally_connector_company_bindings").select("id, company_id, expected_tally_company_guid, expected_tally_company_name, expected_tally_books_from").eq("connector_id", connector.id).eq("is_active", true);
     if (bindingError) throw bindingError;
-    const bindingStates = await Promise.all(((bindings ?? []) as unknown as BindingRow[]).map(async (binding) => {
-      const matches = tallyCompanyMatches(binding.expected_tally_company_guid, binding.expected_tally_company_name, activeCompany.guid, activeCompany.name);
-      const { error } = await supabase.from("tally_connector_company_bindings").update({ observed_tally_company_guid: activeCompany.guid, observed_tally_company_name: activeCompany.name, ...(matches ? { last_validated_at: now } : { last_mismatch_at: now }) }).eq("id", binding.id).eq("connector_id", connector.id);
+    // A server has several companies open at once, so a binding is satisfied by ANY open company.
+    // A PC works on the one company that is active in Tally Prime.
+    const runtimeMode = body.runtime && typeof body.runtime === "object" ? (body.runtime as Record<string, unknown>).mode : null;
+    const serverMode = runtimeMode === "server";
+    const openCompanies: Array<{ guid: string | null; name: string | null; booksFrom: string | null }> = serverMode ? availableCompanies : [activeCompany];
+    const bindingStates = (await Promise.all(((bindings ?? []) as unknown as BindingRow[]).map(async (binding) => {
+      const expected = { guid: binding.expected_tally_company_guid, name: binding.expected_tally_company_name, booksFrom: binding.expected_tally_books_from };
+      const seenCompany = openCompanies.find((company) => sameCompanyIdentity(expected, company));
+      const matches = Boolean(seenCompany);
+      // A short progress heartbeat only names the company being worked on; it says nothing about the others.
+      if (serverMode && !companySnapshotFresh && !matches) return null;
+      const shown = seenCompany ?? activeCompany;
+      const stamp = matches ? { last_validated_at: now } : { last_mismatch_at: now };
+      const observed = { observed_tally_company_guid: shown.guid, observed_tally_company_name: shown.name };
+      let { error } = await supabase.from("tally_connector_company_bindings").update({ ...observed, observed_tally_books_from: shown.booksFrom, ...stamp }).eq("id", binding.id).eq("connector_id", connector.id);
+      // The column arrives with a later migration; the heartbeat must not fail while it is missing.
+      if (error && ["42703", "PGRST204"].includes(error.code ?? "")) {
+        ({ error } = await supabase.from("tally_connector_company_bindings").update({ ...observed, ...stamp }).eq("id", binding.id).eq("connector_id", connector.id));
+      }
       if (error) throw error;
       return {
         companyId: binding.company_id,
         matches,
-        expectedCompany: { guid: binding.expected_tally_company_guid, name: binding.expected_tally_company_name },
+        expectedCompany: { guid: binding.expected_tally_company_guid, name: binding.expected_tally_company_name, booksFrom: binding.expected_tally_books_from },
       };
-    }));
+    }))).filter((state): state is NonNullable<typeof state> => state !== null);
     // Tally's master change counter: queue a master sync when Tally changed.
     // Never let this fail the heartbeat itself.
     const masterCounter = Number(body.masterChangeCounter);

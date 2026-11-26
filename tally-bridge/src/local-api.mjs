@@ -1,4 +1,5 @@
 import http from "node:http";
+import { sameTallyCompany } from "./tally/company-identity.mjs";
 import { randomUUID } from "node:crypto";
 
 import { canonicalJson, fetchLiveCdEvidence } from "./commands/live-cd-evidence.mjs";
@@ -86,10 +87,7 @@ export function startLocalApi(config) {
     const isCashDiscount = item.task === "cash_discount";
     const expectedCompany = body.expectedCompany && typeof body.expectedCompany === "object" ? body.expectedCompany : {};
     const activeCompany = await probeActiveCompany(config.tallyUrl);
-    const expectedGuid = String(expectedCompany.guid ?? "").trim();
-    const sameCompany = expectedGuid
-      ? normalized(activeCompany.guid) === normalized(expectedGuid)
-      : Boolean(expectedCompany.name) && normalized(activeCompany.name) === normalized(expectedCompany.name);
+    const sameCompany = sameTallyCompany(expectedCompany, activeCompany);
     if (!sameCompany) throw new Error(`Open ${expectedCompany.name || "the selected company"} in Tally Prime first, then calculate again.`);
     const command = { payload: { evaluationRunId: null, voucherScope: body.voucherScope } };
     progress = { task: item.task, stage: "reading", done: 0, total: null, from: null, to: null, startedAt: new Date().toISOString() };
@@ -195,10 +193,7 @@ export function startLocalApi(config) {
         const body = await readJson(request);
         const expectedCompany = body.expectedCompany && typeof body.expectedCompany === "object" ? body.expectedCompany : {};
         const activeCompany = await probeActiveCompany(config.tallyUrl);
-        const expectedGuid = String(expectedCompany.guid ?? "").trim();
-        const sameCompany = expectedGuid
-          ? normalized(activeCompany.guid) === normalized(expectedGuid)
-          : Boolean(expectedCompany.name) && normalized(activeCompany.name) === normalized(expectedCompany.name);
+        const sameCompany = sameTallyCompany(expectedCompany, activeCompany);
         if (!sameCompany) throw new Error(`Open ${expectedCompany.name || "the selected company"} in Tally Prime first.`);
         const einvoice = await readNoteEInvoice({ tallyUrl: config.tallyUrl, companyName: activeCompany.name, date: body.date, voucherNumber: body.voucherNumber, kind: body.kind });
         respond(response, 200, { einvoice }, origin, config);

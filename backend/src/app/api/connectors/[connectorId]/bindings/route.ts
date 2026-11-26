@@ -42,9 +42,9 @@ export async function POST(request: Request, context: RouteContext) {
     const companyId = readText(body.companyId, 80);
     if (!isUuid(companyId)) return jsonWithCors(request, { error: "companyId must be a UUID." }, { status: 400 });
     const supabase = createSupabaseAdminClient();
-    const { data: company, error: companyError } = await supabase.from("companies").select("id, organization_id, tally_company_guid, tally_company_name, is_active").eq("id", companyId).maybeSingle();
+    const { data: company, error: companyError } = await supabase.from("companies").select("id, organization_id, tally_company_guid, tally_company_name, tally_books_from, is_active").eq("id", companyId).maybeSingle();
     if (companyError) throw companyError;
-    const row = company as { id: string; organization_id: string; tally_company_guid: string; tally_company_name: string; is_active: boolean } | null;
+    const row = company as { id: string; organization_id: string; tally_company_guid: string; tally_company_name: string; tally_books_from: string | null; is_active: boolean } | null;
     if (!row || !row.is_active || row.organization_id !== connector.organization_id) return jsonWithCors(request, { error: "Company is not available to this connector." }, { status: 404 });
     const { data: bindingId, error: assignmentError } = await supabase.rpc("assign_tally_company_connector", { p_company_id: row.id, p_connector_id: connector.id });
     let bindingQuery = bindingId
@@ -54,7 +54,7 @@ export async function POST(request: Request, context: RouteContext) {
     // migration awaits its deliberate manual application. Reassignment still
     // requires the migration because the legacy unique constraint rejects it.
     if (assignmentError?.code === "PGRST202") {
-      bindingQuery = supabase.from("tally_connector_company_bindings").insert({ organization_id: connector.organization_id, company_id: row.id, connector_id: connector.id, expected_tally_company_guid: row.tally_company_guid, expected_tally_company_name: row.tally_company_name, is_active: true }).select("id, company_id, connector_id, expected_tally_company_guid, expected_tally_company_name, is_active, created_at").single();
+      bindingQuery = supabase.from("tally_connector_company_bindings").insert({ organization_id: connector.organization_id, company_id: row.id, connector_id: connector.id, expected_tally_company_guid: row.tally_company_guid, expected_tally_company_name: row.tally_company_name, expected_tally_books_from: row.tally_books_from, is_active: true }).select("id, company_id, connector_id, expected_tally_company_guid, expected_tally_company_name, is_active, created_at").single();
     } else if (assignmentError) {
       throw assignmentError;
     }

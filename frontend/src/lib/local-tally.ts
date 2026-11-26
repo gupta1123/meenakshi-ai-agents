@@ -262,7 +262,7 @@ export async function readLocalConnectorVersion(): Promise<string | null> {
 
 export type LocalCdBootstrap = {
   evaluatedOn: string;
-  expectedCompany: { name: string; guid: string };
+  expectedCompany: { name: string; guid: string; booksFrom?: string | null };
   rule: Record<string, unknown>;
   voucherScope: Record<string, unknown>;
 };
@@ -313,7 +313,7 @@ export async function runLocalCashDiscount(bootstrap: LocalCdBootstrap, signal?:
 
 export type LocalTodBootstrap = {
   evaluatedOn: string;
-  expectedCompany: { name: string; guid: string };
+  expectedCompany: { name: string; guid: string; booksFrom?: string | null };
   activeSchemeVersionId: string;
   periods: LocalTodPeriod[];
   batches: LocalTodBatchBootstrap[];
@@ -332,7 +332,7 @@ export function combineTodBootstraps(bootstraps: LocalTodBootstrap[]): LocalTodB
   const first = bootstraps[0];
   if (!first) throw new Error("Choose at least one Turnover Discount period.");
   for (const bootstrap of bootstraps) {
-    if (bootstrap.expectedCompany.guid !== first.expectedCompany.guid || bootstrap.activeSchemeVersionId !== first.activeSchemeVersionId || bootstrap.evaluatedOn !== first.evaluatedOn) {
+    if (bootstrap.expectedCompany.guid !== first.expectedCompany.guid || (bootstrap.expectedCompany.booksFrom ?? null) !== (first.expectedCompany.booksFrom ?? null) || bootstrap.activeSchemeVersionId !== first.activeSchemeVersionId || bootstrap.evaluatedOn !== first.evaluatedOn) {
       throw new Error("The company or active rule changed while preparing the periods. Reopen Calculate period and try again.");
     }
   }
@@ -460,7 +460,7 @@ export type LocalNoteEInvoice = { irn: string; ackNo: string; ackDate: string | 
  * Tally by the connector on this PC (one company, one day). Returns null when
  * the note is not e-invoiced yet; throws when the connector or Tally is not ready.
  */
-export async function readLocalNoteEInvoice(input: { expectedCompany: { guid?: string | null; name?: string | null }; date: string; voucherNumber: string; kind: "credit" | "debit" }): Promise<LocalNoteEInvoice | null> {
+export async function readLocalNoteEInvoice(input: { expectedCompany: { guid?: string | null; name?: string | null; booksFrom?: string | null }; date: string; voucherNumber: string; kind: "credit" | "debit" }): Promise<LocalNoteEInvoice | null> {
   await lookupMode?.();
   if (serverContext) {
     // Server mode: ask the Tally server through the cloud queue (a small read, answered in seconds).

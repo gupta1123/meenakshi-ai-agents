@@ -1,13 +1,5 @@
+import { companyKey, normalizeBooksFrom } from "./company-identity.mjs";
 import { buildCompanyCollectionXml, buildCurrentCompanyXml, extractBlocks, getAttribute, getTagText, postTallyXml } from "./xml.mjs";
-
-function companyKey(company) {
-  return company.guid?.trim().toLowerCase() || company.name?.trim().toLowerCase() || "";
-}
-
-function sameCompany(left, right) {
-  if (left.guid && right.guid) return left.guid.trim().toLowerCase() === right.guid.trim().toLowerCase();
-  return left.name.trim().toLowerCase() === right.name.trim().toLowerCase();
-}
 
 export async function probeTallyCompanies(tallyUrl, options = {}) {
   const name = await probeCurrentCompanyName(tallyUrl, options);
@@ -18,15 +10,16 @@ export async function probeTallyCompanies(tallyUrl, options = {}) {
     const company = {
       name: getTagText(companyXml, "NAME") || getAttribute(companyXml, "NAME"),
       guid: getTagText(companyXml, "GUID") || getAttribute(companyXml, "GUID"),
+      booksFrom: normalizeBooksFrom(getTagText(companyXml, "BOOKSFROM")),
     };
     if (!company.name || !company.guid || seen.has(companyKey(company))) return [];
     seen.add(companyKey(company));
-    return [{ name: company.name.trim(), guid: company.guid.trim() }];
+    return [{ name: company.name.trim(), guid: company.guid.trim(), booksFrom: company.booksFrom }];
   });
   const active = companies.find((company) => company.name.toLowerCase() === name.trim().toLowerCase());
 
   if (!active?.guid) throw new Error(`Tally returned active company "${name}" but no GUID was available for it.`);
-  const availableCompanies = companies.map((company) => ({ ...company, isActive: sameCompany(company, active) }));
+  const availableCompanies = companies.map((company) => ({ ...company, isActive: companyKey(company) === companyKey(active) }));
   return { activeCompany: active, availableCompanies };
 }
 

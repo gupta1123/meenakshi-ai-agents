@@ -1,3 +1,4 @@
+import { normalizeBooksFrom } from "@/lib/tally-company-identity";
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { MeenakshiAccessError, requireMeenakshiOrganizationAccess } from "@/lib/authorization";
 import { BRIDGE_HEARTBEAT_STALE_MS } from "@/lib/constants";
@@ -6,7 +7,7 @@ import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 
 type RouteContext = { params: Promise<{ connectorId: string }> };
-type TallyCompany = { name: string; guid: string; isActive: boolean };
+type TallyCompany = { name: string; guid: string; booksFrom: string | null; isActive: boolean };
 type RuntimeRow = {
   tally_url: string;
   last_tally_reachable: boolean | null;
@@ -39,13 +40,16 @@ function snapshotCompanies(metadata: unknown) {
     const row = value as Record<string, unknown>;
     const name = text(row.name ?? row.companyName);
     const guid = text(row.guid);
-    if (!name || !guid || seen.has(guid.toLowerCase())) continue;
-    seen.add(guid.toLowerCase());
-    companies.push({ name, guid, isActive: activeGuid ? guid.toLowerCase() === activeGuid.toLowerCase() : name.toLowerCase() === activeName?.toLowerCase() });
+    const booksFrom = normalizeBooksFrom(row.booksFrom);
+    const key = `${guid?.toLowerCase()}|${booksFrom ?? ""}`;
+    if (!name || !guid || seen.has(key)) continue;
+    seen.add(key);
+    const activeFrom = normalizeBooksFrom(activeRecord.booksFrom);
+    companies.push({ name, guid, booksFrom, isActive: activeGuid ? guid.toLowerCase() === activeGuid.toLowerCase() && (!activeFrom || !booksFrom || activeFrom === booksFrom) : name.toLowerCase() === activeName?.toLowerCase() });
   }
 
   if (activeName && activeGuid && !companies.some((company) => company.guid.toLowerCase() === activeGuid.toLowerCase())) {
-    companies.unshift({ name: activeName, guid: activeGuid, isActive: true });
+    companies.unshift({ name: activeName, guid: activeGuid, booksFrom: normalizeBooksFrom(activeRecord.booksFrom), isActive: true });
   }
 
   return companies.sort((left, right) => Number(right.isActive) - Number(left.isActive));
@@ -94,7 +98,7 @@ export async function GET(request: Request, context: RouteContext) {
     let companies: TallyCompany[] = [];
     if (runtime) {
       const observations = await supabase.from("tally_connector_company_observations")
-        .select("tally_company_guid, tally_company_name, is_active")
+        .select("tally_company_guid, tally_company_name, tally_books_from, is_active")
         .eq("connector_id", connector.id)
         .eq("is_available", true)
         .order("is_active", { ascending: false })
@@ -104,6 +108,7 @@ export async function GET(request: Request, context: RouteContext) {
         companies = (observations.data ?? []).map((row) => ({
           guid: String(row.tally_company_guid),
           name: String(row.tally_company_name),
+          booksFrom: (row.tally_books_from as string | null) ?? null,
           isActive: row.is_active === true,
         }));
       }

@@ -20,7 +20,7 @@ function syncReadiness(sync: { status: string; completed_at: string | null; erro
   return { status: sync?.status === "completed" && !stale ? "current" : sync?.status === "completed" ? "stale" : sync?.status ?? "required", completedAt, stale, errorSummary: sync?.error_summary ?? null };
 }
 
-async function loadHealthFallback(company: { id: string; organization_id: string }, bindingRow: { id: string; connector_id: string; expected_tally_company_guid: string; expected_tally_company_name: string; observed_tally_company_guid: string | null; observed_tally_company_name: string | null; last_mismatch_at: string | null } | null) {
+async function loadHealthFallback(company: { id: string; organization_id: string }, bindingRow: { id: string; connector_id: string; expected_tally_company_guid: string; expected_tally_company_name: string; observed_tally_company_guid: string | null; observed_tally_company_name: string | null; expected_tally_books_from: string | null; observed_tally_books_from: string | null; last_mismatch_at: string | null } | null) {
   const supabase = createSupabaseAdminClient();
   // Fallback: legacy 20 counts path (kept for pre-migration). New path uses get_operations_health_counts RPC.
   async function statusCounts(table: "integration_outbox" | "tally_commands" | "notification_messages", companyId: string, statuses: string[]) {
@@ -51,7 +51,7 @@ async function loadHealthFallback(company: { id: string; organization_id: string
   const connector = connectorResult.data as Pick<TallyConnectorRow, "id" | "status" | "last_heartbeat_at"> | null;
   const heartbeatAt = connector?.last_heartbeat_at ? new Date(connector.last_heartbeat_at).getTime() : 0;
   const heartbeatStale = !heartbeatAt || Date.now() - heartbeatAt > BRIDGE_HEARTBEAT_STALE_MS;
-  const matches = Boolean(bindingRow && tallyCompanyMatches(bindingRow.expected_tally_company_guid, bindingRow.expected_tally_company_name, bindingRow.observed_tally_company_guid, bindingRow.observed_tally_company_name));
+  const matches = Boolean(bindingRow && tallyCompanyMatches(bindingRow.expected_tally_company_guid, bindingRow.expected_tally_company_name, bindingRow.observed_tally_company_guid, bindingRow.observed_tally_company_name, bindingRow.expected_tally_books_from, bindingRow.observed_tally_books_from));
   const tallyStatus = !bindingRow ? "not_bound" : !connector || connector.status !== "paired" ? "awaiting_pairing" : heartbeatStale ? "bridge_stale" : matches ? "ready" : "company_mismatch";
   const messageRows = (failedMessagesResult.data ?? []) as Array<{ attempt_count: number; max_attempts: number; provider_metadata: Record<string, unknown> | null }>;
   const retryingMessages = messageRows.filter((message) => message.attempt_count < message.max_attempts && message.provider_metadata?.terminal !== true).length;
@@ -73,7 +73,7 @@ export async function GET(request: Request, context: RouteContext) {
       .select("id, connector_id, expected_tally_company_guid, expected_tally_company_name, observed_tally_company_guid, observed_tally_company_name, last_mismatch_at")
       .eq("company_id", company.id).eq("is_active", true).maybeSingle();
     if (bindingError) throw bindingError;
-    const bindingRow = binding as { id: string; connector_id: string; expected_tally_company_guid: string; expected_tally_company_name: string; observed_tally_company_guid: string | null; observed_tally_company_name: string | null; last_mismatch_at: string | null } | null;
+    const bindingRow = binding as { id: string; connector_id: string; expected_tally_company_guid: string; expected_tally_company_name: string; observed_tally_company_guid: string | null; observed_tally_company_name: string | null; expected_tally_books_from: string | null; observed_tally_books_from: string | null; last_mismatch_at: string | null } | null;
 
     // Fast path: single RPC for all 20 counts + failed aggregates
     const { data: rpcCounts, error: rpcError } = await supabase.rpc("get_operations_health_counts", { p_company_id: company.id });
@@ -96,7 +96,7 @@ export async function GET(request: Request, context: RouteContext) {
       const connector = connectorResult.data as Pick<TallyConnectorRow, "id" | "status" | "last_heartbeat_at"> | null;
       const heartbeatAt = connector?.last_heartbeat_at ? new Date(connector.last_heartbeat_at).getTime() : 0;
       const heartbeatStale = !heartbeatAt || Date.now() - heartbeatAt > BRIDGE_HEARTBEAT_STALE_MS;
-      const matches = Boolean(bindingRow && tallyCompanyMatches(bindingRow.expected_tally_company_guid, bindingRow.expected_tally_company_name, bindingRow.observed_tally_company_guid, bindingRow.observed_tally_company_name));
+      const matches = Boolean(bindingRow && tallyCompanyMatches(bindingRow.expected_tally_company_guid, bindingRow.expected_tally_company_name, bindingRow.observed_tally_company_guid, bindingRow.observed_tally_company_name, bindingRow.expected_tally_books_from, bindingRow.observed_tally_books_from));
       const tallyStatus = !bindingRow ? "not_bound" : !connector || connector.status !== "paired" ? "awaiting_pairing" : heartbeatStale ? "bridge_stale" : matches ? "ready" : "company_mismatch";
       const outboxCounts = counts.outboxCounts ?? {};
       const commandCounts = counts.commandCounts ?? {};

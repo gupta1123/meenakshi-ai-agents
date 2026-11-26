@@ -20,7 +20,7 @@ export async function GET(r: Request) {
     if (!job) return jsonWithCors(r, { job: null });
     const { data: b, error: be } = await db
       .from("tally_connector_company_bindings")
-      .select("expected_tally_company_guid,expected_tally_company_name")
+      .select("expected_tally_company_guid,expected_tally_company_name,expected_tally_books_from")
       .eq("connector_id", c.id)
       .eq("company_id", job.company_id)
       .eq("is_active", true)
@@ -32,6 +32,7 @@ export async function GET(r: Request) {
         expectedTallyCompany: {
           guid: b.expected_tally_company_guid,
           name: b.expected_tally_company_name,
+          booksFrom: b.expected_tally_books_from ?? null,
         },
       },
     });

@@ -65,7 +65,7 @@ export async function GET(request: Request, context: RouteContext) {
             request,
             {
               evaluatedOn: rpc.evaluatedOn,
-              expectedCompany: { name: company.tally_company_name, guid: company.tally_company_guid },
+              expectedCompany: { name: company.tally_company_name, guid: company.tally_company_guid, booksFrom: company.tally_books_from ?? null },
               rule: rpc.rule,
               voucherScope: { ...(rpc.voucherScope as Record<string, unknown>), evaluationRunId: null },
             },
@@ -85,7 +85,7 @@ export async function GET(request: Request, context: RouteContext) {
     const bootstrap = await loadLiveCdLocalBootstrap(syntheticRun, ruleVersionId);
     return jsonWithCors(request, {
       evaluatedOn: bootstrap.evaluatedOn,
-      expectedCompany: { name: company.tally_company_name, guid: company.tally_company_guid },
+      expectedCompany: { name: company.tally_company_name, guid: company.tally_company_guid, booksFrom: company.tally_books_from ?? null },
       rule: bootstrap.rule,
       voucherScope: { ...bootstrap.voucherScope, evaluationRunId: null },
     }, { headers: { "Cache-Control": "private, max-age=30, stale-while-revalidate=120" } });

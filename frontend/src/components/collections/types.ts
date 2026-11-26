@@ -3,6 +3,8 @@ export type Company = {
   code: string;
   tally_company_name: string;
   tally_company_guid: string;
+  /** Tally "books beginning from" date; with the Tally ID it identifies one financial-year company. */
+  tally_books_from?: string | null;
 };
 
 export type Organization = {

@@ -78,3 +78,17 @@ test("TOD cannot join a different rule or saving date in the same quarter", () =
   assert.notEqual(key, buildCheckJobInput({ ...input, body: { rule: { id: "B" } } }).scopeKey);
   assert.notEqual(key, buildCheckJobInput({ ...input, saveAsOfDate: "2026-07-01" }).scopeKey);
 });
+
+test("a server holding two financial years is ready for each year by its own books-from date", () => {
+  const base = { lastSeenAt: "2026-11-26T10:00:00Z", tallyReachable: true, companyLoaded: true, activeCompanyName: "Co - (2026-2027)", now: Date.parse("2026-11-26T10:00:30Z") };
+  const open = [
+    { guid: "g", name: "Co - (2026-2027)", booksFrom: "2026-04-01" },
+    { guid: "g", name: "Co - (2025-2026)", booksFrom: "2025-04-01" },
+  ];
+  const y25 = { guid: "G", name: "Old name of Co", booksFrom: "2025-04-01" };
+  assert.equal(describeServerReadiness({ ...base, expectedCompanyName: y25.name, openCompanies: open, expectedCompany: y25 }).state, "ready");
+  const y24 = { guid: "g", name: "Co - (2024-2025)", booksFrom: "2024-04-01" };
+  const missing = describeServerReadiness({ ...base, expectedCompanyName: y24.name, openCompanies: open, expectedCompany: y24 });
+  assert.equal(missing.state, "wrong_company");
+  assert.match(missing.message, /Co - \(2024-2025\)/);
+});

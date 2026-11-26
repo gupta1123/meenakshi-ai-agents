@@ -11,7 +11,7 @@ export class MeenakshiAccessError extends Error {
 
 type OrganizationRow = { id: string; code: string; name: string; timezone: string; is_active: boolean };
 type MembershipRow = { organization_id: string; profile_id: string; role: MeenakshiRole };
-type CompanyRow = { id: string; organization_id: string; code: string; tally_company_guid: string; tally_company_name: string; is_active: boolean };
+type CompanyRow = { id: string; organization_id: string; code: string; tally_company_guid: string; tally_company_name: string; tally_books_from: string | null; is_active: boolean };
 type CompanyAccessRow = CompanyRow & {
   organization: OrganizationRow & {
     memberships: Array<{ role: MeenakshiRole }>;
@@ -50,7 +50,7 @@ async function loadCompanyAccessScope(userId: string, companyId: string) {
   const { data, error } = await supabase
     .from("companies")
     .select(`
-      id, organization_id, code, tally_company_guid, tally_company_name, is_active,
+      id, organization_id, code, tally_company_guid, tally_company_name, tally_books_from, is_active,
       organization:organizations!inner(
         id, code, name, timezone, is_active,
         memberships:organization_memberships(role),

@@ -107,7 +107,7 @@ export function CreditNotePanel({ note, companyId, onClose, onSend, onOpenCalcul
       // Print the IRN and QR like Tally: read them first (one company, one day in Tally).
       if (note.voucherNumber && note.noteDate) {
         try {
-          const found = await readLocalNoteEInvoice({ expectedCompany: { guid: company.tally_company_guid, name: company.tally_company_name }, date: note.noteDate.slice(0, 10), voucherNumber: note.voucherNumber, kind: "credit" });
+          const found = await readLocalNoteEInvoice({ expectedCompany: { guid: company.tally_company_guid, name: company.tally_company_name, booksFrom: company.tally_books_from ?? null }, date: note.noteDate.slice(0, 10), voucherNumber: note.voucherNumber, kind: "credit" });
           if (found) {
             await apiRequest(token, `/api/companies/${companyId}/notes/einvoice`, { method: "POST", body: jsonBody({ source: note.scheme === "tod" ? "tod_credit_note" : "cash_discount_note", postingId: note.postingId, ...found }) });
             setEinvoice({ irn: found.irn, ackNo: found.ackNo });
