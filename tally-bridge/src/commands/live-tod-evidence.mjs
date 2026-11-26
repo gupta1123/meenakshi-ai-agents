@@ -4,6 +4,7 @@ import Decimal from "decimal.js";
 import {BRIDGE_VERSION} from "../version.mjs";
 
 import { syncVouchers } from "./sync-vouchers.mjs";
+import { readContinuationAllocations } from "./continuation.mjs";
 import { sourceSalesLedgerName } from "./voucher-ledgers.mjs";
 import { allocationCustomer, creditNoteEvidence, customerForVoucher, matchCreditNotes } from "./credit-note-matching.mjs";
 
@@ -206,6 +207,14 @@ export async function fetchLiveTodEvidence(command, context) {
     }
     cursor = result.cursorTo;
   }
+  // Receipts posted in the next financial year's company for this year's invoices (see continuation.mjs).
+  const continued = paymentCheck
+    ? await readContinuationAllocations({
+      command, scope, context, customers: requestedCustomers, includeJournals: true,
+      makeScope: ({ cursor: at, dateFrom, dateTo }) => ({ ...scope, dateFrom, customerLedgerName: null, customers: scope.diagnosticTargeted ? requestedCustomers : null, dateTo, cursor: at }),
+    })
+    : { allocations: [], status: "none" };
+  allocations.push(...continued.allocations);
   const paymentChecks = paymentCheck ? checkPayments(pendingSales, allocations, paymentCheck, creditNotes, requestedCustomers) : null;
 
   const customerAggregates = [...aggregates.values()].map((aggregate) => {
@@ -228,5 +237,5 @@ export async function fetchLiveTodEvidence(command, context) {
     return { mode: "live_tod_aggregate", evaluationRunId: command.payload.evaluationRunId ?? null, periodStart: scope.dateFrom, periodEnd: scope.dateTo, chunks, vouchersScanned, ...customerAggregates[0] };
   }
   const sourceFingerprint = createHash("sha256").update(canonicalJson(customerAggregates.map(({ customerId, sourceFingerprint: fingerprint }) => ({ customerId, fingerprint })))).digest("hex");
-  return { mode: "live_tod_batch_aggregate", connectorVersion:BRIDGE_VERSION, evaluationRunId: command.payload.evaluationRunId ?? null, periodStart: scope.dateFrom, periodEnd: scope.dateTo, chunks, vouchersScanned, matchingVouchers: totalMatchingVouchers, customerAggregates, sourceFingerprint };
+  return { mode: "live_tod_batch_aggregate", connectorVersion:BRIDGE_VERSION, evaluationRunId: command.payload.evaluationRunId ?? null, periodStart: scope.dateFrom, periodEnd: scope.dateTo, chunks, vouchersScanned, ...(continued.status === "none" ? {} : { continuation: { status: continued.status, dateFrom: continued.dateFrom, dateTo: continued.dateTo, chunks: continued.chunks ?? 0, vouchersScanned: continued.vouchersScanned ?? 0 } }), matchingVouchers: totalMatchingVouchers, customerAggregates, sourceFingerprint };
 }

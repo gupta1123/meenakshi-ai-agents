@@ -1,0 +1,22 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { continuationWindow, CONTINUATION_HORIZON_DAYS } from "./year-continuation.ts";
+
+const next = { name: "CO - (2026-2027)", guid: "g", booksFrom: "2026-04-01" };
+
+test("no continuation when the check ends before the next year starts", () => {
+  assert.equal(continuationWindow(next, "2026-03-31"), null);
+  assert.equal(continuationWindow(next, ""), null);
+});
+
+test("a check reaching past the boundary reads the next year, capped at the horizon", () => {
+  const window = continuationWindow(next, "2026-11-26");
+  assert.equal(window.dateFrom, "2026-04-01");
+  assert.equal(CONTINUATION_HORIZON_DAYS, 60);
+  assert.equal(window.dateTo, "2026-05-30");
+  assert.deepEqual(window.company, next);
+});
+
+test("a check ending soon after the boundary reads only up to its own end", () => {
+  assert.equal(continuationWindow(next, "2026-04-20").dateTo, "2026-04-20");
+});

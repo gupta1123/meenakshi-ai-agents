@@ -4,6 +4,7 @@ import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/autho
 import { loadLiveTodLocalBootstrap, type EvaluationRunRecord } from "@/lib/evaluation/evidence";
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { continuationWindow, loadYearSuccessor } from "@/lib/year-continuation";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -49,8 +50,9 @@ export async function GET(request: Request, context: RouteContext) {
   try {
     const { companyId } = await context.params;
     if (!isUuid(companyId)) return jsonWithCors(request, { error: "Invalid company id." }, { status: 400 });
-    const { company } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
+    const { company, organization } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
     await requireCurrentCheckPage(request, company.id);
+    const successor = await loadYearSuccessor(company, organization.id);
     const url = new URL(request.url);
     const today = new Date().toISOString().slice(0, 10);
     const requestedAsOfDate = url.searchParams.get("asOfDate");
@@ -94,7 +96,13 @@ export async function GET(request: Request, context: RouteContext) {
       periods,
       batches: bootstrap.batches.map((batch) => ({
         ...batch,
-        voucherScope: { ...batch.voucherScope, evaluationRunId: null },
+        voucherScope: (() => {
+          const scope = { ...batch.voucherScope, evaluationRunId: null } as Record<string, unknown>;
+          // Payments are read past the period end (paymentCheck.readTo); past the year end they sit in the next year's company.
+          const through = [scope.dateTo, (scope.paymentCheck as { readTo?: string } | undefined)?.readTo].filter((v): v is string => typeof v === "string").sort().at(-1) ?? "";
+          const window = successor ? continuationWindow(successor, through) : null;
+          return window ? { ...scope, continuation: window } : scope;
+        })(),
       })),
     }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {

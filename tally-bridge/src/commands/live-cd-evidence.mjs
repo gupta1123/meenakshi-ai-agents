@@ -4,6 +4,7 @@ import Decimal from "decimal.js";
 import {BRIDGE_VERSION} from "../version.mjs";
 
 import { syncVouchers } from "./sync-vouchers.mjs";
+import { readContinuationAllocations } from "./continuation.mjs";
 import { buildCollectionExportXml, extractBlocks, getAttribute, getTagText, postTallyXml } from "../tally/xml.mjs";
 import { sourceSalesLedgerName } from "./voucher-ledgers.mjs";
 import { CREDIT_NOTE_MATCHING_VERSION, allocationCustomer, creditNoteEvidence, creditNotePurpose, customerForVoucher, matchCreditNotes } from "./credit-note-matching.mjs";
@@ -210,6 +211,12 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
     cursor = result.cursorTo;
     persist(null);
   }
+  // Receipts for this year's invoices posted in the next year's company (see continuation.mjs).
+  const continued = await readContinuationAllocations({
+    command, scope, context, customers: eligibleCustomers, includeJournals: perMt,
+    makeScope: ({ cursor: at, dateFrom, dateTo, chunkDays }) => ({ ...scope, dateFrom, dateTo, customers: eligibleCustomers, cursor: at, chunkDays }),
+  });
+  allocations.push(...continued.allocations);
   const paymentsByInvoice = matchPayments(invoices, allocations);
   const notesByInvoice = perMt ? matchCreditNotes(invoices, creditNotes, eligibleCustomers) : new Map();
   const invoiceResults = invoices.map(({ advanceDraws: _draws, ...invoice }) => ({
@@ -245,5 +252,5 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
     }
   }
   const sourceFingerprint = createHash("sha256").update(canonicalJson(customerCredits.length ? { invoices: invoiceResults, customerCredits } : invoiceResults)).digest("hex");
-  return { mode: "live_cd_batch", connectorVersion:BRIDGE_VERSION, customerScope:scope.customerScope??null, creditNoteMatchingVersion: CREDIT_NOTE_MATCHING_VERSION, evaluationRunId: command.payload.evaluationRunId ?? null, ruleVersionId: scope.ruleVersionId ?? null, dateFrom: scope.dateFrom, dateTo: scope.dateTo, chunks, vouchersScanned, invoices: invoiceResults, customerCredits, sourceFingerprint };
+  return { mode: "live_cd_batch", connectorVersion:BRIDGE_VERSION, customerScope:scope.customerScope??null, creditNoteMatchingVersion: CREDIT_NOTE_MATCHING_VERSION, evaluationRunId: command.payload.evaluationRunId ?? null, ruleVersionId: scope.ruleVersionId ?? null, dateFrom: scope.dateFrom, dateTo: scope.dateTo, chunks, vouchersScanned, invoices: invoiceResults, customerCredits, ...(continued.status === "none" ? {} : { continuation: { status: continued.status, dateFrom: continued.dateFrom, dateTo: continued.dateTo, chunks: continued.chunks ?? 0, vouchersScanned: continued.vouchersScanned ?? 0 } }), sourceFingerprint };
 }
