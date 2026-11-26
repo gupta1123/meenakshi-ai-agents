@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { continuationWindow, CONTINUATION_HORIZON_DAYS } from "./year-continuation.ts";
+import { booksYearEnd, dateInBooksYear, continuationWindow, CONTINUATION_HORIZON_DAYS } from "./year-continuation.ts";
 
 const next = { name: "CO - (2026-2027)", guid: "g", booksFrom: "2026-04-01" };
 
@@ -19,4 +19,12 @@ test("a check reaching past the boundary reads the next year, capped at the hori
 
 test("a check ending soon after the boundary reads only up to its own end", () => {
   assert.equal(continuationWindow(next, "2026-04-20").dateTo, "2026-04-20");
+});
+
+test("a company takes only dates inside its own financial year", () => {
+  assert.equal(booksYearEnd("2025-04-01"), "2026-03-31");
+  assert.equal(dateInBooksYear("2025-04-01", "2026-03-31"), true);
+  assert.equal(dateInBooksYear("2025-04-01", "2026-11-27"), false);
+  assert.equal(dateInBooksYear("2026-04-01", "2026-11-27"), true);
+  assert.equal(dateInBooksYear(null, "2026-11-27"), true);
 });

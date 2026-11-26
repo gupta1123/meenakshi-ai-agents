@@ -44,3 +44,17 @@ export async function loadYearSuccessor(company: { organization_id?: string | nu
   const row = data as { tally_company_name: string; tally_company_guid: string; tally_books_from: string } | null;
   return row?.tally_books_from ? { name: row.tally_company_name, guid: row.tally_company_guid, booksFrom: row.tally_books_from } : null;
 }
+
+/** Last day of the financial year that starts on booksFrom (31 March for an April start). */
+export function booksYearEnd(booksFrom: string) {
+  const value = new Date(`${booksFrom}T00:00:00Z`);
+  value.setUTCFullYear(value.getUTCFullYear() + 1);
+  value.setUTCDate(value.getUTCDate() - 1);
+  return value.toISOString().slice(0, 10);
+}
+
+/** True when a voucher dated `date` can be entered in a company whose books start on booksFrom. */
+export function dateInBooksYear(booksFrom: string | null | undefined, date: string) {
+  if (!booksFrom) return true; // unknown period: nothing to check against
+  return date >= booksFrom && date <= booksYearEnd(booksFrom);
+}
