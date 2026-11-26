@@ -207,11 +207,24 @@ export async function POST(request: Request) {
     }))).filter((state): state is NonNullable<typeof state> => state !== null);
     // Tally's master change counter: queue a master sync when Tally changed.
     // Never let this fail the heartbeat itself.
-    const masterCounter = Number(body.masterChangeCounter);
-    if (companyLoaded && Number.isFinite(masterCounter) && masterCounter > 0) {
+    // A server reports one counter per open company (masterChangeCounters), so a change in any
+    // year's company is noticed; a PC reports the single counter of its active company.
+    const perCompany = Array.isArray(body.masterChangeCounters) ? (body.masterChangeCounters as Array<Record<string, unknown>>) : [];
+    if (companyLoaded && serverMode && perCompany.length) {
       for (const binding of bindingStates.filter((item) => item.matches)) {
-        await noteMasterCounter(supabase, { organizationId: connector.organization_id, companyId: binding.companyId, counter: masterCounter })
+        const reported = perCompany.find((entry) => sameCompanyIdentity(binding.expectedCompany, { guid: String(entry.guid ?? ""), name: String(entry.name ?? ""), booksFrom: (entry.booksFrom as string | null) ?? null }));
+        const counter = Number(reported?.counter);
+        if (!Number.isFinite(counter) || counter <= 0) continue;
+        await noteMasterCounter(supabase, { organizationId: connector.organization_id, companyId: binding.companyId, counter })
           .catch((error) => console.error("Automatic master sync check failed:", error));
+      }
+    } else {
+      const masterCounter = Number(body.masterChangeCounter);
+      if (companyLoaded && Number.isFinite(masterCounter) && masterCounter > 0) {
+        for (const binding of bindingStates.filter((item) => item.matches)) {
+          await noteMasterCounter(supabase, { organizationId: connector.organization_id, companyId: binding.companyId, counter: masterCounter })
+            .catch((error) => console.error("Automatic master sync check failed:", error));
+        }
       }
     }
     if (stateChanged) {
