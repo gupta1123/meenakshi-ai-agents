@@ -156,3 +156,16 @@ export async function postTallyXml(tallyUrl, xml, { timeoutMs = DEFAULT_TIMEOUT_
     clearTimeout(timeout);
   }
 }
+
+// Which financial period each open company covers, read as plain text so we can
+// see what this Tally version returns before the product relies on it.
+export function buildCompanyPeriodXml() {
+  return [
+    "<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST>",
+    "<TYPE>Collection</TYPE><ID>Meenakshi Company Periods</ID></HEADER><BODY><DESC>",
+    "<STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES>",
+    "<TDL><TDLMESSAGE><COLLECTION NAME=\"Meenakshi Company Periods\" ISMODIFY=\"No\">",
+    "<TYPE>Company</TYPE><FETCH>Name,GUID,StartingFrom,BooksFrom,EndingAt</FETCH>",
+    "</COLLECTION></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>",
+  ].join("");
+}

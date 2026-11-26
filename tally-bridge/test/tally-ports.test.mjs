@@ -11,8 +11,10 @@ test("tally ports lists the companies each local Tally listener holds", async ()
     throw new Error("refused");
   };
   const result = await runTallyPorts({}, { config: { tallyUrl: "http://localhost:9000" } },
-    { listeners: async () => ["http://127.0.0.1:9000", "http://127.0.0.1:9002", "http://127.0.0.1:9100"], probe });
+    { listeners: async () => ["http://127.0.0.1:9000", "http://127.0.0.1:9002", "http://127.0.0.1:9100"], probe,
+      post: async () => "<ENVELOPE><COMPANY><NAME>A</NAME><STARTINGFROM>20250401</STARTINGFROM><BOOKSFROM>20240401</BOOKSFROM><ENDINGAT>20260331</ENDINGAT></COMPANY></ENVELOPE>" });
   assert.deepEqual(result.ports.map((p) => [p.port, p.reachable, p.tallyProcess]), [[9000, true, true], [9002, true, true], [9100, false, true]]);
   assert.equal(result.ports[1].activeCompany.guid, "g2");
+  assert.deepEqual(result.ports[0].periods, [{ name: "A", startingFrom: "20250401", booksFrom: "20240401", endingAt: "20260331" }]);
   assert.equal(result.configuredUrl, "http://localhost:9000");
 });
