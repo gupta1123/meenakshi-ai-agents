@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { localTallyUrls, findBoundTally } from "./tally/local-instances.mjs";
+import { createTallyInstances } from "./tally/instances.mjs";
+import { companyKey, sameTallyCompany } from "./tally/company-identity.mjs";
 import {pathToFileURL} from "node:url";
 import path from "node:path";
 import {processSupportJob,supportRequest} from "./support/client.mjs";
@@ -83,8 +84,8 @@ async function readTallySnapshot(config, cachedCompanies = null) {
       const activeCompany = cachedCompanies.find((company) => company.name.trim().toLowerCase() === activeName.toLowerCase());
       if (activeCompany) {
         return {
-          activeCompany: { name: activeCompany.name, guid: activeCompany.guid },
-          availableCompanies: cachedCompanies.map((company) => ({ ...company, isActive: company.guid === activeCompany.guid })),
+          activeCompany: { name: activeCompany.name, guid: activeCompany.guid, booksFrom: activeCompany.booksFrom ?? null },
+          availableCompanies: cachedCompanies.map((company) => ({ ...company, isActive: company === activeCompany })),
           companySnapshotFresh: false,
           tallyReachable: true,
           companyLoaded: true,
@@ -111,13 +112,34 @@ const CHANGE_COUNTER_INTERVAL_MS = 3 * 60 * 1000;
 let changeCounter = { value: null, readAt: 0, company: null };
 let startupReadAt=0;
 
-async function heartbeat(config, cachedCompanies = null) {
+// Server mode: report every company open in every Tally program on this PC, not
+// just the one the configured port serves, and remember where each one lives.
+async function mergeServerSnapshot(snapshot, instances) {
+  const list = await instances.all().catch(() => []);
+  if (!list.length) return snapshot;
+  const bindings = readRuntimeStatus()?.connection?.bindings ?? [];
+  let focus = null;
+  for (const binding of bindings) { focus = list.find((entry) => sameTallyCompany(binding.expectedCompany, entry.company)); if (focus) break; }
+  focus ??= snapshot.activeCompany ? list.find((entry) => sameTallyCompany(snapshot.activeCompany, entry.company) && entry.isActiveInTally) : null;
+  focus ??= list[0];
+  const seen = new Set();
+  const availableCompanies = list.flatMap((entry) => {
+    const key = companyKey(entry.company);
+    if (seen.has(key)) return [];
+    seen.add(key);
+    return [{ ...entry.company, isActive: key === companyKey(focus.company) }];
+  });
+  return { ...snapshot, tallyReachable: true, companyLoaded: true, activeCompany: focus.company, activeUrl: focus.url, availableCompanies, companySnapshotFresh: true, error: null };
+}
+
+async function heartbeat(config, cachedCompanies = null, instances = null) {
   if(Date.now()-startupReadAt>300000){recordRuntimeStartup(await readWindowsStartup());startupReadAt=Date.now();}
-  const snapshot = await readTallySnapshot(config, cachedCompanies);
+  let snapshot = await readTallySnapshot(config, cachedCompanies);
+  if (instances) snapshot = await mergeServerSnapshot(snapshot, instances);
   if (snapshot.companyLoaded && snapshot.activeCompany?.name) {
     const company = snapshot.activeCompany.name;
     if (company !== changeCounter.company || Date.now() - changeCounter.readAt > CHANGE_COUNTER_INTERVAL_MS) {
-      const value = await probeMasterChangeCounter(config.tallyUrl, company).catch(() => null);
+      const value = await probeMasterChangeCounter(snapshot.activeUrl ?? config.tallyUrl, company).catch(() => null);
       changeCounter = { value: value ?? (company === changeCounter.company ? changeCounter.value : null), readAt: Date.now(), company };
     }
     snapshot.masterChangeCounter = changeCounter.company === company ? changeCounter.value : null;
@@ -187,18 +209,21 @@ function commandLease(config, command, activeCompany) {
 }
 
 function tallyCompaniesMatch(expectedCompany, activeCompany) {
-  const expectedGuid = String(expectedCompany?.guid ?? "").trim().toLowerCase();
-  const activeGuid = String(activeCompany?.guid ?? "").trim().toLowerCase();
-  // GUID is Tally's stable company identity. A display-name change must not
-  // redirect a command away from the company currently open in Tally Prime.
-  if (expectedGuid || activeGuid) return Boolean(expectedGuid && activeGuid) && expectedGuid === activeGuid;
-  return String(expectedCompany?.name ?? "").trim().toLowerCase() === String(activeCompany?.name ?? "").trim().toLowerCase();
+  // GUID plus financial year (books-from). A display-name change alone must not
+  // redirect a command, but a different year of the same company must not match.
+  return sameTallyCompany(expectedCompany, activeCompany);
 }
 
-async function processOneCommand(config, activeCompany) {
+async function processOneCommand(config, activeCompany, resolveTarget = null) {
   if (!activeCompany) return false;
   const { command } = await claimNextCommand(config);
   if (!command) return false;
+  if (resolveTarget) {
+    // The Tally program that has this command's company open may be on another port.
+    const target = await resolveTarget(command.expectedTallyCompany).catch(() => null);
+    // No target: keep the current company, so the match check below refuses a wrong one.
+    if (target) { config = target.config; activeCompany = target.activeCompany; }
+  }
   commandActivity(command, "running");
   const lease = commandLease(config, command, activeCompany);
   try {
@@ -270,45 +295,37 @@ async function startBridge(config) {
   let nextCompanyListAt = 0;
   let nextDiscoveryAt = 0;
   const configuredUrl = config.tallyUrl;
+  // Server mode on Windows: find every local Tally program and the companies it has open.
   const discoverLocal = serverMode && process.platform === "win32" &&
     ["localhost", "127.0.0.1", "[::1]"].includes(new URL(configuredUrl).hostname);
+  const instances = discoverLocal ? createTallyInstances({ configuredUrl }) : null;
+  const resolveTarget = instances
+    ? async (expected) => {
+      const hit = await instances.find(expected);
+      return hit ? { config: { ...config, tallyUrl: hit.url }, activeCompany: hit.company } : null;
+    }
+    : null;
   try { for (;;) {
     try {
       const now = Date.now();
       if (!snapshot || now >= nextHeartbeatAt) {
         const refreshCompanyList = now >= nextCompanyListAt || cachedCompanies.length === 0;
-        snapshot = await heartbeat(config, refreshCompanyList ? null : cachedCompanies);
-        const bindings = readRuntimeStatus()?.connection?.bindings ?? [];
-        const expectedName = String(bindings[0]?.expectedCompany?.name ?? "").trim().toLowerCase();
-        const openName = String(snapshot.activeCompany?.name ?? "").trim().toLowerCase();
-        const wrongYear = Boolean(expectedName && openName && expectedName !== openName);
-        if (discoverLocal && bindings.length === 1 && (!bindings[0].matches || wrongYear) && bindings[0].expectedCompany?.guid && now >= nextDiscoveryAt) {
-          nextDiscoveryAt = now + 300000;
-          try {
-            const urls = await localTallyUrls();
-            const selected = await findBoundTally(urls, bindings[0].expectedCompany.guid, undefined, bindings[0].expectedCompany.name);
-            logLine("INFO", "Checked local Tally listeners", { urls, selected });
-            const nextUrl = selected || configuredUrl;
-            if (nextUrl !== config.tallyUrl) {
-              config = { ...config, tallyUrl: nextUrl };
-              snapshot = await heartbeat(config);
-            }
-          } catch (error) { logLine("WARN", "Local Tally discovery unavailable", { error: error.message }); }
-        }
+        snapshot = await heartbeat(config, refreshCompanyList ? null : cachedCompanies, instances);
         cachedCompanies = snapshot.availableCompanies;
         nextHeartbeatAt = Date.now() + config.heartbeatIntervalMs;
         if (refreshCompanyList || snapshot.companySnapshotFresh) nextCompanyListAt = Date.now() + config.companyListIntervalMs;
       }
-      let processed = await processSupportJob(config,snapshot.activeCompany,{snapshot,update:async()=>{
+      let processed = await processSupportJob(config,snapshot.activeCompany,{snapshot,resolveTarget,update:async()=>{
         const {stageRemoteUpdate}=await import("./support/remote-update.mjs");
         return stageRemoteUpdate(config);
       }}).catch(error=>{if(error.status!==503)logLine("WARN","Support operation unavailable",{error:error.message});return false;});
-      if(!processed)processed = await processOneCommand(config, snapshot.activeCompany);
+      if(!processed)processed = await processOneCommand(config, snapshot.activeCompany, resolveTarget);
       // Server mode: after queued Tally commands, run a queued check. Credit Notes that arrive
       // meanwhile run between its read windows, so only one thing talks to Tally at a time.
       if (serverMode && !processed) {
         processed = await processOneCheckJob(config, snapshot.activeCompany, {
-          processCommand: () => processOneCommand(config, snapshot.activeCompany),
+          resolveTarget,
+          processCommand: () => processOneCommand(config, snapshot.activeCompany, resolveTarget),
         });
       }
       consecutiveFailures = 0;

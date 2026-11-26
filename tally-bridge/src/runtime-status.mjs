@@ -4,7 +4,7 @@ import {SUPPORT_CAPABILITIES,SUPPORT_PROTOCOL} from "./support/diagnostics.mjs";
 import { BRIDGE_VERSION } from "./version.mjs";
 
 let status = null;
-const company = (value) => value ? { name: value.name ?? null, guid: value.guid ?? null, isActive: Boolean(value.isActive) } : null;
+const company = (value) => value ? { name: value.name ?? null, guid: value.guid ?? null, booksFrom: value.booksFrom ?? null, isActive: Boolean(value.isActive) } : null;
 
 export function beginRuntimeStatus(config) {
   status = { protocol:SUPPORT_PROTOCOL,capabilities:SUPPORT_CAPABILITIES,bootId:randomUUID(),windowsUser:os.userInfo().username,osRelease:os.release(),freeMemoryMb:Math.round(os.freemem()/1048576), mode: config.mode === "server" ? "server" : "pc", version: BRIDGE_VERSION, pid: process.pid, startedAt: new Date().toISOString(), connection: null, activity: "Waiting for work" };

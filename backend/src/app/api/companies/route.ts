@@ -1,3 +1,4 @@
+import { normalizeBooksFrom } from "@/lib/tally-company-identity";
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { appendMeenakshiAuditEvent } from "@/lib/audit";
 import { MeenakshiAccessError, requireMeenakshiOrganizationAccess } from "@/lib/authorization";
@@ -26,6 +27,8 @@ export async function POST(request: Request) {
     const tallyCompanyGuid = readText(body.tallyCompanyGuid, 500);
     const tallyCompanyName = readText(body.tallyCompanyName, 500);
     const timezone = readText(body.timezone, 100) ?? "Asia/Kolkata";
+    // The financial year (books-from) tells apart companies that share one Tally GUID.
+    const tallyBooksFrom = normalizeBooksFrom(body.tallyBooksFrom);
     if (!isUuid(organizationId) || !code || !COMPANY_CODE.test(code) || !tallyCompanyGuid || !tallyCompanyName) {
       return jsonWithCors(request, { error: "organizationId, an uppercase code, tallyCompanyGuid, and tallyCompanyName are required." }, { status: 400 });
     }
@@ -38,20 +41,21 @@ export async function POST(request: Request) {
         code,
         tally_company_guid: tallyCompanyGuid,
         tally_company_name: tallyCompanyName,
+        tally_books_from: tallyBooksFrom,
         timezone,
         is_active: true,
       })
-      .select("id, organization_id, code, tally_company_guid, tally_company_name, timezone, is_active, created_at")
+      .select("id, organization_id, code, tally_company_guid, tally_company_name, tally_books_from, timezone, is_active, created_at")
       .single();
     if (error) {
       if (error.code === "23505") {
-        return jsonWithCors(request, { error: "That Tally company GUID or company code is already registered for this organization." }, { status: 409 });
+        return jsonWithCors(request, { error: "That Tally company (GUID and financial year) or company code is already registered for this organization." }, { status: 409 });
       }
       throw error;
     }
 
     const company = data as {
-      id: string; organization_id: string; code: string; tally_company_guid: string; tally_company_name: string; timezone: string; is_active: boolean; created_at: string;
+      id: string; organization_id: string; code: string; tally_company_guid: string; tally_company_name: string; tally_books_from: string | null; timezone: string; is_active: boolean; created_at: string;
     };
     await appendMeenakshiAuditEvent({
       organizationId,
@@ -65,6 +69,7 @@ export async function POST(request: Request) {
         code: company.code,
         tallyCompanyGuid: company.tally_company_guid,
         tallyCompanyName: company.tally_company_name,
+        tallyBooksFrom: company.tally_books_from,
         timezone: company.timezone,
       },
     });
@@ -75,6 +80,7 @@ export async function POST(request: Request) {
         code: company.code,
         tallyCompanyGuid: company.tally_company_guid,
         tallyCompanyName: company.tally_company_name,
+        tallyBooksFrom: company.tally_books_from,
         timezone: company.timezone,
         isActive: company.is_active,
         createdAt: company.created_at,

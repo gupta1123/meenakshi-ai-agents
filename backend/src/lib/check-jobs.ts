@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { sameTallyCompany } from "@/lib/tally-company-identity";
 
 /**
  * Pure helpers for server-mode check jobs (Cash Discount / Turnover Discount /
@@ -107,9 +108,15 @@ export type ServerReadiness = "ready" | "connector_offline" | "tally_closed" | "
  * "Offline" = the connector program is not reporting (server off, rebooting, task stopped).
  * After a reboot someone must open Tally by hand, so the other cases are expected and common.
  */
+export type OpenTallyCompany = { guid: string | null; name: string | null; booksFrom?: string | null };
+
 export function describeServerReadiness(input: {
   lastSeenAt: string | null; tallyReachable: boolean | null; companyLoaded: boolean | null;
   activeCompanyName: string | null; expectedCompanyName: string | null; now?: number;
+  /** Every company open on the server (a server can have several, e.g. one per financial year). */
+  openCompanies?: OpenTallyCompany[];
+  /** The linked company, with its Tally ID and financial year. */
+  expectedCompany?: OpenTallyCompany;
 }): { state: ServerReadiness; message: string | null } {
   const now = input.now ?? Date.now();
   if (!input.lastSeenAt || now - Date.parse(input.lastSeenAt) > 90_000) {
@@ -117,6 +124,13 @@ export function describeServerReadiness(input: {
   }
   if (input.tallyReachable === false) {
     return { state: "tally_closed", message: "Tally is not open on the server. Ask the person who looks after the server to open Tally Prime." };
+  }
+  if (input.openCompanies && input.expectedCompany?.guid && input.openCompanies.length > 0) {
+    // The server may hold several companies at once; the linked one just has to be among them.
+    if (input.openCompanies.some((open) => sameTallyCompany(input.expectedCompany!, open))) return { state: "ready", message: null };
+    const names = input.openCompanies.map((open) => open.name).filter(Boolean).join(", ");
+    const wanted = input.expectedCompanyName ?? input.expectedCompany.name ?? "the company";
+    return { state: "wrong_company", message: `Tally on the server has ${names} open, but this needs ${wanted}. Ask them to open ${wanted}.` };
   }
   if (input.companyLoaded === false || !input.activeCompanyName) {
     return { state: "company_not_open", message: `Tally is open on the server but ${input.expectedCompanyName ?? "the company"} is not loaded. Ask them to open that company in Tally Prime.` };

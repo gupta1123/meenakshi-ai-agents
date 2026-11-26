@@ -89,7 +89,7 @@ export async function GET(request: Request, context: RouteContext) {
     }));
     return jsonWithCors(request, {
       evaluatedOn: bootstrap.evaluatedOn,
-      expectedCompany: { name: company.tally_company_name, guid: company.tally_company_guid },
+      expectedCompany: { name: company.tally_company_name, guid: company.tally_company_guid, booksFrom: company.tally_books_from ?? null },
       activeSchemeVersionId,
       periods,
       batches: bootstrap.batches.map((batch) => ({

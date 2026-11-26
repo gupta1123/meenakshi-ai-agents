@@ -1,6 +1,7 @@
 import { runDiagnostic, resolveSupportCustomers } from "./diagnostics.mjs";
 import { runCompanyOverview } from "./company-overview.mjs";
 import { runTallyPorts } from "./tally-ports.mjs";
+import { sameTallyCompany } from "../tally/company-identity.mjs";
 import { runCheckJob } from "../server-jobs.mjs";
 import { sendLogDays } from "../log-upload.mjs";
 import { listLogDays } from "../connector-log.mjs";
@@ -39,7 +40,7 @@ export async function supportRequest(config, path, body) {
 export async function processSupportJob(
   config,
   activeCompany,
-  { update, snapshot } = {},
+  { update, snapshot, resolveTarget } = {},
   deps = {},
 ) {
   const api = deps.api ?? supportRequest;
@@ -48,6 +49,11 @@ export async function processSupportJob(
     "/next?connectorId=" + encodeURIComponent(config.connectorId),
   );
   if (!job) return false;
+  if (resolveTarget && job.expectedTallyCompany?.guid && ["diagnostic", "recalculate"].includes(job.operation) && !["company_overview", "tally_ports"].includes(job.request?.type)) {
+    // The Tally program that has the approved company open may be on another port.
+    const target = await resolveTarget(job.expectedTallyCompany).catch(() => null);
+    if (target) { config = target.config; activeCompany = target.activeCompany; }
+  }
   let cancelled = false,
     pendingProgress = null,
     progressFlight = null,
@@ -104,11 +110,7 @@ export async function processSupportJob(
     } else if (job.operation === "diagnostic" && job.request?.type === "tally_ports") {
       result = await (deps.tallyPorts ?? runTallyPorts)(job.request, context);
     } else if (["diagnostic", "recalculate"].includes(job.operation)) {
-      if (
-        !activeCompany ||
-        String(activeCompany.guid).toLowerCase() !==
-          String(job.expectedTallyCompany.guid).toLowerCase()
-      )
+      if (!activeCompany || !sameTallyCompany(job.expectedTallyCompany, activeCompany))
         throw new Error("The approved Tally company is not open.");
       if (job.operation === "diagnostic")
         result = await (deps.diagnostic ?? runDiagnostic)(job.request, context);

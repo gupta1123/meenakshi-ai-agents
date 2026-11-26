@@ -203,7 +203,10 @@ test("one queued TOD job reads every period and returns evidence ready for brows
 });
 
 test("companies that share a GUID but are different financial years do not match", () => {
-  assert.equal(companiesMatch({ guid: "g", name: "Co - (2025-2026)" }, { guid: "G", name: "Co - (2026-2027)" }), false);
-  assert.equal(companiesMatch({ guid: "g", name: "Co - (2025-2026)" }, { guid: "G", name: " co - (2025-2026) " }), true);
-  assert.equal(companiesMatch({ guid: "g" }, { guid: "g", name: "Co" }), true);
+  const y25 = { guid: "g", name: "Co - (2025-2026)", booksFrom: "2025-04-01" };
+  const y26 = { guid: "G", name: "Co - (2026-2027)", booksFrom: "2026-04-01" };
+  assert.equal(companiesMatch(y25, y26), false);
+  assert.equal(companiesMatch(y25, { ...y25, guid: "G", name: "Renamed" }), true);
+  // A record that does not know its year yet keeps matching on the GUID, as before.
+  assert.equal(companiesMatch({ guid: "g", name: "Co" }, y26), true);
 });

@@ -43,17 +43,9 @@ export async function authenticateMeenakshiBridge(connectorId: string, controlTo
   return connector;
 }
 
-export function tallyCompanyMatches(expectedGuid: string, expectedName: string, observedGuid: string | null, observedName: string | null) {
-  const normalizedExpectedGuid = expectedGuid.trim().toLowerCase();
-  const normalizedObservedGuid = observedGuid?.trim().toLowerCase() ?? "";
-  // A Tally GUID is the immutable accounting identity. Company names are kept
-  // for operators and audit history, but may legitimately change in Tally or
-  // differ from an older imported record.
-  if (normalizedExpectedGuid || normalizedObservedGuid) {
-    return Boolean(normalizedExpectedGuid && normalizedObservedGuid) && normalizedExpectedGuid === normalizedObservedGuid;
-  }
+export { normalizeBooksFrom, sameTallyCompany, type TallyCompanyIdentity } from "@/lib/tally-company-identity";
+import { sameTallyCompany } from "@/lib/tally-company-identity";
 
-  const normalizedExpectedName = expectedName.trim().toLowerCase();
-  const normalizedObservedName = observedName?.trim().toLowerCase() ?? "";
-  return Boolean(normalizedExpectedName && normalizedObservedName) && normalizedExpectedName === normalizedObservedName;
+export function tallyCompanyMatches(expectedGuid: string, expectedName: string, observedGuid: string | null, observedName: string | null, expectedBooksFrom: string | null = null, observedBooksFrom: string | null = null) {
+  return sameTallyCompany({ guid: expectedGuid, name: expectedName, booksFrom: expectedBooksFrom }, { guid: observedGuid, name: observedName, booksFrom: observedBooksFrom });
 }

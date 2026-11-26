@@ -27,9 +27,13 @@ export async function GET(request: Request, context: RouteContext) {
     const {data:connector,error:ce}=await db.from("tally_connectors").select("last_heartbeat_at,last_tally_reachable,last_company_loaded,last_company_name").eq("id",binding.connector_id).single();if(ce)throw ce;
     const {data:runtimeRow}=await db.from("tally_connectors").select("runtime").eq("id",binding.connector_id).maybeSingle();
     const runtime=runtimeRow?.runtime??{};
+    // Every company the server has open, so a company is ready if it is among them, whichever port it is on.
+    const {data:openRows,error:oe}=await db.from("tally_connector_company_observations").select("tally_company_guid,tally_company_name,tally_books_from").eq("connector_id",binding.connector_id).eq("is_available",true);if(oe)throw oe;
+    const openCompanies=(openRows??[]).map((row)=>({guid:row.tally_company_guid as string,name:row.tally_company_name as string,booksFrom:row.tally_books_from as string|null}));
     const mode=modeRow?.mode==="server"?"server":"pc",observedMode=runtime.mode??null;
     const readiness=describeServerReadiness({lastSeenAt:connector.last_heartbeat_at,tallyReachable:connector.last_tally_reachable,
-      companyLoaded:connector.last_company_loaded,activeCompanyName:connector.last_company_name,expectedCompanyName:access.company.tally_company_name??null});
+      companyLoaded:connector.last_company_loaded,activeCompanyName:connector.last_company_name,expectedCompanyName:access.company.tally_company_name??null,
+      openCompanies,expectedCompany:{guid:access.company.tally_company_guid,name:access.company.tally_company_name,booksFrom:access.company.tally_books_from}});
     return jsonWithCors(request,{mode,observedMode,modeMismatch:observedMode!==null&&mode!==observedMode,
       runtime,connectorOnline:readiness.state!=="connector_offline",lastSeenAt:connector.last_heartbeat_at,readiness:readiness.state,
       message:observedMode!==null&&mode!==observedMode?"Website and connector modes differ. Finish server setup from the connector's menu.":readiness.message});

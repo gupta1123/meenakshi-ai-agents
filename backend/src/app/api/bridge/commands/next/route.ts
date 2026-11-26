@@ -5,8 +5,8 @@ import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { getObsoleteEvaluationReadReason, retireEvaluationRead, retireObsoleteEvaluationReads } from "@/lib/evaluation/refresh-commands.mjs";
 
 type TallyCommandRow = { id: string; company_id: string; command_type: string; correlation_id: string; expected_tally_company_guid: string; expected_tally_company_name: string; payload: Record<string, unknown>; attempts: number };
-function serializeCommand(command: TallyCommandRow) {
-  return { id: command.id, companyId: command.company_id, commandType: command.command_type, correlationId: command.correlation_id, expectedTallyCompany: { guid: command.expected_tally_company_guid, name: command.expected_tally_company_name }, payload: command.payload, attempt: command.attempts };
+function serializeCommand(command: TallyCommandRow, booksFrom: string | null) {
+  return { id: command.id, companyId: command.company_id, commandType: command.command_type, correlationId: command.correlation_id, expectedTallyCompany: { guid: command.expected_tally_company_guid, name: command.expected_tally_company_name, booksFrom }, payload: command.payload, attempt: command.attempts };
 }
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
 export async function GET(request: Request) {
@@ -44,7 +44,10 @@ export async function GET(request: Request) {
         if (syncRunError) throw syncRunError;
       }
     }
-    return jsonWithCors(request, { command: command ? serializeCommand(command) : null });
+    if (!command) return jsonWithCors(request, { command: null });
+    // The financial year of the company this command is for (two years can share one GUID).
+    const { data: yearRow } = await supabase.from("companies").select("tally_books_from").eq("id", command.company_id).maybeSingle();
+    return jsonWithCors(request, { command: serializeCommand(command, (yearRow as { tally_books_from: string | null } | null)?.tally_books_from ?? null) });
   } catch (error) {
     console.error("Error in GET /api/bridge/commands/next:", error);
     return jsonWithCors(request, { error: "Could not claim Tally command." }, { status: 500 });

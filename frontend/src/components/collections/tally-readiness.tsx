@@ -14,12 +14,13 @@ import {ConnectorSupportPanel} from "./connector-support";
 import { TallyModeSetting } from "./tally-mode-setting";
 import { WorkspacePageHeader } from "./app-shell";
 import type { TallyHealth } from "./types";
+import { sameTallyCompany } from "@/lib/tally-company";
 import { Button, InlineMessage, Skeleton } from "./ui";
 import s from "./tally-connection.module.css";
 
 type Connector = { id: string; displayName: string; machineFingerprint: string; status: string; heartbeatStale?: boolean };
 type SetupCredential = { connector: Connector & { installationKey: string }; controlToken: string; tallyUrl: string };
-type DetectedTallyCompany = { name: string; guid: string; isActive: boolean };
+type DetectedTallyCompany = { name: string; guid: string; booksFrom?: string | null; isActive: boolean };
 type RegisteredCompany = { id: string; code: string; tallyCompanyGuid: string; tallyCompanyName: string };
 type ConnectorCompanySnapshot = {
   connector: {
@@ -233,12 +234,12 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
   // The browser only reflects its live selection; it never picks another
   // detected company on the user's behalf.
   const selectedTallyCompany = activeTallyCompany;
-  const registeredActiveCompany = selectedTallyCompany ? availableCompanies.find((item) => item.organization.id === organization.id && item.company.tally_company_guid.toLowerCase() === selectedTallyCompany.guid.toLowerCase())?.company : null;
+  const registeredActiveCompany = selectedTallyCompany ? availableCompanies.find((item) => item.organization.id === organization.id && sameTallyCompany({ guid: item.company.tally_company_guid, name: item.company.tally_company_name, booksFrom: item.company.tally_books_from }, selectedTallyCompany))?.company : null;
   const selectedCompanyAlreadyRegistered = Boolean(registeredActiveCompany);
   const selectedConnectorCanTakeCompany = Boolean(
     connectorId
     && connectorId !== health?.connector?.id
-    && selectedTallyCompany?.guid.toLowerCase() === company.tally_company_guid.toLowerCase()
+    && selectedTallyCompany && sameTallyCompany({ guid: company.tally_company_guid, name: company.tally_company_name, booksFrom: company.tally_books_from }, selectedTallyCompany)
   );
   const selectedConnectorHasClaimedMachine = Boolean(selectedConnector && !selectedConnector.machineFingerprint.startsWith("pending:"));
   const bridgeConnected = Boolean(snapshotConnector?.bridgeConnected);
@@ -443,6 +444,7 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
           code,
           tallyCompanyGuid: selectedTallyCompany.guid,
           tallyCompanyName: selectedTallyCompany.name,
+          tallyBooksFrom: selectedTallyCompany.booksFrom ?? null,
         }),
       });
       await apiRequest(accessToken, `/api/connectors/${connectorId}/bindings`, {
@@ -631,7 +633,7 @@ export function TallyReadiness({ health: initialHealth, onRefresh }: { health?: 
           </ol>
         </section>}
 
-        {unregisteredActive && selectedTallyCompany && selectedTallyCompany.guid.toLowerCase() !== company.tally_company_guid.toLowerCase() && <section className={s.callout}>
+        {unregisteredActive && selectedTallyCompany && !sameTallyCompany({ guid: company.tally_company_guid, name: company.tally_company_name, booksFrom: company.tally_books_from }, selectedTallyCompany) && <section className={s.callout}>
           <Building2 size={18} />
           <div>
             <strong>{selectedTallyCompany.name} is open in Tally but not added to Meenakshi</strong>
