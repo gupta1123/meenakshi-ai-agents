@@ -59,7 +59,7 @@ function durationLabel(run: EvaluationRun) {
 export function GuidedEvaluationQueue({ scheme, ruleVersionId, latestRun, onError, onRetry, onViewResults, onSettled }: Props) {
   const { company, companyKey } = useCompany();
   const [loadedRuns, setRuns] = useState<EvaluationRun[]>([]);
-  const runs = useMemo(() => ruleVersionId ? loadedRuns.filter((run) => !run.scheme_version_id || run.scheme_version_id === ruleVersionId) : loadedRuns, [loadedRuns, ruleVersionId]);
+  const runs = useMemo(() => ruleVersionId ? loadedRuns.filter((run) => (run.companyId && run.companyId !== company.id) || !run.scheme_version_id || run.scheme_version_id === ruleVersionId) : loadedRuns, [company.id, loadedRuns, ruleVersionId]);
   const [loading, setLoading] = useState(true);
   const [dismissedRunId, setDismissedRunId] = useState<string | null>(null);
   const [historyFilter, setHistoryFilter] = useState<"all" | "successful" | "attention">("all");
@@ -76,7 +76,7 @@ export function GuidedEvaluationQueue({ scheme, ruleVersionId, latestRun, onErro
       // Batch TOD runs are stored as one parent plus many customer jobs. Fetch
       // enough rows before collapsing them so history is not silently limited
       // to the first few parent calculations.
-      const response = await apiRequest<{ evaluationRuns: EvaluationRun[] }>(token, `/api/companies/${company.id}/evaluations/runs?schemeType=${scheme}&limit=500${fresh ? "&fresh=1" : ""}`);
+      const response = await apiRequest<{ evaluationRuns: EvaluationRun[] }>(token, `/api/companies/${company.id}/evaluations/runs?schemeType=${scheme}&limit=500${scheme === "tod" ? "&allYears=1" : ""}${fresh ? "&fresh=1" : ""}`);
       setRuns(response.evaluationRuns);
       onError(null);
     } catch (cause) {

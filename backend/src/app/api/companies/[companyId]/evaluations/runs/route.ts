@@ -3,6 +3,7 @@ import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/autho
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { collapseEvaluationRuns } from "@/lib/evaluation/run-batches";
+import { loadCompanyGroup } from "@/lib/company-group";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 type SchemeType = "cd" | "tod";
@@ -26,7 +27,7 @@ export async function GET(request: Request, context: RouteContext) {
     const { companyId } = await context.params;
     if (!isUuid(companyId)) return jsonWithCors(request, { error: "Invalid company id." }, { status: 400 });
 
-    const { company } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
+    const { company, organization } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
     const searchParams = new URL(request.url).searchParams;
     const requestedScheme = searchParams.get("schemeType");
     if (requestedScheme && requestedScheme !== "cd" && requestedScheme !== "tod") {
@@ -37,12 +38,14 @@ export async function GET(request: Request, context: RouteContext) {
     const limit = Number.isFinite(requestedLimit) ? Math.min(500, Math.max(1, Math.floor(requestedLimit))) : 100;
     const compact = searchParams.get("detail") === "compact";
     const fresh = searchParams.get("fresh") === "1";
-    const cacheKey = `${company.id}:${requestedScheme ?? "all"}:${limit}:${compact}`;
+    const allYears = searchParams.get("allYears") === "1";
+    const cacheKey = `${company.id}:${requestedScheme ?? "all"}:${limit}:${compact}:${allYears}`;
     const cached = runsCache.get(cacheKey);
     if (!fresh && cached && cached.expiresAt > Date.now()) {
       return jsonWithCors(request, cached.data, { headers: { "Cache-Control": "private, max-age=5, stale-while-revalidate=10", "X-Cache": "HIT" } });
     }
     const supabase = createSupabaseAdminClient();
+    const loadYear = async (memberId: string) => {
     const columns = "id, scheme_version_id, evaluation_date, period_start, period_end, status, error_summary, request_context, started_at, completed_at, created_at, updated_at, attempts, max_attempts, idempotency_key";
     // A TOD calculation stores one child run per customer (hundreds), keyed
     // "<calculationId>:<uuid>". Limiting raw rows therefore showed only the
@@ -52,7 +55,7 @@ export async function GET(request: Request, context: RouteContext) {
     let runsQuery = supabase
       .from("evaluation_runs")
       .select(`${columns}, summary`)
-      .eq("company_id", company.id)
+      .eq("company_id", memberId)
       .not("idempotency_key", "like", childKey)
       .order("created_at", { ascending: false });
     if (requestedScheme) runsQuery = runsQuery.eq("request_context->>schemeType", requestedScheme);
@@ -70,7 +73,7 @@ export async function GET(request: Request, context: RouteContext) {
       for (let from = 0; ; from += 1000) {
         const { data: children, error: childError } = await supabase.from("evaluation_runs")
           .select(`${childColumns}, calculatedDiscountAmount:summary->calculatedDiscountAmount`)
-          .eq("company_id", company.id).like("idempotency_key", `${root.id}:%`)
+          .eq("company_id", memberId).like("idempotency_key", `${root.id}:%`)
           .order("id").range(from, from + 999);
         if (childError) throw childError;
         for (const child of children ?? []) {
@@ -98,7 +101,7 @@ export async function GET(request: Request, context: RouteContext) {
           .map((run) => run.scheme_version_id)
           .filter((id): id is string => Boolean(id)))];
     const { data: versions, error: versionsError } = versionIds.length
-      ? await supabase.from("scheme_versions").select("id, scheme_type").eq("company_id", company.id).in("id", versionIds)
+      ? await supabase.from("scheme_versions").select("id, scheme_type").eq("company_id", memberId).in("id", versionIds)
       : { data: [], error: null };
     if (versionsError) throw versionsError;
 
@@ -123,6 +126,14 @@ export async function GET(request: Request, context: RouteContext) {
       })
       .filter((run) => !schemeType || run.scheme_type === schemeType));
 
+      return evaluationRuns;
+    };
+    // A split Tally company's years are one company on screen: with allYears=1 the runs of every year are listed together.
+    const members = allYears ? await loadCompanyGroup(company.id, organization.id) : [];
+    const evaluationRuns = members.length > 1
+      ? (await Promise.all(members.map(async (member) => (await loadYear(member.id)).map((run) => ({ ...run, companyId: member.id, companyYear: member.booksFrom })))))
+          .flat().sort((x, y) => String(y.created_at).localeCompare(String(x.created_at)))
+      : (await loadYear(company.id)).map((run) => ({ ...run, companyId: company.id }));
     const payload = { evaluationRuns };
     runsCache.set(cacheKey, { expiresAt: Date.now() + RUNS_CACHE_TTL_MS, data: payload });
     if (runsCache.size > 500) {

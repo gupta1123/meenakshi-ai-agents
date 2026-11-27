@@ -632,7 +632,7 @@ function CashDiscountRecoveryPage({ data, setNotice, setError, isAdministrator, 
 }
 
 function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customerNames, tallyMode }: PageProps & { scheme: "cd" | "tod" }) {
-  const { company, isAdministrator } = useCompany();
+  const { company, isAdministrator, setWorkingYear } = useCompany();
   const [evaluationOpen, setEvaluationOpen] = useState(false);
   const [showEvaluationQueue, setShowEvaluationQueue] = useState(false);
   // Credit Notes links here with ?view=create: open the latest ended period on "Ready to create".
@@ -740,17 +740,87 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
     setStatusFilter("ready");
   }, [data, openReadyView]);
 
+  // The years of a split Tally company are one company on screen. Opening a run of another year moves the
+  // page to that year (its rule, Tally company and Credit Notes), then shows the run once that year has loaded.
+  const pendingRunView = useRef<EvaluationRun | null>(null);
+  const bootstrapForCompany = useRef<string | null>(null);
+  const viewRunResults = (run: EvaluationRun, isLatest: boolean) => {
+      // The newest completed calculation is the live result: open the normal
+      // Customers view, where Credit Notes can be created, not a read-only copy.
+      if (scheme === "tod" && isLatest && run.period_start && run.period_end) {
+        const periodStart = run.period_start;
+        const periodEnd = run.period_end;
+        void (async () => {
+          setNotice("Loading this period’s results…");
+          try {
+            const token = await accessToken();
+            if (!token) return;
+            // Load every saved result of this period and rule version (pages of 200 keep request URLs short).
+            const loaded: Proposal[] = [];
+            let cursor: string | null = null;
+            for (let page = 0; page < 20; page += 1) {
+              const params = new URLSearchParams({ schemeType: "tod", periodStart, periodEnd, limit: "200" });
+              if (run.scheme_version_id) params.set("schemeVersionId", run.scheme_version_id);
+              if (cursor) params.set("cursor", cursor);
+              const response: { proposals: Proposal[]; nextCursor: string | null; hasMore: boolean } = await apiRequest(token, `/api/companies/${company.id}/evaluations/proposals?${params}`, { cache: "no-store" });
+              loaded.push(...response.proposals.filter((proposal) => proposal.status !== "not_in_scheme"));
+              if (!response.hasMore || !response.nextCursor) break;
+              cursor = response.nextCursor;
+            }
+            if (!loaded.length) { openSnapshot(run); return; }
+            const isCurrentRule = !localTodBootstrap || !run.scheme_version_id || run.scheme_version_id === localTodBootstrap.activeSchemeVersionId;
+            setSelectedTodPeriodKey(`${periodStart}:${periodEnd}`);
+            setStatusFilter("all");
+            setQuery("");
+            setShowEvaluationQueue(false);
+            if (isCurrentRule) {
+              // Live view: Credit Notes can be created from here.
+              setPeriodRows(loaded);
+              setSelectedHistoryRun(null);
+              setHistoryTodRows(null);
+              setNotice(null);
+            } else {
+              // Calculated under an earlier rule version: read-only.
+              setHistoryTodRows(loaded);
+              setSelectedHistoryRun(run);
+              setNotice(`${formatBusinessDate(periodStart)} – ${formatBusinessDate(periodEnd)} was calculated under an earlier rule version. Showing it read-only.`);
+            }
+          } catch (cause) { setError(userFacingError(cause, "Could not load this period’s results.")); }
+        })();
+        return;
+      }
+      if (scheme === "tod" && run.period_start && run.period_end) {
+        openSnapshot(run);
+        return;
+      }
+      setShowEvaluationQueue(false);
+    }
+  const openRunResults = (run: EvaluationRun, isLatest: boolean) => {
+    if (run.companyId && run.companyId !== company.id) { pendingRunView.current = run; setShowEvaluationQueue(true); setWorkingYear(run.companyId); return; }
+    viewRunResults(run, isLatest);
+  };
+  // Leaving Turnover Discount returns the page to the newest year.
+  useEffect(() => () => { if (scheme === "tod") setWorkingYear(null); }, [scheme, setWorkingYear]);
+
   const preloadLocalTodBootstrap = useCallback(async (asOfDate?: string, fresh = false) => {
     const token = await accessToken();
     if (!token) throw new Error("Sign in again before calculating Turnover Discounts.");
     const query = [asOfDate ? `asOfDate=${encodeURIComponent(asOfDate)}` : "", fresh ? "fresh=1" : ""].filter(Boolean).join("&");
     const suffix = query ? `?${query}` : "";
     const bootstrap = await apiRequest<LocalTodBootstrap>(token, `/api/companies/${company.id}/evaluations/tod/local-bootstrap${suffix}`);
+    bootstrapForCompany.current = company.id;
     setLocalTodBootstrap(bootstrap);
     // The period shown on load is chosen from the last saved result (below),
     // not the rule's current period, which may not have been calculated yet.
     return bootstrap;
   }, [company.id]);
+  useEffect(() => {
+    const pending = pendingRunView.current;
+    if (!pending || pending.companyId !== company.id || !localTodBootstrap || bootstrapForCompany.current !== company.id) return;
+    pendingRunView.current = null;
+    viewRunResults(pending, true);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [company.id, localTodBootstrap]);
   const serverCheck = useServerCheck(company.id, "tod", scheme === "tod" && tallyMode.mode === "server", accessToken, async (next) => {
     if (next.run) setLatestRun(next.run as EvaluationRun);
     if (next.job.status === "succeeded" && next.run?.status === "completed") {
@@ -992,57 +1062,7 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       }[bucket as "ready"]!;
       return <button key={bucket} type="button" role="tab" aria-selected={statusFilter === bucket} className={`cd-action-card${statusFilter === bucket ? " selected" : ""}${bucket === "review" && count ? " has-attention" : ""}${!count && statusFilter !== bucket ? " is-empty" : ""}`} onClick={() => { setStatusFilter(bucket); setQuery(""); }}><span>{card.label}</span><strong>{card.value}</strong><small>{card.detail}</small></button>;
     })}</div>}</div> : <><div className="summary-bar"><span><StatusBadge status="ready" />Tally information</span><span><strong>{allRows.length}</strong> results</span><span><strong>{readyToFinalize}</strong> ready to finalize</span><span><strong>{reviewing}</strong> need review</span></div><div className="segmented evaluation-view-tabs" aria-label={`${title} views`}><button className={!showEvaluationQueue ? "selected" : ""} onClick={() => setShowEvaluationQueue(false)}>Customer results</button><button className={showEvaluationQueue ? "selected" : ""} onClick={() => setShowEvaluationQueue(true)}>Calculation history</button></div></>}
-    {showEvaluationQueue && <GuidedEvaluationQueue scheme={scheme} ruleVersionId={scheme === "tod" ? localTodBootstrap?.activeSchemeVersionId ?? null : null} latestRun={latestRun} onError={setError} onRetry={() => setEvaluationOpen(true)} onViewResults={(run, isLatest) => {
-      // The newest completed calculation is the live result: open the normal
-      // Customers view, where Credit Notes can be created, not a read-only copy.
-      if (scheme === "tod" && isLatest && run.period_start && run.period_end) {
-        const periodStart = run.period_start;
-        const periodEnd = run.period_end;
-        void (async () => {
-          setNotice("Loading this period’s results…");
-          try {
-            const token = await accessToken();
-            if (!token) return;
-            // Load every saved result of this period and rule version (pages of 200 keep request URLs short).
-            const loaded: Proposal[] = [];
-            let cursor: string | null = null;
-            for (let page = 0; page < 20; page += 1) {
-              const params = new URLSearchParams({ schemeType: "tod", periodStart, periodEnd, limit: "200" });
-              if (run.scheme_version_id) params.set("schemeVersionId", run.scheme_version_id);
-              if (cursor) params.set("cursor", cursor);
-              const response: { proposals: Proposal[]; nextCursor: string | null; hasMore: boolean } = await apiRequest(token, `/api/companies/${company.id}/evaluations/proposals?${params}`, { cache: "no-store" });
-              loaded.push(...response.proposals.filter((proposal) => proposal.status !== "not_in_scheme"));
-              if (!response.hasMore || !response.nextCursor) break;
-              cursor = response.nextCursor;
-            }
-            if (!loaded.length) { openSnapshot(run); return; }
-            const isCurrentRule = !localTodBootstrap || !run.scheme_version_id || run.scheme_version_id === localTodBootstrap.activeSchemeVersionId;
-            setSelectedTodPeriodKey(`${periodStart}:${periodEnd}`);
-            setStatusFilter("all");
-            setQuery("");
-            setShowEvaluationQueue(false);
-            if (isCurrentRule) {
-              // Live view: Credit Notes can be created from here.
-              setPeriodRows(loaded);
-              setSelectedHistoryRun(null);
-              setHistoryTodRows(null);
-              setNotice(null);
-            } else {
-              // Calculated under an earlier rule version: read-only.
-              setHistoryTodRows(loaded);
-              setSelectedHistoryRun(run);
-              setNotice(`${formatBusinessDate(periodStart)} – ${formatBusinessDate(periodEnd)} was calculated under an earlier rule version. Showing it read-only.`);
-            }
-          } catch (cause) { setError(userFacingError(cause, "Could not load this period’s results.")); }
-        })();
-        return;
-      }
-      if (scheme === "tod" && run.period_start && run.period_end) {
-        openSnapshot(run);
-        return;
-      }
-      setShowEvaluationQueue(false);
-    }} onSettled={async (run) => {
+    {showEvaluationQueue && <GuidedEvaluationQueue scheme={scheme} ruleVersionId={scheme === "tod" ? localTodBootstrap?.activeSchemeVersionId ?? null : null} latestRun={latestRun} onError={setError} onRetry={() => setEvaluationOpen(true)} onViewResults={(run, isLatest) => { openRunResults(run, isLatest); }} onSettled={async (run) => {
       await refresh();
       setLatestRun(null);
       if (run.status === "completed") {

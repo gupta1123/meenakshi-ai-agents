@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import type { Bootstrap, Company, Organization } from "./types";
 
@@ -11,6 +11,8 @@ type CompanyContextValue = {
   isAdministrator: boolean;
   isFinanceApprover: boolean;
   companyKey: number;
+  /** A split company's years are one company; this moves the working year without changing the dropdown. */
+  setWorkingYear: (companyId: string | null) => void;
 };
 
 const CompanyContext = createContext<CompanyContextValue | null>(null);
@@ -19,6 +21,14 @@ export function CompanyProvider({ bootstrap, initialCompanyId, children }: { boo
   const companies = useMemo(() => bootstrap.organizations.flatMap((organization) => organization.companies.map((company) => ({ company, organization }))), [bootstrap]);
   const [companyId, setCompanyId] = useState(initialCompanyId);
   const [companyKey, setCompanyKey] = useState(0);
+  const [yearOverride, setYearOverride] = useState<string | null>(null);
+  const yearRef = useRef<string | null>(null);
+  const setWorkingYear = useCallback((id: string | null) => {
+    if (yearRef.current === id) return;
+    yearRef.current = id;
+    setYearOverride(id);
+    setCompanyKey((key) => key + 1);
+  }, []);
 
   useEffect(() => {
     const valid = companies.find((item) => item.company.id === initialCompanyId) ?? companies[0];
@@ -29,7 +39,9 @@ export function CompanyProvider({ bootstrap, initialCompanyId, children }: { boo
     }
   }, [companies, companyId, initialCompanyId]);
 
-  const selected = companies.find((item) => item.company.id === companyId) ?? companies[0];
+  const base = companies.find((item) => item.company.id === companyId) ?? companies[0];
+  // The override only ever points at another year of the chosen company.
+  const selected = (yearOverride && base?.company.year_members?.some((member) => member.id === yearOverride) ? companies.find((item) => item.company.id === yearOverride) : null) ?? base;
   if (!selected) return null;
 
   const value: CompanyContextValue = {
@@ -39,6 +51,7 @@ export function CompanyProvider({ bootstrap, initialCompanyId, children }: { boo
     isAdministrator: selected.organization.roles.includes("administrator"),
     isFinanceApprover: selected.organization.roles.includes("finance_approver"),
     companyKey,
+    setWorkingYear,
   };
 
   return <CompanyContext.Provider value={value}>{children}</CompanyContext.Provider>;
