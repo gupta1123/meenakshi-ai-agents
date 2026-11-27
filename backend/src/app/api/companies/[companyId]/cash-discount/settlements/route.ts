@@ -4,6 +4,8 @@ import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { postingProgress } from "@/lib/notes/posting-progress.mjs";
 import { currentCdEvidence, keepCdSettlementRow } from "@/lib/evaluation/cd-credit-note-safety";
+import { loadCompanyGroup } from "@/lib/company-group";
+import { mergeCdSettlements, type CdPart } from "@/lib/cd-group-merge";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 export function OPTIONS(request: Request) { return optionsWithCors(request); }
@@ -12,13 +14,9 @@ export function OPTIONS(request: Request) { return optionsWithCors(request); }
  * Latest per-MT Cash Discount check (docs/CD_LOGIC.md): every checked invoice
  * with its category, plus the Credit Note status of each invoice.
  */
-export async function GET(request: Request, context: RouteContext) {
-  try {
-    const { companyId } = await context.params;
-    if (!isUuid(companyId)) return jsonWithCors(request, { error: "Invalid company id." }, { status: 400 });
-    const { company } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
+/** One year-company's Cash Discount view (its latest saved check, invoices, Credit Notes). */
+async function loadCompanyCd(company: { id: string }, invoiceGuid: string | null) {
     const supabase = createSupabaseAdminClient();
-    const invoiceGuid = new URL(request.url).searchParams.get("invoice");
     // The check, the candidates, the Credit Notes and the WhatsApp messages do not depend on each other.
     const [runResult, candidates, notes, messageResult] = await Promise.all([
       supabase.from("evaluation_runs")
@@ -62,7 +60,7 @@ export async function GET(request: Request, context: RouteContext) {
         if (latestError) throw latestError;
         creditNote.whatsapp = latest?.[0] ? { status: String(latest[0].status), sentAt: latest[0].sent_at ?? null } : null;
       }
-      return jsonWithCors(request, { row, creditNote }, { headers: { "Cache-Control": "no-store" } });
+      return { single: { row, creditNote } } as const;
     }
 
     if (!candidates || !notes || !messageResult) throw new Error("Cash Discount lists were not loaded.");
@@ -128,14 +126,39 @@ export async function GET(request: Request, context: RouteContext) {
       if (!messageByNote.has(noteId)) messageByNote.set(noteId, { status: String(message.status), sentAt: message.sent_at ?? null });
     }
     for (const note of Object.values(noteByInvoice)) note.whatsapp = messageByNote.get(String(note.id)) ?? null;
-    return jsonWithCors(request, {
+    return { full: {
       run: run ? { id: run.id, status: run.status, ruleVersionId: run.scheme_version_id, periodStart: run.period_start, periodEnd: run.period_end, completedAt: run.completed_at } : null,
       totals,
       requiresRecheck: !currentCdEvidence(totals.creditNoteMatchingVersion, totals.connectorVersion),
       results,
       candidates: candidates.data ?? [],
       creditNotes: noteByInvoice,
-    }, { headers: { "Cache-Control": "no-store" } });
+    } } as const;
+}
+
+export async function GET(request: Request, context: RouteContext) {
+  try {
+    const { companyId } = await context.params;
+    if (!isUuid(companyId)) return jsonWithCors(request, { error: "Invalid company id." }, { status: 400 });
+    const { company, organization } = await requireMeenakshiCompanyAccess(request, companyId, ["administrator", "finance_approver"]);
+    const invoiceGuid = new URL(request.url).searchParams.get("invoice");
+    // The years of a split Tally company are one company to the user: read every year and merge.
+    const members = await loadCompanyGroup(company.id, organization.id);
+    const years = members.length ? members : [{ id: company.id, name: "", guid: "", booksFrom: null }];
+    if (invoiceGuid) {
+      for (const year of [...years].reverse()) {
+        const loaded = await loadCompanyCd({ id: year.id }, invoiceGuid);
+        const single = "single" in loaded ? loaded.single : null;
+        if (single && (single.row || single.creditNote)) return jsonWithCors(request, { ...single, companyId: year.id }, { headers: { "Cache-Control": "no-store" } });
+      }
+      return jsonWithCors(request, { row: null, creditNote: null }, { headers: { "Cache-Control": "no-store" } });
+    }
+    const parts: CdPart[] = [];
+    for (const year of years) {
+      const loaded = await loadCompanyCd({ id: year.id }, null);
+      if ("full" in loaded) parts.push({ companyId: year.id, companyName: year.name, booksFrom: year.booksFrom, data: loaded.full as unknown as CdPart["data"] });
+    }
+    return jsonWithCors(request, mergeCdSettlements(parts), { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     if (error instanceof MeenakshiAccessError) return jsonWithCors(request, { error: error.message }, { status: error.status });
     console.error("Could not load Cash Discount settlements:", error);
