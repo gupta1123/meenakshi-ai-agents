@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { creditNoteDateFor } from "@/lib/year-continuation";
 import Decimal from "decimal.js";
 
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
@@ -232,7 +233,7 @@ export async function buildCreditNoteApprovalInput(companyId: string, proposalId
   }
 
   const [{ data: company, error: companyError }, { data: customer, error: customerError }, { data: version, error: versionError }] = await Promise.all([
-    supabase.from("companies").select("id, tally_company_guid, tally_company_name").eq("id", companyId).maybeSingle(),
+    supabase.from("companies").select("id, tally_company_guid, tally_company_name, tally_books_from").eq("id", companyId).maybeSingle(),
     supabase.from("customers").select("id, tally_ledger_guid, ledger_name").eq("id", proposal.customer_id).eq("company_id", companyId).maybeSingle(),
     supabase.from("scheme_versions").select("*").eq("id", proposal.scheme_version_id).eq("company_id", companyId).maybeSingle(),
   ]);
@@ -242,7 +243,9 @@ export async function buildCreditNoteApprovalInput(companyId: string, proposalId
   const billAllocationType = "on_account" as const;
   const tallyBillReference = null;
   const calculationReference = stableReference(["TOD", String(version.version_number), proposal.period_start ?? "", proposal.period_end ?? "", evaluation.id]);
-  const creditNoteDate = new Date().toISOString().slice(0, 10);
+  // A Credit Note goes into the company (year) it was calculated in. Today's date is used when it
+  // falls inside that year; for an earlier year the last day of that year is used.
+  const creditNoteDate = creditNoteDateFor((company as { tally_books_from?: string | null }).tally_books_from);
   const approvedAmount = proposal.posted_discount_amount ?? proposal.calculated_discount_amount;
   const amount = new Decimal(String(approvedAmount));
   if (!amount.isPositive()) throw new Error("The approved Credit Note amount must be positive.");
