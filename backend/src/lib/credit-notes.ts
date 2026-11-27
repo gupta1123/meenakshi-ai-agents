@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { booksYearEnd, dateInBooksYear } from "@/lib/year-continuation";
+import { creditNoteDateFor } from "@/lib/year-continuation";
 import Decimal from "decimal.js";
 
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
@@ -243,14 +243,9 @@ export async function buildCreditNoteApprovalInput(companyId: string, proposalId
   const billAllocationType = "on_account" as const;
   const tallyBillReference = null;
   const calculationReference = stableReference(["TOD", String(version.version_number), proposal.period_start ?? "", proposal.period_end ?? "", evaluation.id]);
-  const creditNoteDate = new Date().toISOString().slice(0, 10);
-  // Tally only accepts dates inside the company's financial year. A company of an earlier year
-  // cannot take a Credit Note dated today, and backdating one into a closed year would change
-  // returns already filed, so stop here with a plain reason instead of failing inside Tally.
-  const booksFrom = (company as { tally_books_from?: string | null }).tally_books_from;
-  if (!dateInBooksYear(booksFrom, creditNoteDate)) {
-    throw new Error(`This Credit Note would be dated ${creditNoteDate}, which is outside this company's financial year (${booksFrom} to ${booksYearEnd(String(booksFrom))}). It has not been created. Credit Notes for an earlier year are created in the current year's company.`);
-  }
+  // A Credit Note goes into the company (year) it was calculated in. Today's date is used when it
+  // falls inside that year; for an earlier year the last day of that year is used.
+  const creditNoteDate = creditNoteDateFor((company as { tally_books_from?: string | null }).tally_books_from);
   const approvedAmount = proposal.posted_discount_amount ?? proposal.calculated_discount_amount;
   const amount = new Decimal(String(approvedAmount));
   if (!amount.isPositive()) throw new Error("The approved Credit Note amount must be positive.");

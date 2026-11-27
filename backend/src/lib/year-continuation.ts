@@ -60,13 +60,13 @@ export function dateInBooksYear(booksFrom: string | null | undefined, date: stri
 }
 
 /**
- * Plain reason when a voucher dated today cannot be entered in this company (its financial year
- * does not contain today), otherwise null. Posting routes call it before queuing anything.
+ * The date a Credit Note is given in a company whose books start on booksFrom: today when today
+ * is inside that financial year, otherwise the last day of that year (Tally refuses dates outside
+ * the company's year, and a Credit Note belongs to the year it was calculated in).
  */
-export async function postingDateProblem(companyId: string, today = new Date().toISOString().slice(0, 10)) {
-  const { data, error } = await createSupabaseAdminClient().from("companies").select("tally_books_from").eq("id", companyId).maybeSingle();
-  if (error) throw error;
-  const booksFrom = (data as { tally_books_from: string | null } | null)?.tally_books_from;
-  if (dateInBooksYear(booksFrom, today)) return null;
-  return `Credit Notes are dated today (${today}), which is outside this company's financial year (${booksFrom} to ${booksYearEnd(String(booksFrom))}). Nothing was created. Credit Notes for an earlier year are created in the current year's company.`;
+export function creditNoteDateFor(booksFrom: string | null | undefined, today = new Date().toISOString().slice(0, 10)) {
+  if (!booksFrom) return today;
+  const end = booksYearEnd(booksFrom);
+  if (today > end) return end;
+  return today < booksFrom ? booksFrom : today;
 }

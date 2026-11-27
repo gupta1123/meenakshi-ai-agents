@@ -1,4 +1,5 @@
 import { runDiagnostic, resolveSupportCustomers } from "./diagnostics.mjs";
+import { runVoucherTest } from "./voucher-test.mjs";
 import { runCompanyOverview } from "./company-overview.mjs";
 import { runTallyPorts } from "./tally-ports.mjs";
 import { sameTallyCompany } from "../tally/company-identity.mjs";
@@ -49,7 +50,7 @@ export async function processSupportJob(
     "/next?connectorId=" + encodeURIComponent(config.connectorId),
   );
   if (!job) return false;
-  if (resolveTarget && job.expectedTallyCompany?.guid && ["diagnostic", "recalculate"].includes(job.operation) && !["company_overview", "tally_ports"].includes(job.request?.type)) {
+  if (resolveTarget && job.expectedTallyCompany?.guid && ["diagnostic", "recalculate", "voucher_test"].includes(job.operation) && !["company_overview", "tally_ports"].includes(job.request?.type)) {
     // The Tally program that has the approved company open may be on another port.
     const target = await resolveTarget(job.expectedTallyCompany).catch(() => null);
     if (target) { config = target.config; activeCompany = target.activeCompany; }
@@ -107,6 +108,8 @@ export async function processSupportJob(
       // Read-only month counts of whichever company is open (no customer, no amounts).
       if (!activeCompany && !job.request.port) throw new Error("No Tally company is open.");
       result = await (deps.companyOverview ?? runCompanyOverview)(job.request, context);
+    } else if (job.operation === "voucher_test") {
+      result = await (deps.voucherTest ?? runVoucherTest)(job.request, context);
     } else if (job.operation === "diagnostic" && job.request?.type === "tally_ports") {
       result = await (deps.tallyPorts ?? runTallyPorts)(job.request, context);
     } else if (["diagnostic", "recalculate"].includes(job.operation)) {

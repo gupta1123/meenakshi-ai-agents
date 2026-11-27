@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { booksYearEnd, dateInBooksYear, continuationWindow, CONTINUATION_HORIZON_DAYS } from "./year-continuation.ts";
+import { booksYearEnd, creditNoteDateFor, dateInBooksYear, continuationWindow, CONTINUATION_HORIZON_DAYS } from "./year-continuation.ts";
 
 const next = { name: "CO - (2026-2027)", guid: "g", booksFrom: "2026-04-01" };
 
@@ -27,4 +27,12 @@ test("a company takes only dates inside its own financial year", () => {
   assert.equal(dateInBooksYear("2025-04-01", "2026-11-27"), false);
   assert.equal(dateInBooksYear("2026-04-01", "2026-11-27"), true);
   assert.equal(dateInBooksYear(null, "2026-11-27"), true);
+});
+
+test("a Credit Note is dated today inside the year, else the last day of its year", () => {
+  assert.equal(creditNoteDateFor("2026-04-01", "2026-11-27"), "2026-11-27");
+  assert.equal(creditNoteDateFor("2025-04-01", "2026-11-27"), "2026-03-31");
+  assert.equal(creditNoteDateFor("2025-04-01", "2026-03-31"), "2026-03-31");
+  assert.equal(creditNoteDateFor("2027-04-01", "2026-11-27"), "2027-04-01");
+  assert.equal(creditNoteDateFor(null, "2026-11-27"), "2026-11-27");
 });

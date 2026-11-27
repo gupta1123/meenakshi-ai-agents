@@ -4,7 +4,6 @@ import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/autho
 import { requirePostingEnabled } from "@/lib/launch-control";
 import { RulebookRequestError } from "@/lib/rulebook/shared";
 import { isUuid } from "@/lib/security";
-import { postingDateProblem } from "@/lib/year-continuation";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { retireObsoleteEvaluationReads } from "@/lib/evaluation/refresh-commands.mjs";
 import { CdEvidenceSafetyError, requireCurrentCdCheck } from "@/lib/evaluation/cd-credit-note-safety";
@@ -26,8 +25,6 @@ export async function POST(request: Request, context: RouteContext) {
     const access = await requireMeenakshiCompanyAccess(request, companyId, ["administrator"]);
     const { company, userId } = access;
     await requirePostingEnabled(company.id);
-    const dateProblem = await postingDateProblem(company.id);
-    if (dateProblem) return jsonWithCors(request, { error: dateProblem }, { status: 409 });
     const body = await request.json().catch(() => ({})) as { candidateIds?: unknown };
     const candidateIds = [...new Set(Array.isArray(body?.candidateIds) ? body.candidateIds.filter((id): id is string => typeof id === "string" && isUuid(id)) : [])];
     if (!candidateIds.length) return jsonWithCors(request, { error: "Select at least one invoice." }, { status: 400 });

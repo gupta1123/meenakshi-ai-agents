@@ -4,7 +4,6 @@ import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/autho
 import { requirePostingEnabled } from "@/lib/launch-control";
 import { RulebookRequestError } from "@/lib/rulebook/shared";
 import { isUuid } from "@/lib/security";
-import { postingDateProblem } from "@/lib/year-continuation";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { readIdempotencyKey } from "@/lib/tally/contracts";
 import { retireObsoleteEvaluationReads } from "@/lib/evaluation/refresh-commands.mjs";
@@ -27,8 +26,6 @@ export async function POST(request: Request, context: RouteContext) {
     const access = await requireMeenakshiCompanyAccess(request, companyId, ["administrator"]);
     const { company, userId } = access;
     await requirePostingEnabled(company.id);
-    const dateProblem = await postingDateProblem(company.id);
-    if (dateProblem) return jsonWithCors(request, { error: dateProblem }, { status: 409 });
     const db = createSupabaseAdminClient();
     await requireCurrentCdCheck(db, company.id);
     await retireObsoleteEvaluationReads(db, { companyId: company.id });

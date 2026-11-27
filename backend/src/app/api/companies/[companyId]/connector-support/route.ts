@@ -69,7 +69,7 @@ export async function POST(r: Request, c: Context) {
     ]);
     const input = await r.json();
     if (
-      ["update", "logs"].includes(input.operation) &&
+      ["update", "logs", "voucher_test"].includes(input.operation) &&
       !access.roles.includes("administrator")
     )
       throw new SupportError("Administrator access is required.", 403);

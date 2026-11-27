@@ -1,5 +1,6 @@
 import {selectedSupportCustomerGuids} from "@/lib/support-customer-scope";
 import { randomUUID } from "node:crypto";
+import { buildVoucherTest } from "@/lib/voucher-test";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { isUuid } from "@/lib/security";
 import { bridgeVersionIsOlder } from "@/lib/bridge";
@@ -68,7 +69,7 @@ export async function prepareSupportRequest(
   input: Record<string, unknown>,
 ) {
   const operation = String(input.operation ?? "");
-  if (!["diagnostic", "recalculate", "logs", "update"].includes(operation))
+  if (!["diagnostic", "recalculate", "logs", "update", "voucher_test"].includes(operation))
     throw new SupportError("Choose a supported operation.");
   const { connector } = await supportConnector(companyId);
   if (
@@ -79,6 +80,11 @@ export async function prepareSupportRequest(
       "Install connector 0.6.0 once to enable remote support and future in-app updates.",
       409,
     );
+  if (operation === "voucher_test") {
+    if (bridgeVersionIsOlder(connector.bridge_version, "0.7.3")) throw new SupportError("Update the connector to 0.7.3 before running the voucher test.", 409);
+    try { return { operation, connector, request: await buildVoucherTest(companyId, input) }; }
+    catch (e) { throw new SupportError(e instanceof Error ? e.message : "Could not prepare the voucher test."); }
+  }
   const db = createSupabaseAdminClient();
   const pauseMs = Math.max(
     1000,
