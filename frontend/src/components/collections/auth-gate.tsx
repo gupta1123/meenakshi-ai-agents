@@ -178,7 +178,9 @@ export function AuthGate({ children }: { children: (props: { email: string; sign
   // Kalika keeps the picker in the workspace chrome. The selected company is
   // still checked against Tally before data or actions are displayed, but a
   // mismatch must not replace the workspace with a second picker.
-  const workspaceCompanyId = companySelection.companyId || availableCompanies[0].company.id;
+  // Years of one split Tally company are one company to the user: always work from the newest year.
+  const requestedCompanyId = companySelection.companyId || availableCompanies[0].company.id;
+  const workspaceCompanyId = availableCompanies.find((item) => item.company.id === requestedCompanyId)?.company.year_of ?? requestedCompanyId;
 
   return <CompanyProvider key={workspaceCompanyId} bootstrap={bootstrap} initialCompanyId={workspaceCompanyId}><TallyCompanySelectionProvider selectedCompanyId={workspaceCompanyId} selectCompany={selectCompany}>{children({ email, signOut })}</TallyCompanySelectionProvider></CompanyProvider>;
 }

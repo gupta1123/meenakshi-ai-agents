@@ -4,6 +4,7 @@ import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import { requireRequestUser } from "@/lib/api/request-auth";
 import { MEENAKSHI_FEATURE, type MeenakshiRole } from "@/lib/constants";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
+import { tagYearGroups } from "@/lib/company-group";
 
 // 10s in-memory cache — bootstrap is hit on every navigation/auth-gate poll.
 const BOOTSTRAP_CACHE_TTL_MS = 10_000;
@@ -63,7 +64,7 @@ export async function GET(request: Request) {
           for (const m of membershipRows) { const a = rolesByOrganization.get(m.organization_id); if (a) a.push(m.role); else rolesByOrganization.set(m.organization_id, [m.role]); }
           const companiesByOrganization = new Map<string, unknown[]>();
           for (const c of (companies ?? []) as Array<{ organization_id: string }>) { const a = companiesByOrganization.get(c.organization_id); if (a) a.push(c); else companiesByOrganization.set(c.organization_id, [c as unknown]); }
-          const payload = { organizations: (organizations ?? []).filter((o) => enabled.has((o as { id: string }).id)).map((o) => { const id = (o as { id: string }).id; return { ...o, roles: rolesByOrganization.get(id) ?? [], companies: companiesByOrganization.get(id) ?? [] }; }) };
+          const payload = { organizations: (organizations ?? []).filter((o) => enabled.has((o as { id: string }).id)).map((o) => { const id = (o as { id: string }).id; return { ...o, roles: rolesByOrganization.get(id) ?? [], companies: tagYearGroups((companiesByOrganization.get(id) ?? []) as Array<{ id: string; tally_company_guid: string | null; tally_books_from: string | null; tally_company_name: string }>) }; }) };
           bootstrapCache.set(user.id, { expiresAt: Date.now() + BOOTSTRAP_CACHE_TTL_MS, data: payload });
           if (tokenKey) {
             tokenBootstrapCache.set(tokenKey, { expiresAt: Date.now() + BOOTSTRAP_CACHE_TTL_MS, data: payload });

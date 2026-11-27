@@ -5,6 +5,10 @@ export type Company = {
   tally_company_guid: string;
   /** Tally "books beginning from" date; with the Tally ID it identifies one financial-year company. */
   tally_books_from?: string | null;
+  /** Set on an older financial-year company: the id of the newest year of the same Tally company. */
+  year_of?: string;
+  /** Set on the newest year of a split company: every year, oldest first. */
+  year_members?: Array<{ id: string; name: string; books_from: string | null }>;
 };
 
 export type Organization = {
