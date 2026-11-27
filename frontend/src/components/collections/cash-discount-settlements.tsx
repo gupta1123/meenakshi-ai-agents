@@ -49,7 +49,7 @@ type SettlementData = {
   requiresRecheck?: boolean;
   run: { id: string; ruleVersionId?: string | null; completedAt: string | null; periodStart: string | null; periodEnd: string | null } | null;
   results: CdSettlementRow[];
-  candidates: Array<{ id: string; invoice_tally_guid: string; status: string; remaining_recovery: string }>;
+  candidates: Array<{ id: string; invoice_tally_guid: string; status: string; remaining_recovery: string; companyId?: string }>;
   creditNotes: Record<string, CreditNote>;
   totals?: { invoicesChecked?: number; notEligibleCount?: number; invoicePeriod?: { from: string; to: string } };
 };
@@ -250,7 +250,7 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
   const progressPercent = progress?.total ? Math.min(100, Math.round((progress.done / progress.total) * 100)) : 0;
   const shortDay = (value: string | null | undefined) => value ? new Date(`${value.slice(0, 10)}T00:00:00`).toLocaleDateString("en-IN", { day: "numeric", month: "short" }) : "";
 
-  const calculate = async () => {
+  const calculateOne = async (yid: string): Promise<boolean> => {
     cancelRun.current = new AbortController();
     setPhase("reading"); setError(null); setFlash(null);
     let eventId: string | null = null;
@@ -259,13 +259,13 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
     let version: string | null = null;
     const timings: Record<string, number> = {};
     try {
-      const token = await accessToken(); if (!token) return;
+      const token = await accessToken(); if (!token) return false;
       eventToken = token;
       const evaluatedOn = new Date().toISOString().slice(0, 10);
       version = await readLocalConnectorVersion();
-      eventId = await startCalculationEvent(token, company.id, "cd", null, evaluatedOn, version);
+      eventId = await startCalculationEvent(token, yid, "cd", null, evaluatedOn, version);
       const prepareStarted = performance.now();
-      const bootstrap = await apiRequest<LocalCdBootstrap>(token, `/api/companies/${company.id}/evaluations/cd/local-bootstrap?evaluatedOn=${evaluatedOn}`);
+      const bootstrap = await apiRequest<LocalCdBootstrap>(token, `/api/companies/${yid}/evaluations/cd/local-bootstrap?evaluatedOn=${evaluatedOn}`);
       timings.serverPrepareMs = Math.round(performance.now() - prepareStarted);
       step = "tally_read";
       const readStarted = performance.now();
@@ -277,29 +277,40 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
       step = "save";
       const saveStarted = performance.now();
       // Server mode: the Tally server already saved it (PC mode never sets savedOnServer).
-      const saved = result.savedOnServer ?? await apiRequest<{ totals?: { autoQueued?: number } }>(token, `/api/companies/${company.id}/evaluations/cd/local-result`, {
+      const saved = result.savedOnServer ?? await apiRequest<{ totals?: { autoQueued?: number } }>(token, `/api/companies/${yid}/evaluations/cd/local-result`, {
         method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, body: jsonBody({ evaluatedOn, evidence: result.evidence }), timeoutMs: 300_000,
       });
       timings.saveMs = Math.round(performance.now() - saveStarted);
-      await finishCalculationEvent(token, company.id, eventId, { outcome: "succeeded", timings, connectorVersion: version });
+      await finishCalculationEvent(token, yid, eventId, { outcome: "succeeded", timings, connectorVersion: version });
       await load();
       setLiveRows(null);
       const queued = saved.totals?.autoQueued ?? 0;
       setFlash(queued ? `${queued} Credit Note${queued === 1 ? " is" : "s are"} being created in Tally.` : "Cash Discount check saved. Create Credit Notes from the Full payment, Discounted payment and Short up to ₹10,000 lists.");
+      return true;
     } catch (cause) {
       const failure = describeCalculationFailure(cause, step);
-      if (eventToken) await finishCalculationEvent(eventToken, company.id, eventId, { outcome: failure.outcome, step: failure.step, reason: failure.reason, timings, lastProgress: failure.lastProgress, connectorVersion: version });
+      if (eventToken) await finishCalculationEvent(eventToken, yid, eventId, { outcome: failure.outcome, step: failure.step, reason: failure.reason, timings, lastProgress: failure.lastProgress, connectorVersion: version });
       setError(userFacingError(cause, "The Cash Discount check did not finish. Keep Tally and the Meenakshi connector open, then try again."));
+      return false;
     }
     finally { setPhase(null); setReconnect(null); cancelRun.current = null; }
   };
 
+  // The years of a split Tally company are one company on screen: check every year, oldest first,
+  // because payments made this year settle invoices of the year before.
+  const calculate = async () => {
+    const yearIds = company.year_members?.length ? [...company.year_members].sort((x, y) => (x.books_from ?? "").localeCompare(y.books_from ?? "")).map((member) => member.id) : [company.id];
+    for (const yid of yearIds) { if (!(await calculateOne(yid))) break; }
+  };
+
   const createCreditNote = async (row: CdSettlementRow, candidateId: string) => {
+    // A split company's years are one company on screen; the Credit Note goes to the year the invoice belongs to.
+    const ownerId = data?.candidates.find((candidate) => candidate.id === candidateId)?.companyId ?? company.id;
     if (busyId) return;
     setBusyId(candidateId); setError(null);
     try {
       const token = await accessToken(); if (!token) return;
-      await apiRequest(token, `/api/companies/${company.id}/cash-discount/settlements/${candidateId}/credit-note`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, timeoutMs: 45_000 });
+      await apiRequest(token, `/api/companies/${ownerId}/cash-discount/settlements/${candidateId}/credit-note`, { method: "POST", headers: { "Idempotency-Key": idempotencyKey() }, timeoutMs: 45_000 });
       setFlash(`Credit Note for ${row.customerName} (${row.invoiceNumber ?? "invoice"}) is queued for Tally.`);
       await load();
     } catch (cause) { setError(userFacingError(cause, "Could not create this Credit Note.")); }
@@ -311,7 +322,14 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
     setBulkCreating(true); setError(null);
     try {
       const token = await accessToken(); if (!token) return;
-      const response = await apiRequest<{ queued: number; skipped: number; message: string }>(token, `/api/companies/${company.id}/cash-discount/settlements/bulk-credit-notes`, { method: "POST", body: jsonBody({ candidateIds }), timeoutMs: 90_000 });
+      const owners = new Map<string, string[]>();
+      for (const id of candidateIds) { const owner = data?.candidates.find((candidate) => candidate.id === id)?.companyId ?? company.id; owners.set(owner, [...(owners.get(owner) ?? []), id]); }
+      let queued = 0, skipped = 0, message = "";
+      for (const [owner, ids] of owners) {
+        const part = await apiRequest<{ queued: number; skipped: number; message: string }>(token, `/api/companies/${owner}/cash-discount/settlements/bulk-credit-notes`, { method: "POST", body: jsonBody({ candidateIds: ids }), timeoutMs: 90_000 });
+        queued += part.queued; skipped += part.skipped; message = owners.size === 1 ? part.message : `${queued} Credit Note${queued === 1 ? " is" : "s are"} queued.`;
+      }
+      const response = { queued, skipped, message };
       setFlash(`${response.message}${response.skipped ? ` ${response.skipped} changed since the check and ${response.skipped === 1 ? "was" : "were"} skipped.` : ""} Keep Tally open with ${company.tally_company_name}.`);
       setSelectedIds([]);
       await load();
