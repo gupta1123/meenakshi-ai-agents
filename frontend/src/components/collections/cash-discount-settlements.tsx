@@ -166,6 +166,13 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
     finally { if (requestId === latestLoad.current) setLoading(false); }
   }, [company.id, setError]);
   useEffect(() => { setLoading(true); setData(null); setLiveRows(null); void load(); }, [companyKey, load]);
+  const serverCheck = useServerCheck(company.id, "cd", tallyMode.mode === "server", accessToken, async (next) => {
+    if (next.job.status === "succeeded" && next.run?.status === "completed") {
+      await load();
+      setLiveRows(null);
+    } else setError(next.message ?? "The server check did not finish. Review the result before starting another check.");
+  });
+  const phase = serverCheck.state?.phase ?? localPhase ?? (serverCheck.looking ? "reading" : null);
   // Upgrade pre-manual-credit checks once per saved run, even across open tabs.
   const legacyRunId = savedCheckNeedsRefresh && data?.companyId === company.id ? data?.run?.id : null;
   const [repairing, setRepairing] = useState(false);
@@ -173,17 +180,18 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
     let active = true;
     let timer: number | undefined;
     setRepairing(false);
-    if (!legacyRunId || !connectorVersion || connectorNeedsUpdate) return;
+    if (!legacyRunId || !connectorVersion || connectorNeedsUpdate || phase) return;
     const repair = async () => {
       try {
         const token = await accessToken();
         if (!active || !token) return;
         setRepairing(true);
         const path = `/api/companies/${company.id}/connector-support`;
-        const { job } = await apiRequest<{ job: { id: string } }>(token, path, {
+        const { job } = await apiRequest<{ job: { id: string } | null }>(token, path, {
           method: "POST", headers: { "Idempotency-Key": `cd-manual-credit-check-${legacyRunId}` },
-          body: jsonBody({ operation: "recalculate", schemeType: "cd", ruleVersionId, save: true }),
+          body: jsonBody({ operation: "recalculate", schemeType: "cd", ruleVersionId, repairRunId: legacyRunId, save: true }),
         });
+        if (!job) { if (active) { await load(); setRepairing(false); } return; }
         const poll = async () => {
           if (!active) return;
           try {
@@ -207,14 +215,7 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
     };
     void repair();
     return () => { active = false; window.clearTimeout(timer); };
-  }, [legacyRunId, ruleVersionId, company.id, connectorVersion, connectorNeedsUpdate, load]);
-  const serverCheck = useServerCheck(company.id, "cd", tallyMode.mode === "server", accessToken, async (next) => {
-    if (next.job.status === "succeeded" && next.run?.status === "completed") {
-      await load();
-      setLiveRows(null);
-    } else setError(next.message ?? "The server check did not finish. Review the result before starting another check.");
-  });
-  const phase = serverCheck.state?.phase ?? localPhase ?? (serverCheck.looking ? "reading" : null);
+  }, [legacyRunId, ruleVersionId, company.id, connectorVersion, connectorNeedsUpdate, phase, load]);
   // Follow Credit Notes that are being created in Tally.
   const creating = Object.values(data?.creditNotes ?? {}).some((note) => ["queued", "sending"].includes(note.status));
   useEffect(() => {

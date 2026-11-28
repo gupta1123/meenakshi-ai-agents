@@ -1,3 +1,4 @@
+import { currentCdEvidence } from "@/lib/evaluation/cd-credit-note-safety";
 import { jsonWithCors, optionsWithCors } from "@/lib/api/cors";
 import {
   requireMeenakshiCompanyAccess,
@@ -73,14 +74,33 @@ export async function POST(r: Request, c: Context) {
       !access.roles.includes("administrator")
     )
       throw new SupportError("Administrator access is required.", 403);
+    const key = r.headers.get("Idempotency-Key") || newSupportKey();
+    if (key.length > 160) throw new SupportError("Invalid request key.");
+    const db = createSupabaseAdminClient();
+    if (input.repairRunId !== undefined) {
+      if (!isUuid(input.repairRunId) || input.operation !== "recalculate" || input.schemeType !== "cd" ||
+          input.save !== true || input.customerId || input.groupId || key !== `cd-manual-credit-check-${input.repairRunId}`) {
+        throw new SupportError("Invalid saved Cash Discount verification request.");
+      }
+      const { data: latest, error } = await db.from("evaluation_runs")
+        .select("id,scheme_version_id,match:summary->creditNoteMatchingVersion,reader:summary->>connectorVersion")
+        .eq("company_id", companyId).eq("status", "completed").eq("summary->>cdDiscountBasis", "amount_per_tonne")
+        .order("completed_at", { ascending: false }).limit(1).maybeSingle();
+      if (error) throw error;
+      if (!latest || latest.id !== input.repairRunId || currentCdEvidence(latest.match, latest.reader)) {
+        return jsonWithCors(r, { job: null });
+      }
+      input.ruleVersionId = latest.scheme_version_id;
+      const prior = await db.from("tally_support_jobs").select("id,status").eq("company_id", companyId)
+        .eq("request_key", key).maybeSingle();
+      if (prior.error) throw prior.error;
+      if (prior.data) return jsonWithCors(r, { job: prior.data });
+    }
     const prepared = await prepareSupportRequest(
       companyId,
       access.userId,
       input,
     );
-    const key = r.headers.get("Idempotency-Key") || newSupportKey();
-    if (key.length > 160) throw new SupportError("Invalid request key.");
-    const db = createSupabaseAdminClient();
     if (prepared.operation === "update")
       await interruptConnectorWork(prepared.connector.id);
     const { data: job, error } = await db
