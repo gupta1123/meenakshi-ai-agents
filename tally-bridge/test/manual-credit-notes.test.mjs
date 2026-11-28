@@ -286,7 +286,10 @@ test("ambiguous advance references never pay an invoice twice", async () => {
   const receipts = ["1","2"].map(guid => voucher({ guid, type: "Receipt", number: guid, amount: "100000", date: "20260322",
     entries: ledger(customer.ledgerName, "100000", [["ADV", "100000", "New Ref"]]) }));
   const rows = [inv, ...receipts];
-  assert.equal((await check(rows)).results[0].paidByDeadline, "0.00");
+  const ambiguous = await check(rows);
+  assert.equal(ambiguous.results[0].paidByDeadline, "0.00");
+  assert.equal(ambiguous.results[0].category, "needs_review");
+  assert.equal(ambiguous.candidates.length, 0);
   assert.equal((await check(rows, { tod: true })).customerAggregates[0].paymentChecks[0].paidByDueDate, "0");
 });
 
@@ -306,7 +309,7 @@ for (const [total, bank, balance] of [
     const row = (await check([sale, receipt, journal])).results[0];
     assert.equal(row.paidByDeadline, total + ".00");
     assert.equal(row.category, "full_payment");
-    assert.equal((await check([sale, receipt])).results[0].paidByDeadline, "0.00");
+    assert.equal((await check([sale, receipt])).results[0].paidByDeadline, bank.includes(".") ? bank : bank + ".00");
   });
 }
 
@@ -331,4 +334,20 @@ test("posting detects a newly entered manual Cash Discount before importing a vo
       { config: { tallyUrl: "https://test-tally.invalid" } }), /Review Tally Credit Note CN1/);
     assert.equal(reads, 2);
   } finally { globalThis.fetch = original; }
+});
+
+test("a same-day New Ref receipt and a deadline receipt settle a multi-reference invoice", async () => {
+  const number = "MUI/25-26/5663";
+  const inv = voucher({ guid: "sale", type: "Sales", number, date: "20250827", amount: "443433", inventory: inventory.replace("10 MT", "7.82 MT"),
+    entries: ledger(customer.ledgerName, "-443433", [["22082025", "-10566", "Agst Ref"], [number, "-432867", "Agst Ref"]]) });
+  const advance = voucher({ guid: "r704", type: "Receipt", number: "704", date: "20250827", amount: "240000",
+    entries: ledger(customer.ledgerName, "240000", [[number, "240000", "New Ref"]]) });
+  const balance = voucher({ guid: "r762", type: "Receipt", number: "762", date: "20250830", amount: "203433",
+    entries: ledger(customer.ledgerName, "203433", [[number, "203433"]]) });
+  const result = await check([inv, advance, balance], {scope: {dateFrom: "2025-08-27", dateTo: "2025-08-30"}});
+  const row = result.results[0];
+  assert.deepEqual(row.payments.map(p => p.voucherNumber), ["704", "762"]);
+  assert.equal(row.paidByDeadline, "443433.00");
+  assert.equal(row.category, "full_payment");
+  assert.equal(row.creditAmount, "3910.00");
 });

@@ -121,7 +121,7 @@ export function evaluateCashDiscountSettlements(rule, evaluatedOn, invoices, cus
     const discountedTarget = Decimal.max(invoiceAmountDue.minus(discount), 0);
 
     let category;
-    if (missingUnits.length) category = "needs_review";
+    if (missingUnits.length || invoice.paymentMatchNeedsReview) category = "needs_review";
     else if (paidByPayments.gte(invoiceAmountDue.minus(TOLERANCE))) category = "full_payment";
     else if (paidByPayments.minus(discountedTarget).abs().lte(TOLERANCE)) category = "discounted_payment";
     else if (paidByPayments.gt(0) && invoiceAmountDue.minus(paidByPayments).lte(MAX_SHORT_FOR_REVIEW)) category = "over_ninety_percent";
@@ -163,6 +163,7 @@ export function evaluateCashDiscountSettlements(rule, evaluatedOn, invoices, cus
     const reviewMessage = creditNoteReviewRequired
       ? mismatchedCredit ? `Existing Cash Discount is ${money(alreadyCredited)}; the calculated discount is ${money(discount)}. Review the existing Credit Note before any further credit.`
         : notes.find((note) => note.reviewReason)?.reviewReason ?? "Credit Notes cover the invoice amount. Review the adjustment before giving Cash Discount."
+      : invoice.paymentMatchNeedsReview ? "Tally has payment allocations for this bill that could not be matched uniquely. Review the receipts before issuing credit."
       : category === "needs_review"
       ? `MT could not be worked out for unit${missingUnits.length === 1 ? "" : "s"} ${missingUnits.join(", ")}. Add the MT conversion to the rule.`
       : creditUsed.gt(0) ? `Includes ₹${money(creditUsed)} of the customer's on-account credit (not set against any bill in Tally).`

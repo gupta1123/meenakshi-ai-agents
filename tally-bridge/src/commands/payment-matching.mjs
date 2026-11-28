@@ -29,7 +29,7 @@ export function advanceDraws(voucher, customerId, customers) {
     .map(({ billReference, allocatedAmount, allocationKey }) => ({ billReference, allocatedAmount, allocationKey }));
 }
 
-export function matchPayments(invoices, allocations) {
+export function matchPayments(invoices, allocations, unresolvedInvoices = new Set()) {
   const matchInvoice = invoiceMatcher(invoices);
   const payments = new Map();
   const advances = new Map();
@@ -50,7 +50,9 @@ export function matchPayments(invoices, allocations) {
   }
   for (const invoice of invoices) {
     for (const draw of invoice.advanceDraws || []) {
-      const advance = advances.get(refKey(invoice.customerId, draw.billReference));
+      const key = refKey(invoice.customerId, draw.billReference);
+      const advance = advances.get(key);
+      if (advance === null) unresolvedInvoices.add(invoice.tallyGuid);
       if (!advance || advance.payment.receiptDate > invoice.voucherDate) continue;
       advance.total = advance.total.plus(draw.allocatedAmount);
       advance.draws.push({ invoice, draw });
@@ -61,16 +63,33 @@ export function matchPayments(invoices, allocations) {
     if (advance.total.gt(advance.payment.allocatedAmount)) {
       // A sale can draw its full bill against a bank advance plus a separate
       // journal on the same bill. Only use the advance if both amounts reconcile.
-      if (advance.draws.length !== 1) continue;
+      if (advance.draws.length !== 1) {
+        for (const { invoice } of advance.draws) unresolvedInvoices.add(invoice.tallyGuid);
+        continue;
+      }
       const { invoice, draw } = advance.draws[0];
-      if (invoice.advanceDraws.length !== 1) continue;
+      // A receipt opened under the invoice's own number is evidence of the
+      // amount actually received, even when the sale uses several references.
+      const matches = matchInvoice(advance.payment, { customerId: invoice.customerId });
+      if (matches.length === 1 && matches[0] === invoice &&
+          advance.payment.billReference.trim().toLowerCase() === invoice.voucherNumber?.trim().toLowerCase()) {
+        append(invoice, { ...advance.payment, allocationType: "agst_ref", targetVoucherGuid: invoice.tallyGuid });
+        continue;
+      }
+      if (invoice.advanceDraws.length !== 1 || advance.payment.targetVoucherGuid && advance.payment.targetVoucherGuid !== invoice.tallyGuid) {
+        unresolvedInvoices.add(invoice.tallyGuid);
+        continue;
+      }
       const reference = draw.billReference.trim().toLowerCase();
       const journals = (payments.get(invoice.tallyGuid) ?? []).filter(payment =>
         /journal/i.test(payment.receiptType ?? "") &&
         payment.billReference?.trim().toLowerCase() === reference);
       const settled = journals.reduce((sum, journal) => sum.plus(journal.allocatedAmount),
         new Decimal(advance.payment.allocatedAmount));
-      if (!settled.equals(advance.total)) continue;
+      if (!settled.equals(advance.total)) {
+        unresolvedInvoices.add(invoice.tallyGuid);
+        continue;
+      }
       append(invoice, { ...advance.payment, allocationKey: draw.allocationKey,
         allocationType: "agst_ref", targetVoucherGuid: invoice.tallyGuid });
       continue;

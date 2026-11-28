@@ -217,10 +217,12 @@ export async function fetchLiveCdEvidence(command, context, masterResult) {
     makeScope: ({ cursor: at, dateFrom, dateTo, chunkDays }) => ({ ...scope, dateFrom, dateTo, customers: eligibleCustomers, cursor: at, chunkDays }),
   });
   allocations.push(...continued.allocations);
-  const paymentsByInvoice = matchPayments(invoices, allocations);
+  const unresolvedInvoices = new Set();
+  const paymentsByInvoice = matchPayments(invoices, allocations, unresolvedInvoices);
   const notesByInvoice = perMt ? matchCreditNotes(invoices, creditNotes, eligibleCustomers) : new Map();
   const invoiceResults = invoices.map(({ advanceDraws: _draws, ...invoice }) => ({
     ...invoice,
+    ...(unresolvedInvoices.has(invoice.tallyGuid) ? { paymentMatchNeedsReview: true } : {}),
     payments: [...new Map(
       (paymentsByInvoice.get(invoice.tallyGuid) ?? [])
         .map((payment) => [payment.allocationKey || `${payment.receiptGuid}:${payment.billReference}:${payment.allocatedAmount}`, payment]),
