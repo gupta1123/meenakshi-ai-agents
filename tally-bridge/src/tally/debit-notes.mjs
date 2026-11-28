@@ -1,6 +1,7 @@
 import { buildCollectionExportXml, postTallyXml } from "./xml.mjs";
 import { parseVouchers } from "./vouchers.mjs";
 import Decimal from "decimal.js";
+import { matchCreditNotes } from "../commands/credit-note-matching.mjs";
 
 const FETCH_FIELDS = [
   "Date,VoucherTypeName,VoucherType,VoucherTypeGUID,VoucherNumber,GUID,MasterID,AlterID,IsCancelled,IsOptional,IsReversed,PartyLedgerName,PartyLedgerGUID,VoucherAmount,Amount,Narration",
@@ -205,10 +206,57 @@ function verificationResult(debitNote, voucher) {
   return { tallyGuid: voucher.guid, voucherNumber: voucher.voucherNumber || null, amount: absoluteDecimal(voucher.grossAmount), billReference: allocation.billReference, recovered: false };
 }
 
+// Before issuing a CD, check the destination books for a manual note entered
+// since calculation. An exact retry of our own posting is recovered first.
+async function checkExistingCashDiscount(note, config) {
+  const source = note.sourceInvoice;
+  const date = note.cashDiscount?.invoiceDate;
+  if (!source?.guid || !/^\d{4}-\d{2}-\d{2}$/.test(date ?? "")) {
+    throw new Error("Cannot verify existing Cash Discount without the source invoice and date.");
+  }
+  const customer = { customerId: note.party.guid || note.party.name,
+    tallyLedgerGuid: note.party.guid, ledgerName: note.party.name };
+  const invoice = { customerId: customer.customerId, tallyGuid: source.guid,
+    voucherDate: date, voucherNumber: source.number, billReferences: [source.billReference].filter(Boolean) };
+  const quotedParty = JSON.stringify(note.party.name);
+  const today = new Date().toISOString().slice(0, 10);
+  const dateTo = today > note.debitNoteDate ? today : note.debitNoteDate;
+  async function read(kind, dateFrom, fields) {
+    const xml = buildCollectionExportXml({ collectionName: "Meenakshi CD " + kind,
+      tallyType: "Voucher", companyName: note.company.name, dateFrom, dateTo, fetchFields: fields,
+      formulae: [
+        { name: "CdVoucherKind", formula: "$$Is" + kind + ":$VoucherTypeName" },
+        { name: "CdLedger", formula: "$$IsEqual:$LedgerName:" + quotedParty },
+        { name: "CdParty", formula: "$$FilterCount:AllLedgerEntries:CdLedger > 0" },
+      ], filterNames: ["CdVoucherKind", "CdParty"] });
+    const result = await postTallyXml(config.tallyUrl, xml, { timeoutMs: 45000, operation: "Check existing Cash Discount" });
+    if (!/<COLLECTION(?:\s|>)/i.test(result)) throw new Error("Tally did not return the existing-credit check. Try issuing again.");
+    return parseVouchers(result);
+  }
+  const notes = (await read("CreditNote", date, FETCH_FIELDS +
+    ",AllLedgerEntries.LedgerGUID,AllLedgerEntries.BillAllocations.TargetVoucherGUID"))
+    .map(v => ({ ...v, voucherKind: v.inventoryLines.length ? "sales_return" : "credit_note" }));
+  let matches = matchCreditNotes([invoice], notes, [customer]).get(source.guid) ?? [];
+  if (matches.some(m => m.matchedBy === "unresolved")) {
+    // An on-account note naming another bill must not hold this invoice.
+    const year = Number(date.slice(0, 4)) - (Number(date.slice(5, 7)) < 4 ? 1 : 0);
+    const sales = await read("Sales", year + "-04-01",
+      "Date,VoucherTypeName,VoucherNumber,GUID,IsCancelled,IsOptional,AllLedgerEntries.LedgerName,AllLedgerEntries.BillAllocations.Name,AllLedgerEntries.BillAllocations.Amount,AllLedgerEntries.BillAllocations.BillType");
+    const others = sales.filter(v => v.status === "posted" && v.guid !== source.guid)
+      .map(v => ({ customerId: customer.customerId, tallyGuid: v.guid, voucherNumber: v.voucherNumber,
+        voucherDate: v.voucherDate, billReferences: v.billAllocations.filter(a =>
+          a.allocationType === "new_ref" && a.ledgerName === customer.ledgerName).map(a => a.billReference) }));
+    matches = matchCreditNotes([invoice, ...others], notes, [customer]).get(source.guid) ?? [];
+  }
+  const existing = matches.find(m => m.purpose === "cash_discount" || m.reviewReason);
+  if (existing) throw new Error(`Review Tally Credit Note ${existing.voucherNumber || existing.tallyGuid} before issuing Cash Discount for ${source.number || source.guid}.`);
+}
+
 export async function createOrRecoverDebitNote(command, { config }) {
   const debitNote = payload(command);
   const recovered = await findDebitNote(debitNote, config);
   if (recovered) return { ...verificationResult(debitNote, recovered), recovered: true };
+  if (isCashDiscountCreditNote(debitNote)) await checkExistingCashDiscount(debitNote, config);
   await postTallyXml(config.tallyUrl, buildDebitNoteImportXml(debitNote), { timeoutMs: 90_000, operation: "Create Meenakshi Debit Note" });
   const created = await findDebitNote(debitNote, config);
   if (!created) throw new Error("Tally accepted the Debit Note request but exact read-back could not verify it.");

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { fetchLiveCdEvidence } from "../src/commands/live-cd-evidence.mjs";
 import { evaluateCashDiscountSettlements } from "../src/local-cd-settlement-evaluator.mjs";
 import { fetchLiveTodEvidence } from "../src/commands/live-tod-evidence.mjs";
+import { createOrRecoverDebitNote } from "../src/tally/debit-notes.mjs";
 import { syncVouchers } from "../src/commands/sync-vouchers.mjs";
 
 const customer = { customerId: "customer-guid", ledgerName: "Test Customer" };
@@ -308,3 +309,26 @@ for (const [total, bank, balance] of [
     assert.equal((await check([sale, receipt])).results[0].paidByDeadline, "0.00");
   });
 }
+
+test("posting detects a newly entered manual Cash Discount before importing a voucher", async () => {
+  const pending = {
+    noteKind: "credit_note", party: { name: customer.ledgerName, guid: customer.customerId },
+    company: { guid: "company", name: "Test Only" }, voucherType: { name: "Credit Note" },
+    debitNoteDate: "2026-03-25", amount: "5000", calculationReference: "CN-CD-1",
+    sourceInvoice: { guid: "invoice-1", number: "INV/25-26/1" }, cashDiscount: { invoiceDate: "2026-03-23" },
+    allocation: { reference: "CN-CD-1" }, gstNote: { discountLedger: { name: "Discount" }, taxLines: [] },
+  };
+  const original = globalThis.fetch;
+  let reads = 0;
+  globalThis.fetch = async (_url, request) => {
+    const body = String(request.body);
+    assert.doesNotMatch(body, /Import Data/);
+    reads++;
+    return new Response("<ENVELOPE><COLLECTION>" + (body.includes("Meenakshi CD CreditNote") ? note() : "") + "</COLLECTION></ENVELOPE>");
+  };
+  try {
+    await assert.rejects(createOrRecoverDebitNote({ payload: { debitNote: pending } },
+      { config: { tallyUrl: "https://test-tally.invalid" } }), /Review Tally Credit Note CN1/);
+    assert.equal(reads, 2);
+  } finally { globalThis.fetch = original; }
+});
