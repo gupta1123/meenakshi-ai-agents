@@ -57,7 +57,24 @@ export function matchPayments(invoices, allocations) {
     }
   }
   for (const advance of advances.values()) {
-    if (!advance || advance.total.gt(advance.payment.allocatedAmount)) continue;
+    if (!advance) continue;
+    if (advance.total.gt(advance.payment.allocatedAmount)) {
+      // A sale can draw its full bill against a bank advance plus a separate
+      // journal on the same bill. Only use the advance if both amounts reconcile.
+      if (advance.draws.length !== 1) continue;
+      const { invoice, draw } = advance.draws[0];
+      if (invoice.advanceDraws.length !== 1) continue;
+      const reference = draw.billReference.trim().toLowerCase();
+      const journals = (payments.get(invoice.tallyGuid) ?? []).filter(payment =>
+        /journal/i.test(payment.receiptType ?? "") &&
+        payment.billReference?.trim().toLowerCase() === reference);
+      const settled = journals.reduce((sum, journal) => sum.plus(journal.allocatedAmount),
+        new Decimal(advance.payment.allocatedAmount));
+      if (!settled.equals(advance.total)) continue;
+      append(invoice, { ...advance.payment, allocationKey: draw.allocationKey,
+        allocationType: "agst_ref", targetVoucherGuid: invoice.tallyGuid });
+      continue;
+    }
     for (const { invoice, draw } of advance.draws) {
       append(invoice, { ...advance.payment, allocationKey: draw.allocationKey, allocatedAmount: draw.allocatedAmount,
         allocationType: "agst_ref", targetVoucherGuid: invoice.tallyGuid });

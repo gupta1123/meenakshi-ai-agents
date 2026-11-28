@@ -165,6 +165,48 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
     finally { if (requestId === latestLoad.current) setLoading(false); }
   }, [company.id, setError]);
   useEffect(() => { setLoading(true); setData(null); setLiveRows(null); void load(); }, [companyKey, load]);
+  // Upgrade pre-manual-credit checks once per saved run, even across open tabs.
+  const legacyRunId = savedCheckNeedsRefresh ? data?.run?.id : null;
+  const [repairing, setRepairing] = useState(false);
+  useEffect(() => {
+    let active = true;
+    let timer: number | undefined;
+    setRepairing(false);
+    if (!legacyRunId || !connectorVersion || connectorNeedsUpdate) return;
+    const repair = async () => {
+      try {
+        const token = await accessToken();
+        if (!active || !token) return;
+        setRepairing(true);
+        const path = `/api/companies/${company.id}/connector-support`;
+        const { job } = await apiRequest<{ job: { id: string } }>(token, path, {
+          method: "POST", headers: { "Idempotency-Key": `cd-manual-credit-check-${legacyRunId}` },
+          body: jsonBody({ operation: "recalculate", schemeType: "cd", ruleVersionId, save: true }),
+        });
+        const poll = async () => {
+          if (!active) return;
+          try {
+            const result = await apiRequest<{ job: { status: string; error?: string } }>(token, `${path}/${job.id}?statusOnly=1`, { cache: "no-store" });
+            if (!active) return;
+            if (["queued", "running", "received"].includes(result.job.status)) {
+              timer = window.setTimeout(() => void poll(), 10000);
+              return;
+            }
+            if (result.job.status !== "succeeded") throw new Error(result.job.error || "The saved discount check could not be verified.");
+            await load();
+          } catch (cause) {
+            if (active) setError(userFacingError(cause, "Could not verify the saved discount check."));
+          }
+          if (active) setRepairing(false);
+        };
+        await poll();
+      } catch (cause) {
+        if (active) { setRepairing(false); setError(userFacingError(cause, "Could not start verification.")); }
+      }
+    };
+    void repair();
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [legacyRunId, ruleVersionId, company.id, connectorVersion, connectorNeedsUpdate, load]);
   const serverCheck = useServerCheck(company.id, "cd", tallyMode.mode === "server", accessToken, async (next) => {
     if (next.job.status === "succeeded" && next.run?.status === "completed") {
       await load();
@@ -351,7 +393,7 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
           {data?.run && !phase && data.totals?.invoicePeriod && <span className="cd-head-facts"><strong>{shortDate(data.totals.invoicePeriod.from)} – {shortDate(data.totals.invoicePeriod.to)}</strong>{typeof data.totals.invoicesChecked === "number" && ` · ${data.totals.invoicesChecked.toLocaleString("en-IN")} checked`}{(data.totals.notEligibleCount ?? 0) > 0 && data.totals.invoicesChecked ? <span title="Paid late, or short of the bill by more than ₹10,000"> · {Math.round((data.totals.notEligibleCount! / data.totals.invoicesChecked) * 100)}% not eligible</span> : null}</span>}
         </div>
         <div className="tod-overview-actions"><span>{phase ? "Checking Tally…" : data?.run?.completedAt ? `Calculated ${formatDate(data.run.completedAt)}` : "Not calculated yet"}</span>
-          <Button className="button-secondary" disabled={Boolean(phase)} onClick={() => void calculate()}><RefreshCw className={phase ? "spin" : undefined} size={15} />{phase ? "Checking Tally…" : savedCheckNeedsRefresh ? "Refresh Cash Discount" : "Calculate"}</Button>
+          <Button className="button-secondary" disabled={Boolean(phase) || repairing} onClick={() => void calculate()}><RefreshCw className={phase ? "spin" : undefined} size={15} />{phase ? "Checking Tally…" : savedCheckNeedsRefresh ? "Refresh Cash Discount" : "Calculate"}</Button>
           <Button className="button-quiet" onClick={openRulePanel}>Active rule</Button></div>
       </div>
       {phase === "reading" && reconnect && <div className="cd-check-progress" role="alert">
@@ -372,10 +414,10 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
     </section>
     {savedCheckNeedsRefresh && !phase && (
       <InlineMessage tone="warning">
-        <strong>Credit Notes are on hold until this check is refreshed.</strong>{" "}
+        <strong>Checking previously issued Credit Notes.</strong>{" "}
         {connectorNeedsUpdate
-          ? <>Update the Tally connector from {connectorVersion} to 0.6.4 or newer, then select Refresh Cash Discount. <Link href="/tally">Open Tally connection</Link></>
-          : "Select Refresh Cash Discount to check Tally for existing Credit Notes and update which invoices are eligible."}
+          ? <>Update the Tally connector from {connectorVersion} to 0.6.4 or newer, to verify the saved calculation. <Link href="/tally">Open Tally connection</Link></>
+          : repairing ? "Verification is running on the Tally computer. You can leave this page." : "The saved result needs verification before issuing credit."}
       </InlineMessage>
     )}
     {!postingEnabled && <InlineMessage tone="info">Credit Note creation is off. Turn it on from Credit Notes to create Credit Notes in Tally.</InlineMessage>}
@@ -423,7 +465,7 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
             <div className="cd-settlement-note">
               {note?.status === "created_verified" ? <StatusBadge status="created_verified">CN {note.verified_voucher_number ?? "created"}</StatusBadge>
                 : note && ["queued", "sending"].includes(note.status) ? <StatusBadge status={note.progress?.stage === "queued" || !note.progress ? "queued" : "posting"}>{note.progress?.label ?? "Waiting for Tally…"}</StatusBadge>
-                : row.status === "credited" ? <StatusBadge status="created_verified">Already credited</StatusBadge>
+                : row.status === "credited" ? <StatusBadge status="created_verified">Already credited{row.creditNoteReferences?.find(ref => ref.purpose === "cash_discount")?.voucherNumber ? ` ? CN ${row.creditNoteReferences.find(ref => ref.purpose === "cash_discount")?.voucherNumber}` : ""}</StatusBadge>
                 : canCreate ? <Button className="button-secondary" disabled={busyId === candidate!.id} onClick={() => void createCreditNote(row, candidate!.id)}>{busyId === candidate!.id ? "Queuing…" : `Create ₹${Number(row.creditAmount).toLocaleString("en-IN")}`}</Button>
                 : requiresRecheck ? null
                 : <small>{row.category === "full_payment" && !Number(row.creditAmount) ? Number(row.discountAmount) > 0 ? "No credit amount saved" : "No discount" : ["full_payment", "discounted_payment", "over_ninety_percent"].includes(row.category) ? row.gstDeadlinePassed ? "GST deadline passed" : postingEnabled ? "Save the check first" : "Creation is off" : row.category === "awaiting_payment" ? "Window open" : row.category === "needs_review" ? row.reviewMessage ?? "Needs review" : "No discount"}</small>}

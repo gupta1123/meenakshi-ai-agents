@@ -30,6 +30,13 @@ export async function GET(r: Request, c: C) {
     const p = await access(r, c);
     await recoverSupportSaves(p.companyId);
     const db = createSupabaseAdminClient();
+    if (new URL(r.url).searchParams.get("statusOnly") === "1") {
+      const { data: job, error } = await db.from("tally_support_jobs")
+        .select("id,status,error").eq("company_id", p.companyId).eq("id", p.jobId).maybeSingle();
+      if (error) throw error;
+      if (!job) throw new SupportError("Support job not found.", 404);
+      return jsonWithCors(r, { job }, { headers: { "Cache-Control": "no-store" } });
+    }
     const { data: job, error } = await db
       .from("tally_support_jobs")
       .select("*")

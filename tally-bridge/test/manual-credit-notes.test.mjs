@@ -288,3 +288,23 @@ test("ambiguous advance references never pay an invoice twice", async () => {
   assert.equal((await check(rows)).results[0].paidByDeadline, "0.00");
   assert.equal((await check(rows, { tod: true })).customerAggregates[0].paymentChecks[0].paidByDueDate, "0");
 });
+
+for (const [total, bank, balance] of [
+  ["702244", "689814.28", "12429.72"],
+  ["577888", "567659.38", "10228.62"],
+  ["231973", "227867.08", "4105.92"],
+]) {
+  test(`full bill draw reconciles bank advance and journal for ${total}`, async () => {
+    const number = "S1", date = "20260323";
+    const sale = voucher({ guid: "s", type: "Sales", number, date, amount: total, inventory,
+      entries: ledger(customer.ledgerName, "-" + total, [[number, "-" + total, "Agst Ref"]]) });
+    const receipt = voucher({ guid: "r", type: "Receipt", number: "17", date, amount: bank,
+      entries: ledger(customer.ledgerName, bank, [[number, bank, "New Ref"]]) });
+    const journal = voucher({ guid: "j", type: "Journal", number: "6", date, amount: balance,
+      entries: ledger(customer.ledgerName, balance, [[number, balance]]) + ledger("Finance", "-" + balance) });
+    const row = (await check([sale, receipt, journal])).results[0];
+    assert.equal(row.paidByDeadline, total + ".00");
+    assert.equal(row.category, "full_payment");
+    assert.equal((await check([sale, receipt])).results[0].paidByDeadline, "0.00");
+  });
+}
