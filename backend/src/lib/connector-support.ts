@@ -1,3 +1,4 @@
+import {currentCdEvidence} from "@/lib/evaluation/cd-credit-note-safety";
 import {selectedSupportCustomerGuids} from "@/lib/support-customer-scope";
 import { randomUUID } from "node:crypto";
 import { buildVoucherTest } from "@/lib/voucher-test";
@@ -269,9 +270,9 @@ export async function prepareSupportRequest(
         .eq("summary->>cdDiscountBasis", "amount_per_tonne")
         .order("completed_at", { ascending: false })
         .limit(1);
-      if (Number(prior?.[0]?.summary?.evidenceSchemaVersion) !== 2 || Number(prior?.[0]?.summary?.creditNoteMatchingVersion) !== 2)
+      if (Number(prior?.[0]?.summary?.evidenceSchemaVersion) !== 2 || !currentCdEvidence(prior?.[0]?.summary?.creditNoteMatchingVersion, prior?.[0]?.summary?.connectorVersion))
         throw new SupportError(
-          "Run one full CD check with connector 0.6.4 before saving a partial refresh. A diagnostic run is available now.",
+          "Run one full CD check with connector 0.7.4 before saving a partial refresh. A diagnostic run is available now.",
           409,
         );
     }

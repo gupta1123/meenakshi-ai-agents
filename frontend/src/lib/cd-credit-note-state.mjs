@@ -6,9 +6,9 @@ export function canCreateCashDiscountNote(row, candidate, note, requiresRecheck)
     && (!note || ["failed", "cancelled"].includes(note.status));
 }
 
-export function supportsManualCreditNotes(version) {
+export function supportsCdSettlementChecks(version) {
   if (!/^\d+\.\d+\.\d+$/.test(String(version))) return false;
-  const parts = version.split(".").map(Number), minimum = [0, 6, 4];
+  const parts = version.split(".").map(Number), minimum = [0, 7, 4];
   for (let i = 0; i < 3; i += 1) { if (parts[i] !== minimum[i]) return parts[i] > minimum[i]; }
   return true;
 }

@@ -4,4 +4,4 @@ export function canCreateCashDiscountNote(
   note: { status: string } | null | undefined,
   requiresRecheck: boolean,
 ): boolean;
-export function supportsManualCreditNotes(version: string | null | undefined): boolean;
+export function supportsCdSettlementChecks(version: string | null | undefined): boolean;

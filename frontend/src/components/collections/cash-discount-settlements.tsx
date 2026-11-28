@@ -23,7 +23,7 @@ import { Button, Dialog, Drawer, EmptyState, InlineMessage, Skeleton, StatusBadg
 import { accessToken } from "./workspace";
 import { CdInvoicePanel } from "./cd-invoice-panel";
 import { GuidedVersionSummary } from "./guided-version-summary";
-import { canCreateCashDiscountNote, supportsManualCreditNotes } from "@/lib/cd-credit-note-state.mjs";
+import { canCreateCashDiscountNote, supportsCdSettlementChecks } from "@/lib/cd-credit-note-state.mjs";
 import type { Calendar, ReferenceData, VersionDetail } from "./types";
 import { useWorkspaceSession } from "./workspace-session";
 
@@ -45,6 +45,7 @@ export type CdSettlementRow = {
 };
 type CreditNote = { id: string; status: string; amount: string; verified_voucher_number: string | null; verified_at?: string | null; failure_reason: string | null; progress?: { stage: "queued" | "creating" | "verifying"; label: string }; whatsapp?: { status: string; sentAt: string | null } | null };
 type SettlementData = {
+  companyId?: string;
   requiresRecheck?: boolean;
   run: { id: string; ruleVersionId?: string | null; completedAt: string | null; periodStart: string | null; periodEnd: string | null } | null;
   results: CdSettlementRow[];
@@ -97,7 +98,7 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
   const requiresRecheck = data?.requiresRecheck !== false;
   const savedCheckNeedsRefresh = Boolean(data?.run && requiresRecheck);
   const connectorVersion = health?.companyId === company.id ? health.connector?.bridgeVersion : null;
-  const connectorNeedsUpdate = Boolean(connectorVersion && !supportsManualCreditNotes(connectorVersion));
+  const connectorNeedsUpdate = Boolean(connectorVersion && !supportsCdSettlementChecks(connectorVersion));
   const [liveRows, setLiveRows] = useState<CdSettlementRow[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [localPhase, setPhase] = useState<"reading" | "saving" | null>(null);
@@ -159,14 +160,14 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
     const token = await accessToken(); if (!token) return;
     try {
       const result = await apiRequest<SettlementData>(token, `/api/companies/${company.id}/cash-discount/settlements`, { cache: "no-store" });
-      if (requestId === latestLoad.current) setData(result);
+      if (requestId === latestLoad.current) setData({ ...result, companyId: company.id });
     }
     catch (cause) { if (requestId === latestLoad.current) setError(userFacingError(cause, "Could not load Cash Discount results.")); }
     finally { if (requestId === latestLoad.current) setLoading(false); }
   }, [company.id, setError]);
   useEffect(() => { setLoading(true); setData(null); setLiveRows(null); void load(); }, [companyKey, load]);
   // Upgrade pre-manual-credit checks once per saved run, even across open tabs.
-  const legacyRunId = savedCheckNeedsRefresh ? data?.run?.id : null;
+  const legacyRunId = savedCheckNeedsRefresh && data?.companyId === company.id ? data?.run?.id : null;
   const [repairing, setRepairing] = useState(false);
   useEffect(() => {
     let active = true;
@@ -414,9 +415,9 @@ export function CashDiscountSettlementsPage({ isAdministrator, setNotice, tallyM
     </section>
     {savedCheckNeedsRefresh && !phase && (
       <InlineMessage tone="warning">
-        <strong>Checking previously issued Credit Notes.</strong>{" "}
+        <strong>Verifying advances and existing Credit Notes.</strong>{" "}
         {connectorNeedsUpdate
-          ? <>Update the Tally connector from {connectorVersion} to 0.6.4 or newer, to verify the saved calculation. <Link href="/tally">Open Tally connection</Link></>
+          ? <>Update the Tally connector from {connectorVersion} to 0.7.4 or newer, to verify the saved calculation. <Link href="/tally">Open Tally connection</Link></>
           : repairing ? "Verification is running on the Tally computer. You can leave this page." : "The saved result needs verification before issuing credit."}
       </InlineMessage>
     )}

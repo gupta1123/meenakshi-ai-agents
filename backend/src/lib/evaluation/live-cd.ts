@@ -12,7 +12,7 @@ import type { FrozenCdRule } from "./contracts";
 import { evaluateCashDiscountSettlements } from "./cd-settlement.mjs";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { mergeCdSnapshotRows } from "@/lib/connector-support-evidence";
-import { CD_CREDIT_NOTE_MATCHING_VERSION, CD_RECHECK_MESSAGE, keepCdSettlementRow } from "./cd-credit-note-safety";
+import { currentCdEvidence, CD_RECHECK_MESSAGE, keepCdSettlementRow } from "./cd-credit-note-safety";
 
 type LiveCdPayment = {
   receiptGuid: string;
@@ -356,7 +356,7 @@ export function mergeVerifiedDebitNotes(invoices: LiveCdInvoice[], postings: Ver
  * database allows one live Credit Note per invoice.
  */
 export async function completeCdSettlementRun(run: EvaluationRunRecord, batch: LiveCdBatch) {
-  if (batch.creditNoteMatchingVersion !== CD_CREDIT_NOTE_MATCHING_VERSION) throw new Error(CD_RECHECK_MESSAGE);
+  if (!currentCdEvidence(batch.creditNoteMatchingVersion, batch.connectorVersion)) throw new Error(CD_RECHECK_MESSAGE);
   const supabase = createSupabaseAdminClient();
   const bootstrap = await loadLiveCdLocalBootstrap(run, batch.ruleVersionId);
   const rule = bootstrap.rule as FrozenCdRule & { customerSegments?: Record<string, number> };
@@ -374,7 +374,7 @@ export async function completeCdSettlementRun(run: EvaluationRunRecord, batch: L
       .eq("status","completed").eq("scheme_version_id",rule.id).eq("summary->>evidenceSchemaVersion","2")
       .order("completed_at",{ascending:false}).limit(1);
     if(error)throw error;
-    if(Number(previous?.[0]?.summary?.creditNoteMatchingVersion) !== CD_CREDIT_NOTE_MATCHING_VERSION)throw new Error("A full connector 0.6.4 CD check is required before saving a partial refresh.");
+    if(!currentCdEvidence(previous?.[0]?.summary?.creditNoteMatchingVersion, previous?.[0]?.summary?.connectorVersion))throw new Error("A full connector 0.7.4 CD check is required before saving a partial refresh.");
     const prior=previous[0].summary as Record<string,unknown>;
     const approved=new Set((bootstrap.voucherScope as {customers:Array<{customerId:string}>}).customers.map(c=>c.customerId));
     if(customerScope.some(id=>!approved.has(id)))throw new Error("Partial CD scope contains a customer outside this rule.");
