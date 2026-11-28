@@ -101,7 +101,7 @@ export async function GET(request: Request) {
     for (const m of membershipRows) { const a = rolesByOrganization.get(m.organization_id); if (a) a.push(m.role); else rolesByOrganization.set(m.organization_id, [m.role]); }
     const companiesByOrganization = new Map<string, unknown[]>();
     for (const c of (companies ?? []) as Array<{ organization_id: string }>) { const a = companiesByOrganization.get(c.organization_id); if (a) a.push(c); else companiesByOrganization.set(c.organization_id, [c as unknown]); }
-    const payload = { organizations: (organizations ?? []).filter((o) => enabled.has((o as { id: string }).id)).map((o) => { const id = (o as { id: string }).id; return { ...o, roles: rolesByOrganization.get(id) ?? [], companies: companiesByOrganization.get(id) ?? [] }; }) };
+    const payload = { organizations: (organizations ?? []).filter((o) => enabled.has((o as { id: string }).id)).map((o) => { const id = (o as { id: string }).id; return { ...o, roles: rolesByOrganization.get(id) ?? [], companies: tagYearGroups((companiesByOrganization.get(id) ?? []) as Array<{ id: string; tally_company_guid: string | null; tally_books_from: string | null; tally_company_name: string }>) }; }) };
     bootstrapCache.set(user.id, { expiresAt: Date.now() + BOOTSTRAP_CACHE_TTL_MS, data: payload });
     return jsonWithCors(request, payload, { headers: { "Cache-Control": "private, max-age=10, stale-while-revalidate=20", "X-Cache": "MISS" } });
   } catch (error) {

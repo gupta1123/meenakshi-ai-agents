@@ -632,7 +632,7 @@ function CashDiscountRecoveryPage({ data, setNotice, setError, isAdministrator, 
 }
 
 function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customerNames, tallyMode }: PageProps & { scheme: "cd" | "tod" }) {
-  const { company, isAdministrator, setWorkingYear } = useCompany();
+  const { company, organization, isAdministrator, setWorkingYear, pendingRunView } = useCompany();
   const [evaluationOpen, setEvaluationOpen] = useState(false);
   const [showEvaluationQueue, setShowEvaluationQueue] = useState(false);
   // Credit Notes links here with ?view=create: open the latest ended period on "Ready to create".
@@ -742,7 +742,6 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
 
   // The years of a split Tally company are one company on screen. Opening a run of another year moves the
   // page to that year (its rule, Tally company and Credit Notes), then shows the run once that year has loaded.
-  const pendingRunView = useRef<EvaluationRun | null>(null);
   const bootstrapForCompany = useRef<string | null>(null);
   const viewRunResults = (run: EvaluationRun, isLatest: boolean) => {
       // The newest completed calculation is the live result: open the normal
@@ -796,11 +795,9 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
       setShowEvaluationQueue(false);
     }
   const openRunResults = (run: EvaluationRun, isLatest: boolean) => {
-    if (run.companyId && run.companyId !== company.id) { pendingRunView.current = run; setShowEvaluationQueue(true); setWorkingYear(run.companyId); return; }
+    if (run.companyId && run.companyId !== company.id) { pendingRunView.current = { run, isLatest }; setShowEvaluationQueue(true); setWorkingYear(run.companyId); return; }
     viewRunResults(run, isLatest);
   };
-  // Leaving Turnover Discount returns the page to the newest year.
-  useEffect(() => () => { if (scheme === "tod") setWorkingYear(null); }, [scheme, setWorkingYear]);
 
   const preloadLocalTodBootstrap = useCallback(async (asOfDate?: string, fresh = false) => {
     const token = await accessToken();
@@ -816,9 +813,9 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
   }, [company.id]);
   useEffect(() => {
     const pending = pendingRunView.current;
-    if (!pending || pending.companyId !== company.id || !localTodBootstrap || bootstrapForCompany.current !== company.id) return;
+    if (!pending || pending.run.companyId !== company.id || !localTodBootstrap || bootstrapForCompany.current !== company.id) return;
     pendingRunView.current = null;
-    viewRunResults(pending, true);
+    viewRunResults(pending.run, pending.isLatest);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [company.id, localTodBootstrap]);
   const serverCheck = useServerCheck(company.id, "tod", scheme === "tod" && tallyMode.mode === "server", accessToken, async (next) => {
@@ -966,7 +963,11 @@ function DiscountPageBody({ scheme, data, refresh, setNotice, setError, customer
   const periodLabel = periodKeys.size > 1 ? `${periodKeys.size} calculation periods` : periodRow?.period_start && periodRow.period_end ? `${formatBusinessDate(periodRow.period_start)} – ${formatBusinessDate(periodRow.period_end)}` : "Current rule period";
   const periodEnded = Boolean(allRows.length) && allRows.every((proposal) => proposal.period_end && new Date(`${proposal.period_end.slice(0, 10)}T23:59:59`).getTime() < Date.now());
   const lastChecked = allRows.map((proposal) => proposal.latest_evaluated_at).filter(Boolean).sort().at(-1) ?? null;
-  const turnoverPeriods = (localTodBootstrap?.periods ?? []).map((period) => ({
+  const yearMembers = organization.companies.find(item => item.id === (company.year_of ?? company.id))?.year_members;
+  const turnoverPeriods = (localTodBootstrap?.periods ?? []).filter(period => {
+    const owner = yearMembers?.filter(member => member.books_from && member.books_from <= period.start).at(-1);
+    return !owner || owner.id === company.id;
+  }).map((period) => ({
     ...period,
     calculated: period.calculated ?? false,
   }));

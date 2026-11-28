@@ -245,6 +245,7 @@ export type EvaluationRun = {
   id: string;
   /** The year-company this run belongs to (set when a split company's years are listed together). */
   companyId?: string;
+  periodBookMatches?: boolean;
   status: string;
   created_at: string;
   completed_at: string | null;

@@ -112,7 +112,7 @@ export function GuidedEvaluationQueue({ scheme, ruleVersionId, latestRun, onErro
     try {
       const token = await accessToken();
       if (!token) return;
-      await apiRequest(token, `/api/companies/${company.id}/evaluations/runs/${active.id}/cancel`, { method: "POST" });
+      await apiRequest(token, `/api/companies/${active.companyId ?? company.id}/evaluations/runs/${active.id}/cancel`, { method: "POST" });
       await load();
     } catch (cause) {
       onError(userFacingError(cause, "Could not stop this calculation."));
@@ -152,7 +152,8 @@ export function GuidedEvaluationQueue({ scheme, ruleVersionId, latestRun, onErro
     const sorted = [...group].sort(newestFirst);
     const active = sorted.find((run) => activeRuns.some((item) => item.id === run.id)) ?? null;
     const completed = sorted.filter((run) => run.status === "completed");
-    const shown = active ?? completed[0] ?? sorted[0];
+    const applicable = sorted.filter(run => run.periodBookMatches !== false);
+    const shown = applicable.find(run => run.status === "completed") ?? active ?? applicable[0] ?? sorted[0];
     // A newer attempt that failed while an older result is still shown.
     const failedAfter = !active && completed[0] ? sorted.find((run) => newestFirst(run, completed[0]) < 0 && unresolvedIssueRuns.some((issue) => issue.id === run.id)) ?? null : null;
     return { key: periodKey(shown), shown, older: completed.filter((run) => run.id !== shown.id), attempts: sorted.length, failedAfter, lastRunAt: sorted[0].created_at };
@@ -162,7 +163,7 @@ export function GuidedEvaluationQueue({ scheme, ruleVersionId, latestRun, onErro
   const [openPeriod, setOpenPeriod] = useState<string | null>(null);
   // The newest completed run of a period is the live result (actions allowed);
   // older runs of the same period open as read-only snapshots.
-  const isLatestForPeriod = (run: EvaluationRun) => !successfulRuns.some((other) => other.id !== run.id
+  const isLatestForPeriod = (run: EvaluationRun) => run.periodBookMatches !== false && !successfulRuns.some((other) => other.periodBookMatches !== false && other.id !== run.id
     && other.period_start === run.period_start && other.period_end === run.period_end
     && new Date(other.created_at).getTime() > new Date(run.created_at).getTime());
   const pageSize = 10;
@@ -186,8 +187,8 @@ export function GuidedEvaluationQueue({ scheme, ruleVersionId, latestRun, onErro
         const status = runStatus(run, resolved);
         const hasIssue = ["failed", "completed_with_issues"].includes(run.status);
         const wasStopped = run.status === "cancelled";
-        const result = run.status === "completed" ? `${run.total_jobs ?? 0} checked · ${run.qualified_jobs ?? 0} qualified · ${formatMoney(run.projected_discount_amount ?? 0)} projected` : wasStopped ? "Calculation stopped" : hasIssue ? "Calculation did not finish" : progressLabel(run);
-        const detail = run.status === "completed"
+        const result = run.periodBookMatches === false ? "Historical calculation from different financial-year books" : run.status === "completed" ? `${run.total_jobs ?? 0} checked · ${run.qualified_jobs ?? 0} qualified · ${formatMoney(run.projected_discount_amount ?? 0)} projected` : wasStopped ? "Calculation stopped" : hasIssue ? "Calculation did not finish" : progressLabel(run);
+        const detail = run.periodBookMatches === false ? "Available as a read-only snapshot." : run.status === "completed"
           ? period.failedAfter ? `A recalculation on ${formatDate(period.failedAfter.created_at)} did not finish; this is the last good result.` : `${run.not_qualified_jobs ?? 0} customers did not qualify`
           : wasStopped
             ? "Stopped by the user. Completed customer results remain in history."

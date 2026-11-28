@@ -2,7 +2,8 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
-import type { Bootstrap, Company, Organization } from "./types";
+import { usePathname } from "next/navigation";
+import type { Bootstrap, Company, EvaluationRun, Organization } from "./types";
 
 type CompanyContextValue = {
   company: Company;
@@ -11,6 +12,7 @@ type CompanyContextValue = {
   isAdministrator: boolean;
   isFinanceApprover: boolean;
   companyKey: number;
+  pendingRunView: { current: { run: EvaluationRun; isLatest: boolean } | null };
   /** A split company's years are one company; this moves the working year without changing the dropdown. */
   setWorkingYear: (companyId: string | null) => void;
 };
@@ -22,6 +24,8 @@ export function CompanyProvider({ bootstrap, initialCompanyId, children }: { boo
   const [companyId, setCompanyId] = useState(initialCompanyId);
   const [companyKey, setCompanyKey] = useState(0);
   const [yearOverride, setYearOverride] = useState<string | null>(null);
+  const pathname = usePathname();
+  const pendingRunView = useRef<{ run: EvaluationRun; isLatest: boolean } | null>(null);
   const yearRef = useRef<string | null>(null);
   const setWorkingYear = useCallback((id: string | null) => {
     if (yearRef.current === id) return;
@@ -29,6 +33,13 @@ export function CompanyProvider({ bootstrap, initialCompanyId, children }: { boo
     setYearOverride(id);
     setCompanyKey((key) => key + 1);
   }, []);
+
+  useEffect(() => {
+    if (pathname !== "/turnover-discount") {
+      pendingRunView.current = null;
+      setWorkingYear(null);
+    }
+  }, [pathname, setWorkingYear]);
 
   useEffect(() => {
     const valid = companies.find((item) => item.company.id === initialCompanyId) ?? companies[0];
@@ -51,6 +62,7 @@ export function CompanyProvider({ bootstrap, initialCompanyId, children }: { boo
     isAdministrator: selected.organization.roles.includes("administrator"),
     isFinanceApprover: selected.organization.roles.includes("finance_approver"),
     companyKey,
+    pendingRunView,
     setWorkingYear,
   };
 

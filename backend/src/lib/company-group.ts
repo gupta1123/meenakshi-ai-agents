@@ -18,6 +18,13 @@ export function groupOf(rows: Row[], companyId: string): GroupMember[] {
     .sort((a, b) => String(a.booksFrom ?? "").localeCompare(String(b.booksFrom ?? "")));
 }
 
+/** A split starts on booksFrom. Later splits own periods starting on or after their opening date. */
+export function periodBookMatches(members: GroupMember[], companyId: string, periodStart: unknown) {
+  if (typeof periodStart !== "string" || members.some(member => !member.booksFrom)) return true;
+  const owner = members.filter(member => member.booksFrom! <= periodStart).at(-1);
+  return !owner || owner.id === companyId;
+}
+
 function toMember(row: Row): GroupMember {
   return { id: row.id, name: row.tally_company_name, guid: row.tally_company_guid ?? "", booksFrom: row.tally_books_from };
 }

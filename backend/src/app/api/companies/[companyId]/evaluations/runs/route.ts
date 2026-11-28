@@ -3,7 +3,7 @@ import { MeenakshiAccessError, requireMeenakshiCompanyAccess } from "@/lib/autho
 import { isUuid } from "@/lib/security";
 import { createSupabaseAdminClient } from "@/lib/supabase/admin";
 import { collapseEvaluationRuns } from "@/lib/evaluation/run-batches";
-import { loadCompanyGroup } from "@/lib/company-group";
+import { loadCompanyGroup, periodBookMatches } from "@/lib/company-group";
 
 type RouteContext = { params: Promise<{ companyId: string }> };
 type SchemeType = "cd" | "tod";
@@ -131,7 +131,7 @@ export async function GET(request: Request, context: RouteContext) {
     // A split Tally company's years are one company on screen: with allYears=1 the runs of every year are listed together.
     const members = allYears ? await loadCompanyGroup(company.id, organization.id) : [];
     const evaluationRuns = members.length > 1
-      ? (await Promise.all(members.map(async (member) => (await loadYear(member.id)).map((run) => ({ ...run, companyId: member.id, companyYear: member.booksFrom })))))
+      ? (await Promise.all(members.map(async (member) => (await loadYear(member.id)).map((run) => ({ ...run, companyId: member.id, companyYear: member.booksFrom, periodBookMatches: periodBookMatches(members, member.id, run.period_start) })))))
           .flat().sort((x, y) => String(y.created_at).localeCompare(String(x.created_at)))
       : (await loadYear(company.id)).map((run) => ({ ...run, companyId: company.id }));
     const payload = { evaluationRuns };
